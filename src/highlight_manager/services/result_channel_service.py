@@ -6,10 +6,13 @@ from highlight_manager.config.logging import get_logger
 from highlight_manager.models.enums import ResultChannelBehavior
 from highlight_manager.models.guild_config import GuildConfig
 from highlight_manager.models.match import MatchRecord
+from highlight_manager.utils.channel_names import format_match_channel_name
 from highlight_manager.utils.exceptions import UserFacingError
 
 
 class ResultChannelService:
+    FALLBACK_RESULT_TEMPLATE = "match-{match_id}-result"
+
     def __init__(self) -> None:
         self.logger = get_logger(__name__)
 
@@ -40,7 +43,7 @@ class ResultChannelService:
                     read_message_history=True,
                 )
 
-        allowed_user_ids = {match.creator_id, *match.all_player_ids}
+        allowed_user_ids = set(match.all_player_ids) or {match.creator_id}
         for user_id in allowed_user_ids:
             member = guild.get_member(user_id)
             if member:
@@ -61,12 +64,32 @@ class ResultChannelService:
         if category is not None and not isinstance(category, discord.CategoryChannel):
             raise UserFacingError("Configured result category no longer exists.")
 
-        channel = await guild.create_text_channel(
-            name=config.result_channel_name_template.format(match_id=match.display_id),
-            category=category if isinstance(category, discord.CategoryChannel) else None,
-            overwrites=self._build_overwrites(guild, match, config),
-            reason=f"Private result channel for Match #{match.display_id}",
-        )
+        preferred_name = format_match_channel_name(config.result_channel_name_template, match)
+        fallback_name = self.FALLBACK_RESULT_TEMPLATE.format(match_id=match.display_id)
+        try:
+            channel = await guild.create_text_channel(
+                name=preferred_name,
+                category=category if isinstance(category, discord.CategoryChannel) else None,
+                overwrites=self._build_overwrites(guild, match, config),
+                reason=f"Private result channel for Match #{match.display_id}",
+            )
+        except discord.HTTPException as exc:
+            if exc.status != 400 or preferred_name.casefold() == fallback_name.casefold():
+                raise
+            self.logger.warning(
+                "result_channel_name_fallback_used",
+                guild_id=guild.id,
+                match_number=match.match_number,
+                preferred_name=preferred_name,
+                fallback_name=fallback_name,
+                error=str(exc),
+            )
+            channel = await guild.create_text_channel(
+                name=fallback_name,
+                category=category if isinstance(category, discord.CategoryChannel) else None,
+                overwrites=self._build_overwrites(guild, match, config),
+                reason=f"Private result channel for Match #{match.display_id}",
+            )
         self.logger.info(
             "result_channel_created",
             guild_id=guild.id,

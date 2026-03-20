@@ -5,11 +5,15 @@ import discord
 from highlight_manager.config.logging import get_logger
 from highlight_manager.models.guild_config import GuildConfig
 from highlight_manager.models.match import MatchRecord
+from highlight_manager.utils.channel_names import format_match_channel_name
 from highlight_manager.utils.exceptions import ConfigurationError, UserFacingError
 from highlight_manager.utils.permissions import bot_missing_permissions
 
 
 class VoiceService:
+    FALLBACK_TEAM1_TEMPLATE = "TEAM 1 - Match #{match_id}"
+    FALLBACK_TEAM2_TEMPLATE = "TEAM 2 - Match #{match_id}"
+
     def __init__(self) -> None:
         self.logger = get_logger(__name__)
 
@@ -40,14 +44,18 @@ class VoiceService:
                 "I am missing permissions to manage match voices: " + ", ".join(missing_perms)
             )
 
-        team1 = await guild.create_voice_channel(
-            config.team1_voice_name_template.format(match_id=match.display_id),
+        team1 = await self._create_voice_channel_with_fallback(
+            guild,
+            preferred_name=format_match_channel_name(config.team1_voice_name_template, match),
+            fallback_name=self.FALLBACK_TEAM1_TEMPLATE.format(match_id=match.display_id),
             category=category,
             user_limit=match.team_size,
             reason=f"Match #{match.display_id} Team 1",
         )
-        team2 = await guild.create_voice_channel(
-            config.team2_voice_name_template.format(match_id=match.display_id),
+        team2 = await self._create_voice_channel_with_fallback(
+            guild,
+            preferred_name=format_match_channel_name(config.team2_voice_name_template, match),
+            fallback_name=self.FALLBACK_TEAM2_TEMPLATE.format(match_id=match.display_id),
             category=category,
             user_limit=match.team_size,
             reason=f"Match #{match.display_id} Team 2",
@@ -121,3 +129,37 @@ class VoiceService:
                         channel_id=channel_id,
                         error=str(exc),
                     )
+
+    async def _create_voice_channel_with_fallback(
+        self,
+        guild: discord.Guild,
+        *,
+        preferred_name: str,
+        fallback_name: str,
+        category: discord.CategoryChannel,
+        user_limit: int,
+        reason: str,
+    ) -> discord.VoiceChannel:
+        try:
+            return await guild.create_voice_channel(
+                preferred_name,
+                category=category,
+                user_limit=user_limit,
+                reason=reason,
+            )
+        except discord.HTTPException as exc:
+            if exc.status != 400 or preferred_name.casefold() == fallback_name.casefold():
+                raise
+            self.logger.warning(
+                "voice_channel_name_fallback_used",
+                guild_id=guild.id,
+                preferred_name=preferred_name,
+                fallback_name=fallback_name,
+                error=str(exc),
+            )
+            return await guild.create_voice_channel(
+                fallback_name,
+                category=category,
+                user_limit=user_limit,
+                reason=reason,
+            )

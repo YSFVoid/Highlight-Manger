@@ -7,10 +7,15 @@ import discord
 from highlight_manager.config.logging import get_logger
 from highlight_manager.config.settings import Settings
 from highlight_manager.models.enums import MatchType
-from highlight_manager.models.guild_config import GuildConfig, fallback_resource_names
+from highlight_manager.models.guild_config import GuildConfig, ResourceNameConfig, fallback_resource_names
 from highlight_manager.repositories.config_repository import ConfigRepository
 from highlight_manager.utils.exceptions import ConfigurationError, UserFacingError
 from highlight_manager.utils.permissions import member_has_any_role
+
+
+_LEGACY_RESULT_CHANNEL_TEMPLATE = "match-{match_id}-result"
+_LEGACY_TEAM1_VOICE_TEMPLATE = "TEAM 1 - Match #{match_id}"
+_LEGACY_TEAM2_VOICE_TEMPLATE = "TEAM 2 - Match #{match_id}"
 
 
 class ConfigService:
@@ -27,12 +32,15 @@ class ConfigService:
         )
 
     async def get(self, guild_id: int) -> GuildConfig | None:
-        return await self.repository.get(guild_id)
+        config = await self.repository.get(guild_id)
+        if config is None:
+            return None
+        return await self._apply_default_ui_migrations(config)
 
     async def get_or_create(self, guild_id: int) -> GuildConfig:
         existing = await self.repository.get(guild_id)
         if existing:
-            return existing
+            return await self._apply_default_ui_migrations(existing)
         defaults = self.build_default_config(guild_id)
         return await self.repository.upsert(defaults)
 
@@ -90,6 +98,37 @@ class ConfigService:
         config = await self.get_or_create(guild_id)
         merged = config.model_copy(update=updates)
         return await self.repository.upsert(merged)
+
+    async def _apply_default_ui_migrations(self, config: GuildConfig) -> GuildConfig:
+        updates: dict[str, Any] = {}
+
+        resource_names = config.resource_names
+        default_names = ResourceNameConfig()
+        if self._needs_resource_name_refresh(resource_names):
+            updates["resource_names"] = default_names
+
+        if config.result_channel_name_template == _LEGACY_RESULT_CHANNEL_TEMPLATE:
+            updates["result_channel_name_template"] = GuildConfig(guild_id=config.guild_id).result_channel_name_template
+        if config.team1_voice_name_template == _LEGACY_TEAM1_VOICE_TEMPLATE:
+            updates["team1_voice_name_template"] = GuildConfig(guild_id=config.guild_id).team1_voice_name_template
+        if config.team2_voice_name_template == _LEGACY_TEAM2_VOICE_TEMPLATE:
+            updates["team2_voice_name_template"] = GuildConfig(guild_id=config.guild_id).team2_voice_name_template
+
+        if not updates:
+            return config
+        self.logger.info(
+            "config_default_ui_migration_applied",
+            guild_id=config.guild_id,
+            migrated_fields=sorted(updates.keys()),
+        )
+        return await self.repository.upsert(config.model_copy(update=updates))
+
+    def _needs_resource_name_refresh(self, resource_names: ResourceNameConfig) -> bool:
+        serialized = resource_names.model_dump()
+        if any(str(value).startswith("ð") for value in serialized.values()):
+            return True
+        legacy_plain = fallback_resource_names().model_dump()
+        return serialized == legacy_plain
 
     async def reserve_next_match_number(self, guild_id: int) -> int:
         defaults = await self.get_or_create(guild_id)

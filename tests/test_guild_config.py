@@ -3,7 +3,9 @@ from highlight_manager.models.guild_config import GuildConfig
 
 def test_result_channel_template_matches_expected_default() -> None:
     config = GuildConfig(guild_id=1)
-    assert config.result_channel_name_template == "match-{match_id}-result"
+    assert config.result_channel_name_template == "{match_type_styled}-{match_number_styled}-𝐑𝐄𝐒𝐔𝐋𝐓"
+    assert config.team1_voice_name_template == "{match_type_styled} {match_number_styled} • {team1_label_styled}"
+    assert config.team2_voice_name_template == "{match_type_styled} {match_number_styled} • {team2_label_styled}"
 
 
 def test_reward_role_defaults_match_expected_configuration() -> None:
@@ -26,6 +28,6 @@ def test_match_announcement_defaults_open_queue_ping_only() -> None:
 
 def test_default_resource_names_use_styled_unicode_labels() -> None:
     config = GuildConfig(guild_id=1)
-    assert config.resource_names.waiting_voice == "𝗪𝗮𝗶𝘁𝗶𝗻𝗴-𝗩𝗼𝗶𝗰𝗲"
-    assert config.resource_names.apostado_play_channel == "𝗔𝗽𝗼𝘀𝘁𝗮𝗱𝗼-𝗣𝗹𝗮𝘆"
-    assert config.resource_names.highlight_play_channel == "𝗛𝗶𝗴𝗵𝗹𝗶𝗴𝗵𝘁-𝗣𝗹𝗮𝘆"
+    assert config.resource_names.waiting_voice == "𝐖𝐀𝐈𝐓𝐈𝐍𝐆-𝐕𝐎𝐈𝐂𝐄"
+    assert config.resource_names.apostado_play_channel == "𝐀𝐏𝐎𝐒𝐓𝐀𝐃𝐎-𝐏𝐋𝐀𝐘"
+    assert config.resource_names.highlight_play_channel == "𝐇𝐈𝐆𝐇𝐋𝐈𝐆𝐇𝐓-𝐏𝐋𝐀𝐘"

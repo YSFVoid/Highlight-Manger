@@ -413,6 +413,7 @@ class MatchService:
         await self.vote_service.clear_votes(match)
         match.status = MatchStatus.CANCELED
         match.canceled_at = utcnow()
+        match.metadata["cancel_reason"] = reason
         match.team1_voice_channel_id = None
         match.team2_voice_channel_id = None
         if match.result_channel_id:
@@ -882,10 +883,18 @@ class MatchService:
             return
         try:
             message = await channel.fetch_message(match.public_message_id)
-            if match.queue_opened_at is None:
-                await message.edit(embed=build_match_room_setup_embed(match, guild), view=self._build_room_info_view(match))
+            if match.status == MatchStatus.OPEN and match.queue_opened_at is None:
+                await message.edit(
+                    embed=build_match_room_setup_embed(match, guild),
+                    view=self._build_room_info_view(match),
+                )
+            elif match.status == MatchStatus.OPEN:
+                await message.edit(
+                    embed=build_match_embed(match, guild),
+                    view=self._build_queue_view(match),
+                )
             else:
-                await message.edit(embed=build_match_embed(match, guild), view=self._build_queue_view(match))
+                await message.edit(embed=build_match_embed(match, guild), view=None)
         except discord.NotFound:
             self.logger.warning("match_public_message_missing", guild_id=guild.id, match_number=match.match_number, message_id=match.public_message_id)
         except discord.HTTPException as exc:

@@ -495,7 +495,7 @@ async def test_submit_room_info_opens_queue_and_posts_privately() -> None:
     assert result.match.room_info is not None
     assert "now open for players" in result.message
     public_message = apostado_channel.messages[result.match.public_message_id]
-    assert public_message.payload["embed"].title == "Apostado 2v2 Match"
+    assert public_message.payload["embed"].title == "Apostado 2v2 Queue Open"
     result_channel_id = result.match.result_channel_id
     result_channel = guild.get_channel(result_channel_id)
     assert isinstance(result_channel, FakeTextChannel)

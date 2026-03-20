@@ -1,21 +1,21 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import Field
 
 from highlight_manager.models.base import AppModel
-from datetime import datetime
-
 from highlight_manager.models.common import BootstrapSummary, PointRule
 from highlight_manager.models.enums import MatchMode, MatchType, ResultChannelBehavior
 
 
 class ResourceNameConfig(AppModel):
-    waiting_voice: str = "𝗪𝗮𝗶𝘁𝗶𝗻𝗴-𝗩𝗼𝗶𝗰𝗲"
-    temp_voice_category: str = "𝗛𝗶𝗴𝗵𝗹𝗶𝗴𝗵𝘁-𝗠𝗮𝘁𝗰𝗵-𝗩𝗼𝗶𝗰𝗲𝘀"
-    result_category: str = "𝗠𝗮𝘁𝗰𝗵-𝗥𝗲𝘀𝘂𝗹𝘁𝘀"
-    log_channel: str = "𝗛𝗶𝗴𝗵𝗹𝗶𝗴𝗵𝘁-𝗟𝗼𝗴𝘀"
-    apostado_play_channel: str = "𝗔𝗽𝗼𝘀𝘁𝗮𝗱𝗼-𝗣𝗹𝗮𝘆"
-    highlight_play_channel: str = "𝗛𝗶𝗴𝗵𝗹𝗶𝗴𝗵𝘁-𝗣𝗹𝗮𝘆"
+    waiting_voice: str = "𝐖𝐀𝐈𝐓𝐈𝐍𝐆-𝐕𝐎𝐈𝐂𝐄"
+    temp_voice_category: str = "𝐇𝐈𝐆𝐇𝐋𝐈𝐆𝐇𝐓-𝐌𝐀𝐓𝐂𝐇-𝐕𝐎𝐈𝐂𝐄𝐒"
+    result_category: str = "𝐌𝐀𝐓𝐂𝐇-𝐑𝐄𝐒𝐔𝐋𝐓𝐒"
+    log_channel: str = "𝐇𝐈𝐆𝐇𝐋𝐈𝐆𝐇𝐓-𝐋𝐎𝐆𝐒"
+    apostado_play_channel: str = "𝐀𝐏𝐎𝐒𝐓𝐀𝐃𝐎-𝐏𝐋𝐀𝐘"
+    highlight_play_channel: str = "𝐇𝐈𝐆𝐇𝐋𝐈𝐆𝐇𝐓-𝐏𝐋𝐀𝐘"
 
 
 def fallback_resource_names() -> ResourceNameConfig:
@@ -67,6 +67,7 @@ def default_point_rules() -> dict[str, dict[str, PointRule]]:
         },
     }
 
+
 class GuildFeatures(AppModel):
     creator_auto_join_team1: bool = True
     auto_create_waiting_voice: bool = True
@@ -99,9 +100,9 @@ class GuildConfig(AppModel):
     point_rules: dict[str, dict[str, PointRule]] = Field(default_factory=default_point_rules)
     result_channel_behavior: ResultChannelBehavior = ResultChannelBehavior.DELETE
     result_channel_delete_delay_seconds: int = 600
-    result_channel_name_template: str = "match-{match_id}-result"
-    team1_voice_name_template: str = "TEAM 1 - Match #{match_id}"
-    team2_voice_name_template: str = "TEAM 2 - Match #{match_id}"
+    result_channel_name_template: str = "{match_type_styled}-{match_number_styled}-𝐑𝐄𝐒𝐔𝐋𝐓"
+    team1_voice_name_template: str = "{match_type_styled} {match_number_styled} • {team1_label_styled}"
+    team2_voice_name_template: str = "{match_type_styled} {match_number_styled} • {team2_label_styled}"
     ping_here_on_match_create: bool = True
     ping_here_on_match_ready: bool = False
     private_match_key_required: bool = False

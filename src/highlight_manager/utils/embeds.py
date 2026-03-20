@@ -69,6 +69,59 @@ def _match_status_label(match: MatchRecord) -> str:
     }[match.status]
 
 
+def _match_public_title(match: MatchRecord) -> str:
+    match_name = f"{match.match_type.label} {match.mode.value}"
+    if match.status == MatchStatus.OPEN and match.queue_opened_at is None:
+        return f"{match_name} Match Setup"
+    if match.status == MatchStatus.OPEN:
+        return f"{match_name} Queue Open"
+    if match.status in {MatchStatus.FULL, MatchStatus.IN_PROGRESS, MatchStatus.VOTING}:
+        return f"{match_name} Match Started"
+    if match.status == MatchStatus.CANCELED:
+        return f"{match_name} Match Canceled"
+    if match.status == MatchStatus.EXPIRED:
+        return f"{match_name} Match Expired"
+    return f"{match_name} Match Finished"
+
+
+def _match_public_description(match: MatchRecord, guild: discord.Guild | None) -> str:
+    base = [
+        f"Match ID: **#{match.display_id}**",
+        f"Host: {_member_label(guild, match.creator_id)}",
+        f"Status: **{_match_status_label(match)}**",
+    ]
+    if match.status == MatchStatus.OPEN and match.queue_opened_at is None:
+        base.append("Room access is still pending. The public queue will unlock after room info is submitted.")
+    elif match.status == MatchStatus.OPEN:
+        base.append("The queue is now live. Players can join a team below before the timer runs out.")
+    elif match.status in {MatchStatus.FULL, MatchStatus.IN_PROGRESS, MatchStatus.VOTING}:
+        base.append("Teams are locked. Players are moving through private match voice and result-room flow now.")
+    elif match.status == MatchStatus.CANCELED:
+        reason = match.metadata.get("cancel_reason")
+        base.append("This match has been canceled and the queue is closed.")
+        if reason:
+            base.append(f"Reason: **{reason}**")
+    elif match.status == MatchStatus.EXPIRED:
+        base.append("Voting timed out. The match was closed and the configured timeout penalties were applied.")
+    else:
+        base.append("This match is finished. Final points and MVP results were posted in the private result room.")
+    return "\n".join(base)
+
+
+def _match_public_footer(match: MatchRecord) -> str:
+    if match.status == MatchStatus.OPEN and match.queue_opened_at is None:
+        return "Use Enter Room Info to unlock the queue safely."
+    if match.status == MatchStatus.OPEN:
+        return "Join Team 1 or Team 2 below before the queue expires."
+    if match.status in {MatchStatus.FULL, MatchStatus.IN_PROGRESS, MatchStatus.VOTING}:
+        return "Join buttons are disabled because the match is already live."
+    if match.status == MatchStatus.CANCELED:
+        return "This match was canceled. The public queue card is now locked."
+    if match.status == MatchStatus.EXPIRED:
+        return "This match expired before a valid result was completed."
+    return "This match is closed. Check the private result room for the final summary."
+
+
 def _room_info_state(match: MatchRecord) -> str:
     if match.room_info is None:
         return "Pending"
@@ -134,7 +187,7 @@ def _top_rank_badge(index: int) -> str:
 
 def build_match_room_setup_embed(match: MatchRecord, guild: discord.Guild | None) -> discord.Embed:
     embed = discord.Embed(
-        title=f"{match.match_type.label} {match.mode.value} Match Setup",
+        title=_match_public_title(match),
         description=(
             f"Match ID: **#{match.display_id}**\n"
             f"Host: {_member_label(guild, match.creator_id)}\n\n"
@@ -165,12 +218,8 @@ def build_match_room_setup_embed(match: MatchRecord, guild: discord.Guild | None
 def build_match_embed(match: MatchRecord, guild: discord.Guild | None) -> discord.Embed:
     filled_slots = len(match.all_player_ids)
     embed = discord.Embed(
-        title=f"{match.match_type.label} {match.mode.value} Match",
-        description=(
-            f"Match ID: **#{match.display_id}**\n"
-            f"Host: {_member_label(guild, match.creator_id)}\n"
-            f"Status: **{_match_status_label(match)}**"
-        ),
+        title=_match_public_title(match),
+        description=_match_public_description(match, guild),
         colour=_match_colour(match),
         timestamp=match.created_at,
     )
@@ -194,10 +243,7 @@ def build_match_embed(match: MatchRecord, guild: discord.Guild | None) -> discor
         value=_format_team(guild, match.team2_player_ids, match.team_size),
         inline=False,
     )
-    footer_text = "Join a team using the buttons below."
-    if match.status in {MatchStatus.FULL, MatchStatus.IN_PROGRESS, MatchStatus.VOTING}:
-        footer_text = "Players are moving into voice. Sensitive room details stay private."
-    embed.set_footer(text=footer_text)
+    embed.set_footer(text=_match_public_footer(match))
     _apply_member_art(embed, guild, match.creator_id)
     return embed
 
@@ -240,6 +286,7 @@ def build_result_room_embed(match: MatchRecord, guild: discord.Guild | None) -> 
         title=f"Private Match Room #{match.display_id}",
         description=(
             "This room is private.\n"
+            "Only players in this match plus configured Highlight admins or staff can see it.\n"
             "Use it for room access, voting, result discussion, and the final summary."
         ),
         colour=discord.Colour.orange(),
@@ -257,7 +304,7 @@ def build_result_room_embed(match: MatchRecord, guild: discord.Guild | None) -> 
     )
     players = "\n".join(_member_label(guild, user_id) for user_id in match.all_player_ids) or "Only the host is here so far."
     embed.add_field(name="Players", value=players, inline=False)
-    embed.set_footer(text="Creator and staff can update room details here whenever needed.")
+    embed.set_footer(text="Sensitive room details stay here and are removed automatically after the match closes.")
     return embed
 
 
