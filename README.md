@@ -140,6 +140,16 @@ sudo supervisorctl update
 sudo supervisorctl status highlight-manager
 ```
 
+### Pterodactyl
+
+If you are hosting inside a Pterodactyl Python server, upload this repo and use:
+
+```bash
+bash /home/container/start.sh
+```
+
+Then set the required environment variables in the panel Startup or Environment section. Full panel-specific notes are in [deploy/PTERODACTYL.md](deploy/PTERODACTYL.md).
+
 ## Setup Guide
 
 1. Invite the bot with the permissions listed below.
