@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import discord
 import pytest
 
 from highlight_manager.models.enums import MatchType
@@ -8,7 +9,9 @@ from highlight_manager.services.config_service import ConfigService
 from highlight_manager.utils.exceptions import UserFacingError
 
 
-class FakeChannel:
+class FakeChannel(discord.TextChannel):
+    __slots__ = ("id", "guild", "mention")
+
     def __init__(self, channel_id: int, guild, mention: str) -> None:
         self.id = channel_id
         self.guild = guild
@@ -17,6 +20,7 @@ class FakeChannel:
 
 class FakeGuild:
     def __init__(self, channels: dict[int, FakeChannel]) -> None:
+        self.id = 1
         self._channels = channels
 
     def get_channel(self, channel_id: int):

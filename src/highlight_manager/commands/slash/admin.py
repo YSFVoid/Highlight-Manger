@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Awaitable, Callable
 import discord
 from discord import app_commands
 
+from highlight_manager.config.logging import get_logger
 from highlight_manager.models.enums import AuditAction, ResultSource
 from highlight_manager.utils.embeds import build_config_embed
 from highlight_manager.utils.exceptions import HighlightError
@@ -19,6 +20,9 @@ class InteractionResponsePayload:
     embed: discord.Embed | None = None
 
 
+LOGGER = get_logger(__name__)
+
+
 async def _send_interaction_response(
     interaction: discord.Interaction,
     *,
@@ -26,10 +30,18 @@ async def _send_interaction_response(
     embed: discord.Embed | None = None,
     ephemeral: bool = True,
 ) -> None:
-    if interaction.response.is_done():
-        await interaction.followup.send(content=content, embed=embed, ephemeral=ephemeral)
-        return
-    await interaction.response.send_message(content=content, embed=embed, ephemeral=ephemeral)
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(content=content, embed=embed, ephemeral=ephemeral)
+            return
+        await interaction.response.send_message(content=content, embed=embed, ephemeral=ephemeral)
+    except discord.NotFound:
+        LOGGER.warning(
+            "interaction_response_expired",
+            guild_id=interaction.guild.id if interaction.guild else None,
+            user_id=interaction.user.id if interaction.user else None,
+            interaction_responded=interaction.response.is_done(),
+        )
 
 
 def _interaction_log_context(
@@ -95,7 +107,15 @@ async def _ensure_setup_admin(bot: "HighlightBot", interaction: discord.Interact
 async def _defer_ephemeral_response(interaction: discord.Interaction) -> bool:
     if interaction.response.is_done():
         return False
-    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+    except discord.NotFound:
+        LOGGER.warning(
+            "interaction_defer_expired",
+            guild_id=interaction.guild.id if interaction.guild else None,
+            user_id=interaction.user.id if interaction.user else None,
+        )
+        return False
     return True
 
 

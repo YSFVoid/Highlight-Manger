@@ -43,6 +43,10 @@ class MatchRepository(BaseRepository[MatchRecord]):
         )
         return self._to_model(updated) or match
 
+    async def delete(self, guild_id: int, match_number: int) -> bool:
+        result = await self.collection.delete_one({"guild_id": guild_id, "match_number": match_number})
+        return result.deleted_count > 0
+
     async def list_active(
         self,
         guild_id: int | None = None,

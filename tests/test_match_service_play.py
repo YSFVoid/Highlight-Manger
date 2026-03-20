@@ -3,9 +3,12 @@ from types import SimpleNamespace
 import discord
 import pytest
 
+from highlight_manager.models.enums import MatchMode, MatchStatus, MatchType
 from highlight_manager.commands.prefix.gameplay import GameplayCog
 from highlight_manager.models.guild_config import GuildConfig
+from highlight_manager.models.match import MatchRecord, MatchRoomInfo
 from highlight_manager.services.match_service import MatchService
+from highlight_manager.utils.dates import minutes_from_now, utcnow
 from highlight_manager.utils.exceptions import ConfigurationError, UserFacingError
 
 
@@ -39,6 +42,7 @@ class FakeMatchRepository:
     def __init__(self) -> None:
         self.created: list = []
         self.replaced: list = []
+        self.deleted: list[tuple[int, int]] = []
 
     async def create(self, match):
         self.created.append(match)
@@ -47,6 +51,10 @@ class FakeMatchRepository:
     async def replace(self, match):
         self.replaced.append(match)
         return match
+
+    async def delete(self, guild_id: int, match_number: int):
+        self.deleted.append((guild_id, match_number))
+        return True
 
 
 class FakeConfigService:
@@ -144,7 +152,7 @@ class FakeGuild:
         return self._members.get(user_id)
 
 
-class FakeTextChannel(discord.abc.GuildChannel):
+class FakeTextChannel(discord.TextChannel):
     __slots__ = ("id", "guild", "mention", "sent_payloads", "fail_send")
 
     def __init__(self, channel_id: int, guild: FakeGuild, mention: str, *, fail_send: bool = False) -> None:
@@ -223,13 +231,18 @@ def build_service(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("match_type_input", "channel_attr", "expected_normalized"),
+    ("mode_input", "match_type_input", "channel_attr", "expected_normalized"),
     [
-        ("apos", "apostado", "apostado"),
-        ("high", "highlight", "highlight"),
+        ("1v1", "high", "highlight", "highlight"),
+        ("2v2", "apos", "apostado", "apostado"),
+        ("2v2", "high", "highlight", "highlight"),
+        ("3v3", "high", "highlight", "highlight"),
+        ("4v4", "apos", "apostado", "apostado"),
+        ("4v4", "high", "highlight", "highlight"),
     ],
 )
 async def test_create_match_accepts_aliases_and_creates_match(
+    mode_input: str,
     match_type_input: str,
     channel_attr: str,
     expected_normalized: str,
@@ -248,13 +261,13 @@ async def test_create_match_accepts_aliases_and_creates_match(
         channel,
         guild,
         creator,
-        "2v2",
+        mode_input,
         match_type_input,
-        raw_command_content=f"!play 2v2 {match_type_input}",
+        raw_command_content=f"!play {mode_input} {match_type_input}",
     )
 
     assert result.match.match_type.value == expected_normalized
-    assert result.match.mode.value == "2v2"
+    assert result.match.mode.value == mode_input
     assert len(repository.created) == 1
     assert repository.created[0].creator_id == creator.id
     assert any(event == "play_command_completed" for _, event, _ in logger.calls)
@@ -387,6 +400,7 @@ async def test_create_match_logs_traceback_context_on_unexpected_failure() -> No
         level == "exception" and event == "play_command_unexpected_failure" and kwargs["validation_stage"] == "post_public_message"
         for level, event, kwargs in logger.calls
     )
+    assert (123, 1) in service.repository.deleted
 
 
 @pytest.mark.asyncio
@@ -417,3 +431,52 @@ async def test_play_command_replies_with_clean_internal_error_on_unexpected_fail
 
     assert ctx.replies == ["I hit an internal error while processing that request."]
     assert any(event == "play_command_handler_failed" for _, event, _ in cog.logger.calls)
+
+
+def test_rank_command_registers_r_alias() -> None:
+    cog = GameplayCog(SimpleNamespace())
+    command_names = {command.name: command for command in cog.get_commands()}
+    assert "rank" in command_names
+    assert "r" in command_names["rank"].aliases
+
+
+@pytest.mark.asyncio
+async def test_room_info_is_posted_to_private_result_channel_once_per_channel() -> None:
+    config = GuildConfig(
+        guild_id=123,
+        apostado_play_channel_id=10,
+        highlight_play_channel_id=20,
+        waiting_voice_channel_id=30,
+        temp_voice_category_id=40,
+    )
+    service, guild, apostado_channel, _, creator, _, _ = build_service(config)
+    result_channel = FakeTextChannel(55, guild, "#match-001-result")
+    guild.add_channel(result_channel)
+
+    match = MatchRecord(
+        guild_id=123,
+        match_number=1,
+        creator_id=creator.id,
+        mode=MatchMode.TWO_V_TWO,
+        match_type=MatchType.HIGHLIGHT,
+        status=MatchStatus.IN_PROGRESS,
+        team1_player_ids=[creator.id],
+        team2_player_ids=[77],
+        result_channel_id=result_channel.id,
+        created_at=utcnow(),
+        queue_expires_at=minutes_from_now(5),
+        room_info=MatchRoomInfo(
+            room_id="123456",
+            password="secret",
+            private_match_key="ABCD",
+            submitted_by=creator.id,
+        ),
+    )
+
+    updated_match = await service._ensure_room_info_available_in_result_channel(guild, match)
+    updated_match = await service._ensure_room_info_available_in_result_channel(guild, updated_match)
+
+    assert updated_match.metadata["room_info_posted_channel_id"] == result_channel.id
+    assert len(result_channel.sent_payloads) == 1
+    assert result_channel.sent_payloads[0]["embed"].title == "Room Info • Match #001"
+    assert apostado_channel.sent_payloads == []

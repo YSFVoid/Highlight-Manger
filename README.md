@@ -19,6 +19,7 @@ Ranks are stored internally and synced to nicknames as `Rank X UserName`. Rank i
 - `!play <mode> <type>`
 - `!profile`
 - `!rank`
+- `!r`
 - `!leaderboard`
 - `!top`
 - `!stats [user]`
@@ -103,6 +104,7 @@ Season reward role.
 - Password is optional.
 - Private Match Key is optional unless the guild config requires it.
 - Sensitive room details are only posted in the private match result room, never in the public play room.
+- If the private result room is recreated later, the stored room info is reposted there automatically.
 
 ## Leaderboard / Profile UI
 
@@ -127,6 +129,8 @@ The bot auto-creates or reuses these resources during `/setup`:
 - `Professional Highlight Player`
 
 Default channel and category names use stylized Unicode labels. If Discord rejects a stylized name for a resource type, setup falls back cleanly to the ASCII legacy name instead of crashing.
+
+Configured rooms, voice channels, categories, and reward roles are used by their Discord IDs at runtime. Renaming a configured resource later does not break the bot.
 
 ## Bootstrap Behavior
 

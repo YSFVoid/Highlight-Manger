@@ -157,6 +157,14 @@ class HighlightBot(commands.Bot):
 
     async def on_command_error(self, context: commands.Context, exception: commands.CommandError) -> None:
         original = getattr(exception, "original", exception)
+        if isinstance(original, commands.CommandNotFound):
+            self.logger.info(
+                "prefix_command_not_found",
+                guild_id=context.guild.id if context.guild else None,
+                user_id=context.author.id if context.author else None,
+                message_content=context.message.content if context.message else None,
+            )
+            return
         if isinstance(original, HighlightError):
             await context.reply(str(original))
             return
@@ -193,10 +201,19 @@ def main() -> None:
     async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
         original = getattr(error, "original", error)
         if isinstance(original, HighlightError):
-            if interaction.response.is_done():
-                await interaction.followup.send(str(original), ephemeral=True)
-            else:
-                await interaction.response.send_message(str(original), ephemeral=True)
+            try:
+                if interaction.response.is_done():
+                    await interaction.followup.send(str(original), ephemeral=True)
+                else:
+                    await interaction.response.send_message(str(original), ephemeral=True)
+            except discord.NotFound:
+                bot.logger.warning(
+                    "app_command_error_response_expired",
+                    command=interaction.command.qualified_name if interaction.command else None,
+                    guild_id=interaction.guild.id if interaction.guild else None,
+                    user_id=interaction.user.id if interaction.user else None,
+                    interaction_responded=interaction.response.is_done(),
+                )
             return
         bot.logger.exception(
             "app_command_error",
@@ -206,10 +223,19 @@ def main() -> None:
             interaction_responded=interaction.response.is_done(),
             error=str(original),
         )
-        if interaction.response.is_done():
-            await interaction.followup.send("I hit an internal error while processing that request.", ephemeral=True)
-        else:
-            await interaction.response.send_message("I hit an internal error while processing that request.", ephemeral=True)
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send("I hit an internal error while processing that request.", ephemeral=True)
+            else:
+                await interaction.response.send_message("I hit an internal error while processing that request.", ephemeral=True)
+        except discord.NotFound:
+            bot.logger.warning(
+                "app_command_error_response_expired",
+                command=interaction.command.qualified_name if interaction.command else None,
+                guild_id=interaction.guild.id if interaction.guild else None,
+                user_id=interaction.user.id if interaction.user else None,
+                interaction_responded=interaction.response.is_done(),
+            )
 
     bot.run(settings.discord_token, log_handler=None)
 

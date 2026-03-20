@@ -36,6 +36,56 @@ class ConfigService:
         defaults = self.build_default_config(guild_id)
         return await self.repository.upsert(defaults)
 
+    def resolve_configured_channel(
+        self,
+        guild: discord.Guild,
+        channel_id: int | None,
+        *,
+        resource_key: str,
+        expected_types: type[discord.abc.GuildChannel] | tuple[type[discord.abc.GuildChannel], ...],
+    ) -> discord.abc.GuildChannel | None:
+        channel = guild.get_channel(channel_id) if channel_id else None
+        resolved = channel is not None and isinstance(channel, expected_types)
+        expected_names = expected_types if isinstance(expected_types, tuple) else (expected_types,)
+        self.logger.info(
+            "config_resource_lookup",
+            guild_id=getattr(guild, "id", None),
+            resource_key=resource_key,
+            resource_id=channel_id,
+            resolved=resolved,
+            actual_type=type(channel).__name__ if channel is not None else None,
+            expected_types=[item.__name__ for item in expected_names],
+        )
+        if resolved:
+            return channel
+        if channel is not None:
+            self.logger.warning(
+                "config_resource_type_mismatch",
+                guild_id=getattr(guild, "id", None),
+                resource_key=resource_key,
+                resource_id=channel_id,
+                actual_type=type(channel).__name__,
+                expected_types=[item.__name__ for item in expected_names],
+            )
+        return None
+
+    def resolve_configured_role(
+        self,
+        guild: discord.Guild,
+        role_id: int | None,
+        *,
+        resource_key: str,
+    ) -> discord.Role | None:
+        role = guild.get_role(role_id) if role_id else None
+        self.logger.info(
+            "config_role_lookup",
+            guild_id=getattr(guild, "id", None),
+            resource_key=resource_key,
+            resource_id=role_id,
+            resolved=role is not None,
+        )
+        return role
+
     async def update(self, guild_id: int, updates: dict[str, Any]) -> GuildConfig:
         config = await self.get_or_create(guild_id)
         merged = config.model_copy(update=updates)
@@ -56,8 +106,24 @@ class ConfigService:
         updates: dict[str, Any] = {}
         created = dict(config.setup_created_resources)
         fallback_names = fallback_resource_names()
-        waiting_exists = isinstance(guild.get_channel(config.waiting_voice_channel_id), discord.VoiceChannel) if config.waiting_voice_channel_id else False
-        temp_exists = isinstance(guild.get_channel(config.temp_voice_category_id), discord.CategoryChannel) if config.temp_voice_category_id else False
+        waiting_exists = (
+            self.resolve_configured_channel(
+                guild,
+                config.waiting_voice_channel_id,
+                resource_key="waiting_voice_channel_id",
+                expected_types=discord.VoiceChannel,
+            )
+            is not None
+        )
+        temp_exists = (
+            self.resolve_configured_channel(
+                guild,
+                config.temp_voice_category_id,
+                resource_key="temp_voice_category_id",
+                expected_types=discord.CategoryChannel,
+            )
+            is not None
+        )
 
         if config.features.auto_create_waiting_voice and not waiting_exists:
             waiting = await self._create_voice_channel_with_fallback(
@@ -99,7 +165,16 @@ class ConfigService:
             )
         if channel.id == allowed_channel_id:
             return
-        allowed_channel = channel.guild.get_channel(allowed_channel_id)
+        allowed_channel = self.resolve_configured_channel(
+            channel.guild,
+            allowed_channel_id,
+            resource_key=(
+                "apostado_play_channel_id"
+                if match_type == MatchType.APOSTADO
+                else "highlight_play_channel_id"
+            ),
+            expected_types=discord.abc.GuildChannel,
+        )
         if allowed_channel is not None and hasattr(allowed_channel, "mention"):
             raise UserFacingError(f"You can only use this command in {allowed_channel.mention}.")
         raise UserFacingError("Use match commands only in the configured play room.")
@@ -111,13 +186,12 @@ class ConfigService:
         *,
         create_missing: bool,
     ) -> tuple[GuildConfig, discord.Role | None, bool]:
-        role = guild.get_role(config.season_reward_role_id) if config.season_reward_role_id else None
+        role = self.resolve_configured_role(
+            guild,
+            config.season_reward_role_id,
+            resource_key="season_reward_role_id",
+        )
         created = False
-        if role is None:
-            role = discord.utils.find(
-                lambda item: item.name.lower() == config.season_reward_role_name.lower(),
-                guild.roles,
-            )
         if role is None and create_missing and config.features.auto_create_season_reward_role:
             role = await guild.create_role(
                 name=config.season_reward_role_name,
@@ -145,13 +219,12 @@ class ConfigService:
         *,
         create_missing: bool,
     ) -> tuple[GuildConfig, discord.Role | None, bool]:
-        role = guild.get_role(config.mvp_reward_role_id) if config.mvp_reward_role_id else None
+        role = self.resolve_configured_role(
+            guild,
+            config.mvp_reward_role_id,
+            resource_key="mvp_reward_role_id",
+        )
         created = False
-        if role is None:
-            role = discord.utils.find(
-                lambda item: item.name.lower() == config.mvp_reward_role_name.lower(),
-                guild.roles,
-            )
         if role is None and create_missing and config.features.auto_create_mvp_reward_role:
             role = await guild.create_role(
                 name=config.mvp_reward_role_name,
@@ -226,12 +299,60 @@ class ConfigService:
         created_resources: list[str] = []
         created_ids = dict(config.setup_created_resources)
         fallback_names = fallback_resource_names()
-        apostado_exists = isinstance(guild.get_channel(config.apostado_play_channel_id), discord.TextChannel) if config.apostado_play_channel_id else False
-        highlight_exists = isinstance(guild.get_channel(config.highlight_play_channel_id), discord.TextChannel) if config.highlight_play_channel_id else False
-        waiting_exists = isinstance(guild.get_channel(config.waiting_voice_channel_id), discord.VoiceChannel) if config.waiting_voice_channel_id else False
-        temp_exists = isinstance(guild.get_channel(config.temp_voice_category_id), discord.CategoryChannel) if config.temp_voice_category_id else False
-        result_exists = isinstance(guild.get_channel(config.result_category_id), discord.CategoryChannel) if config.result_category_id else False
-        log_exists = isinstance(guild.get_channel(config.log_channel_id), discord.TextChannel) if config.log_channel_id else False
+        apostado_exists = (
+            self.resolve_configured_channel(
+                guild,
+                config.apostado_play_channel_id,
+                resource_key="apostado_play_channel_id",
+                expected_types=discord.TextChannel,
+            )
+            is not None
+        )
+        highlight_exists = (
+            self.resolve_configured_channel(
+                guild,
+                config.highlight_play_channel_id,
+                resource_key="highlight_play_channel_id",
+                expected_types=discord.TextChannel,
+            )
+            is not None
+        )
+        waiting_exists = (
+            self.resolve_configured_channel(
+                guild,
+                config.waiting_voice_channel_id,
+                resource_key="waiting_voice_channel_id",
+                expected_types=discord.VoiceChannel,
+            )
+            is not None
+        )
+        temp_exists = (
+            self.resolve_configured_channel(
+                guild,
+                config.temp_voice_category_id,
+                resource_key="temp_voice_category_id",
+                expected_types=discord.CategoryChannel,
+            )
+            is not None
+        )
+        result_exists = (
+            self.resolve_configured_channel(
+                guild,
+                config.result_category_id,
+                resource_key="result_category_id",
+                expected_types=discord.CategoryChannel,
+            )
+            is not None
+        )
+        log_exists = (
+            self.resolve_configured_channel(
+                guild,
+                config.log_channel_id,
+                resource_key="log_channel_id",
+                expected_types=discord.TextChannel,
+            )
+            is not None
+        )
 
         if create_missing and apostado_play_channel is None and not apostado_exists:
             apostado_play_channel = await self._create_text_channel_with_fallback(
@@ -340,17 +461,46 @@ class ConfigService:
 
         return await self.update(guild.id, updates), created_resources
 
-    async def validate_ready_for_matches(self, guild_id: int) -> GuildConfig:
+    async def validate_ready_for_matches(self, guild: discord.Guild | int) -> GuildConfig:
+        guild_id = guild.id if isinstance(guild, discord.Guild) else guild
         config = await self.get_or_create(guild_id)
         missing = []
         if not config.apostado_play_channel_id:
             missing.append("Apostado play room")
+        elif isinstance(guild, discord.Guild) and self.resolve_configured_channel(
+            guild,
+            config.apostado_play_channel_id,
+            resource_key="apostado_play_channel_id",
+            expected_types=discord.TextChannel,
+        ) is None:
+            missing.append("Apostado play room (configured channel no longer exists)")
         if not config.highlight_play_channel_id:
             missing.append("Highlight play room")
+        elif isinstance(guild, discord.Guild) and self.resolve_configured_channel(
+            guild,
+            config.highlight_play_channel_id,
+            resource_key="highlight_play_channel_id",
+            expected_types=discord.TextChannel,
+        ) is None:
+            missing.append("Highlight play room (configured channel no longer exists)")
         if not config.waiting_voice_channel_id:
             missing.append("Waiting Voice channel")
+        elif isinstance(guild, discord.Guild) and self.resolve_configured_channel(
+            guild,
+            config.waiting_voice_channel_id,
+            resource_key="waiting_voice_channel_id",
+            expected_types=discord.VoiceChannel,
+        ) is None:
+            missing.append("Waiting Voice channel (configured channel no longer exists)")
         if not config.temp_voice_category_id:
             missing.append("Temporary voice category")
+        elif isinstance(guild, discord.Guild) and self.resolve_configured_channel(
+            guild,
+            config.temp_voice_category_id,
+            resource_key="temp_voice_category_id",
+            expected_types=discord.CategoryChannel,
+        ) is None:
+            missing.append("Temporary voice category (configured category no longer exists)")
         if missing:
             raise ConfigurationError(
                 "Missing required setup: " + ", ".join(missing) + ". Run /setup or /config first."

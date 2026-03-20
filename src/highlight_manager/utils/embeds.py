@@ -215,7 +215,7 @@ def build_room_info_embed(match: MatchRecord, guild: discord.Guild | None) -> di
     room_info = match.room_info
     embed = discord.Embed(
         title=f"Room Info • Match #{match.display_id}",
-        description="Private room access details for this match.",
+        description="Private room access details for this match. Players should use this information to enter the room.",
         colour=discord.Colour.teal(),
     )
     if room_info is None:
@@ -284,47 +284,53 @@ def build_profile_embed(
     profile: PlayerProfile,
     season_name: str | None = None,
 ) -> discord.Embed:
+    display_name = _member_name(guild, profile.user_id)
     embed = discord.Embed(
-        title="Player Profile",
+        title=f"{display_name} | Player Profile",
         description=(
-            f"Member: {_member_label(guild, profile.user_id)}\n"
-            f"Rank: **{_rank_label(profile)}**\n"
-            f"Season: **{season_name or 'Active Season'}**"
+            f"{_member_label(guild, profile.user_id)}\n"
+            f"Rank Position: **{_rank_label(profile)}**\n"
+            f"Current Season: **{season_name or 'Active Season'}**"
         ),
         colour=discord.Colour.green(),
     )
     embed.add_field(
-        name="Current Season",
+        name="Season Snapshot",
         value=(
             f"Points: **{profile.current_points}**\n"
-            f"Matches: **{profile.season_stats.matches_played}**\n"
-            f"Wins: **{profile.season_stats.wins}**\n"
-            f"Losses: **{profile.season_stats.losses}**"
+            f"Record: **{profile.season_stats.wins}W / {profile.season_stats.losses}L**\n"
+            f"Matches Played: **{profile.season_stats.matches_played}**"
         ),
-        inline=True,
+        inline=False,
     )
     embed.add_field(
-        name="MVP",
+        name="MVP Summary",
         value=(
             f"Winner MVP: **{profile.mvp_winner_count}**\n"
             f"Loser MVP: **{profile.mvp_loser_count}**\n"
             f"Season MVP Wins: **{profile.season_stats.mvp_wins}**\n"
             f"Season MVP Losses: **{profile.season_stats.mvp_losses}**"
         ),
-        inline=True,
+        inline=False,
     )
     embed.add_field(
         name="Lifetime Summary",
         value=(
             f"Lifetime Points: **{profile.lifetime_points}**\n"
-            f"Matches: **{profile.lifetime_stats.matches_played}**\n"
-            f"Wins: **{profile.lifetime_stats.wins}**\n"
-            f"Losses: **{profile.lifetime_stats.losses}**"
+            f"Record: **{profile.lifetime_stats.wins}W / {profile.lifetime_stats.losses}L**\n"
+            f"Matches Played: **{profile.lifetime_stats.matches_played}**\n"
+            f"Lifetime MVP Wins: **{profile.lifetime_stats.mvp_wins}**\n"
+            f"Lifetime MVP Losses: **{profile.lifetime_stats.mvp_losses}**"
         ),
         inline=False,
     )
+    status_lines = []
+    if profile.manual_rank_override == 0:
+        status_lines.append("Manual Rank 0 override is active.")
     if profile.blacklisted:
-        embed.add_field(name="Status", value="Blacklisted from match participation", inline=False)
+        status_lines.append("Blacklisted from match participation.")
+    if status_lines:
+        embed.add_field(name="Status", value="\n".join(status_lines), inline=False)
     if guild is not None:
         member = guild.get_member(profile.user_id)
         member_avatar = getattr(getattr(member, "display_avatar", None), "url", None)
@@ -339,40 +345,43 @@ def build_rank_embed(
     profile: PlayerProfile,
     season_name: str | None = None,
 ) -> discord.Embed:
+    display_name = _member_name(guild, profile.user_id)
     embed = discord.Embed(
-        title="Rank Overview",
+        title=f"{display_name} | Rank Card",
         description=(
-            f"{_member_label(guild, profile.user_id)} is currently **{_rank_label(profile)}**.\n"
+            f"{_member_label(guild, profile.user_id)}\n"
+            f"Current Placement: **{_rank_label(profile)}**\n"
             f"Season: **{season_name or 'Active Season'}**"
         ),
         colour=discord.Colour.blurple(),
     )
-    embed.add_field(name="Points", value=str(profile.current_points), inline=True)
     embed.add_field(
-        name="Record",
-        value=f"{profile.season_stats.wins}W / {profile.season_stats.losses}L",
-        inline=True,
+        name="Placement Snapshot",
+        value=(
+            f"Season Points: **{profile.current_points}**\n"
+            f"Matches Played: **{profile.season_stats.matches_played}**\n"
+            f"Rank Mode: **{'Manual Rank 0 override' if profile.manual_rank_override == 0 else 'Season leaderboard placement'}**"
+        ),
+        inline=False,
     )
     embed.add_field(
-        name="MVP",
-        value=f"{profile.mvp_winner_count} winner / {profile.mvp_loser_count} loser",
-        inline=True,
+        name="Current Season",
+        value=(
+            f"Record: **{profile.season_stats.wins}W / {profile.season_stats.losses}L**\n"
+            f"Winner MVP: **{profile.mvp_winner_count}**\n"
+            f"Loser MVP: **{profile.mvp_loser_count}**\n"
+            f"Lifetime Points: **{profile.lifetime_points}**"
+        ),
+        inline=False,
     )
-    embed.add_field(
-        name="Matches Played",
-        value=str(profile.season_stats.matches_played),
-        inline=True,
-    )
-    embed.add_field(
-        name="Lifetime Points",
-        value=str(profile.lifetime_points),
-        inline=True,
-    )
-    embed.add_field(
-        name="Rank Mode",
-        value="Manual Rank 0 override" if profile.manual_rank_override == 0 else "Season leaderboard placement",
-        inline=True,
-    )
+    if profile.blacklisted:
+        embed.add_field(name="Status", value="Blacklisted from match participation.", inline=False)
+    if guild is not None:
+        member = guild.get_member(profile.user_id)
+        member_avatar = getattr(getattr(member, "display_avatar", None), "url", None)
+        if member_avatar:
+            embed.set_thumbnail(url=member_avatar)
+    embed.set_footer(text="Ranks update from current season placement. Nicknames stay synced to Rank X Name.")
     return embed
 
 

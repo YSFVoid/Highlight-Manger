@@ -124,6 +124,7 @@ class MatchService:
             **context.as_log_kwargs(validation_result="received"),
         )
         match: MatchRecord | None = None
+        public_message: discord.Message | None = None
         try:
             context.validation_stage = "normalize_type"
             match_type = MatchType.from_input(type_input)
@@ -155,7 +156,7 @@ class MatchService:
             context.allowed_apostado_channel_id = config.apostado_play_channel_id
             context.allowed_highlight_channel_id = config.highlight_play_channel_id
             context.waiting_voice_id = config.waiting_voice_channel_id
-            config = await self.config_service.validate_ready_for_matches(guild.id)
+            config = await self.config_service.validate_ready_for_matches(guild)
             context.allowed_apostado_channel_id = config.apostado_play_channel_id
             context.allowed_highlight_channel_id = config.highlight_play_channel_id
             context.waiting_voice_id = config.waiting_voice_channel_id
@@ -209,10 +210,34 @@ class MatchService:
             await self.repository.create(match)
 
             context.validation_stage = "register_queue_view"
-            self.register_views(match)
+            try:
+                self.register_views(match)
+            except Exception as exc:
+                self.logger.warning(
+                    "play_command_view_registration_failed",
+                    guild_id=guild.id,
+                    user_id=creator.id,
+                    match_number=match.match_number,
+                    error=str(exc),
+                    **context.as_log_kwargs(validation_result="warning"),
+                )
 
             context.validation_stage = "post_public_message"
-            public_message = await channel.send(embed=build_match_embed(match, guild), view=self._build_queue_view(match))
+            try:
+                public_message = await channel.send(
+                    embed=build_match_embed(match, guild),
+                    view=self._build_queue_view(match),
+                )
+            except discord.Forbidden as exc:
+                await self._cleanup_failed_match_creation(guild, match, public_message, context.validation_stage)
+                raise UserFacingError(
+                    "I could not post the match card in this room. Check my Send Messages and Embed Links permissions."
+                ) from exc
+            except discord.HTTPException as exc:
+                await self._cleanup_failed_match_creation(guild, match, public_message, context.validation_stage)
+                raise UserFacingError(
+                    "I could not publish the match card in this room right now. Please try again."
+                ) from exc
 
             context.validation_stage = "persist_public_message"
             match.public_message_id = public_message.id
@@ -230,13 +255,23 @@ class MatchService:
             match = await self.repository.replace(match)
 
             context.validation_stage = "audit_log"
-            await self.audit_service.log(
-                guild,
-                AuditAction.MATCH_CREATED,
-                f"{creator.mention} created Match #{match.display_id} ({match.mode.value} {match.match_type.label}).",
-                actor_id=creator.id,
-                metadata={"match_number": match.match_number, "type": match.match_type.value, "mode": match.mode.value},
-            )
+            try:
+                await self.audit_service.log(
+                    guild,
+                    AuditAction.MATCH_CREATED,
+                    f"{creator.mention} created Match #{match.display_id} ({match.mode.value} {match.match_type.label}).",
+                    actor_id=creator.id,
+                    metadata={"match_number": match.match_number, "type": match.match_type.value, "mode": match.mode.value},
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    "play_command_audit_log_failed",
+                    guild_id=guild.id,
+                    user_id=creator.id,
+                    match_number=match.match_number,
+                    error=str(exc),
+                    **context.as_log_kwargs(validation_result="warning"),
+                )
             self.logger.info(
                 "play_command_completed",
                 guild_id=guild.id,
@@ -256,6 +291,8 @@ class MatchService:
             )
             raise
         except Exception:
+            if match is not None and context.validation_stage in {"persist_match", "post_public_message", "persist_public_message"}:
+                await self._cleanup_failed_match_creation(guild, match, public_message, context.validation_stage)
             self.logger.exception(
                 "play_command_unexpected_failure",
                 guild_id=guild.id,
@@ -270,7 +307,7 @@ class MatchService:
             member.guild,
             await self.config_service.get_or_create(member.guild.id),
         )
-        config = await self.config_service.validate_ready_for_matches(member.guild.id)
+        config = await self.config_service.validate_ready_for_matches(member.guild)
         await self.profile_service.require_not_blacklisted(member.guild, member.id, config)
         self.voice_service.ensure_member_in_waiting_voice(member, config)
         match = await self.require_match(member.guild.id, match_number)
@@ -418,6 +455,7 @@ class MatchService:
                 )
             if warnings:
                 await result_channel.send("\n".join(warnings))
+        match = await self._ensure_room_info_available_in_result_channel(guild, match)
         match = await self._announce_match_ready_if_needed(guild, match, config)
         await self.audit_service.log(
             guild,
@@ -643,6 +681,7 @@ class MatchService:
             await self.refresh_match_message(guild, match)
             if match.status in {MatchStatus.IN_PROGRESS, MatchStatus.VOTING}:
                 match = await self._announce_match_ready_if_needed(guild, match, config)
+            match = await self._ensure_room_info_available_in_result_channel(guild, match)
             if result_channel is not None:
                 await result_channel.send(
                     "Bot restarted. Voting controls have been restored.",
@@ -734,7 +773,7 @@ class MatchService:
             match.result_channel_id = result_channel.id
         match = await self.repository.replace(match)
         await self.refresh_match_message(guild, match)
-        await self.post_room_info_summary(guild, match)
+        match = await self._ensure_room_info_available_in_result_channel(guild, match, force_post=True)
         await self.post_public_note(
             guild,
             match,
@@ -818,12 +857,38 @@ class MatchService:
         if isinstance(channel, discord.TextChannel):
             await channel.send(embed=build_result_summary_embed(match, guild))
 
-    async def post_room_info_summary(self, guild: discord.Guild, match: MatchRecord) -> None:
+    async def post_room_info_summary(self, guild: discord.Guild, match: MatchRecord) -> bool:
         if not match.result_channel_id or match.room_info is None:
-            return
+            return False
         channel = guild.get_channel(match.result_channel_id)
-        if isinstance(channel, discord.TextChannel):
+        if not isinstance(channel, discord.TextChannel):
+            self.logger.warning(
+                "room_info_result_channel_missing",
+                guild_id=guild.id,
+                match_number=match.match_number,
+                channel_id=match.result_channel_id,
+            )
+            return False
+        try:
             await channel.send(embed=build_room_info_embed(match, guild))
+        except discord.HTTPException as exc:
+            self.logger.warning(
+                "room_info_post_failed",
+                guild_id=guild.id,
+                match_number=match.match_number,
+                channel_id=channel.id,
+                error=str(exc),
+            )
+            return False
+        self.logger.info(
+            "room_info_posted",
+            guild_id=guild.id,
+            match_number=match.match_number,
+            channel_id=channel.id,
+            has_password=bool(match.room_info.password),
+            has_private_match_key=bool(match.room_info.private_match_key),
+        )
+        return True
 
     async def post_result_note(self, guild: discord.Guild, match: MatchRecord, message: str) -> None:
         if not match.result_channel_id:
@@ -890,6 +955,56 @@ class MatchService:
         if isinstance(existing, discord.TextChannel):
             return existing, False
         return await self.result_channel_service.create_private_channel(guild, match, config), True
+
+    async def _cleanup_failed_match_creation(
+        self,
+        guild: discord.Guild,
+        match: MatchRecord,
+        public_message: discord.Message | None,
+        validation_stage: str,
+    ) -> None:
+        if public_message is not None:
+            try:
+                await public_message.delete()
+            except discord.HTTPException as exc:
+                self.logger.warning(
+                    "failed_match_public_message_cleanup_failed",
+                    guild_id=guild.id,
+                    match_number=match.match_number,
+                    message_id=public_message.id,
+                    validation_stage=validation_stage,
+                    error=str(exc),
+                )
+        deleted = False
+        delete_match = getattr(self.repository, "delete", None)
+        if callable(delete_match):
+            deleted = await delete_match(match.guild_id, match.match_number)
+        self.logger.info(
+            "failed_match_creation_cleaned_up",
+            guild_id=guild.id,
+            match_number=match.match_number,
+            validation_stage=validation_stage,
+            deleted_from_repository=deleted,
+            had_public_message=public_message is not None,
+        )
+
+    async def _ensure_room_info_available_in_result_channel(
+        self,
+        guild: discord.Guild,
+        match: MatchRecord,
+        *,
+        force_post: bool = False,
+    ) -> MatchRecord:
+        if match.room_info is None or not match.result_channel_id:
+            return match
+        last_posted_channel_id = match.metadata.get("room_info_posted_channel_id")
+        if not force_post and last_posted_channel_id == match.result_channel_id:
+            return match
+        posted = await self.post_room_info_summary(guild, match)
+        if not posted:
+            return match
+        match.metadata["room_info_posted_channel_id"] = match.result_channel_id
+        return await self.repository.replace(match)
 
     async def _announce_match_ready_if_needed(
         self,

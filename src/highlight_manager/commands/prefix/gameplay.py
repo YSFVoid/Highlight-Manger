@@ -62,11 +62,13 @@ class GameplayCog(commands.Cog):
                 "profile_command_failed",
                 guild_id=ctx.guild.id,
                 user_id=ctx.author.id,
+                channel_id=getattr(ctx.channel, "id", None),
+                raw_command_content=ctx.message.content if ctx.message else None,
             )
             return await ctx.reply("I hit an internal error while loading that profile.")
         await ctx.reply(embed=build_profile_embed(ctx.guild, profile, season.name))
 
-    @commands.command(name="rank")
+    @commands.command(name="rank", aliases=["r"])
     async def rank(self, ctx: commands.Context) -> None:
         if not ctx.guild or not isinstance(ctx.author, discord.Member):
             return await ctx.reply("This command can only be used inside the server.")
@@ -81,6 +83,8 @@ class GameplayCog(commands.Cog):
                 "rank_command_failed",
                 guild_id=ctx.guild.id,
                 user_id=ctx.author.id,
+                channel_id=getattr(ctx.channel, "id", None),
+                raw_command_content=ctx.message.content if ctx.message else None,
             )
             return await ctx.reply("I hit an internal error while loading your rank.")
         await ctx.reply(embed=build_rank_embed(ctx.guild, profile, season.name))
@@ -97,6 +101,8 @@ class GameplayCog(commands.Cog):
                 "leaderboard_command_failed",
                 guild_id=ctx.guild.id,
                 user_id=ctx.author.id if ctx.author else None,
+                channel_id=getattr(ctx.channel, "id", None),
+                raw_command_content=ctx.message.content if ctx.message else None,
             )
             return await ctx.reply("I hit an internal error while loading the leaderboard.")
         await ctx.reply(embed=embed, view=view)
@@ -120,6 +126,8 @@ class GameplayCog(commands.Cog):
                 guild_id=ctx.guild.id,
                 actor_id=ctx.author.id if ctx.author else None,
                 target_id=target.id,
+                channel_id=getattr(ctx.channel, "id", None),
+                raw_command_content=ctx.message.content if ctx.message else None,
             )
             return await ctx.reply("I hit an internal error while loading those stats.")
         await ctx.reply(embed=build_profile_embed(ctx.guild, profile, season.name))
