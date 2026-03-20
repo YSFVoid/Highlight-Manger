@@ -7,7 +7,7 @@ from discord.ext import commands
 
 from highlight_manager.config.logging import get_logger
 from highlight_manager.interactions.views import LeaderboardView
-from highlight_manager.utils.embeds import build_profile_embed, build_rank_embed
+from highlight_manager.utils.embeds import build_help_embed, build_profile_embed, build_rank_embed
 from highlight_manager.utils.exceptions import HighlightError
 
 if TYPE_CHECKING:
@@ -18,6 +18,25 @@ class GameplayCog(commands.Cog):
     def __init__(self, bot: "HighlightBot") -> None:
         self.bot = bot
         self.logger = get_logger(__name__)
+
+    @commands.command(name="help")
+    async def help_command(self, ctx: commands.Context) -> None:
+        if not ctx.guild:
+            return await ctx.reply("This command can only be used inside the server.")
+        try:
+            config = await self.bot.config_service.get_or_create(ctx.guild.id)
+        except HighlightError as exc:
+            return await ctx.reply(str(exc))
+        except Exception:
+            self.logger.exception(
+                "help_command_failed",
+                guild_id=ctx.guild.id,
+                user_id=ctx.author.id if ctx.author else None,
+                channel_id=getattr(ctx.channel, "id", None),
+                raw_command_content=ctx.message.content if ctx.message else None,
+            )
+            return await ctx.reply("I hit an internal error while loading the command guide.")
+        await ctx.reply(embed=build_help_embed(config.prefix))
 
     @commands.command(name="play")
     async def play(self, ctx: commands.Context, mode: str, match_type: str) -> None:

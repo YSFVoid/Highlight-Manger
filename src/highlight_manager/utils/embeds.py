@@ -185,6 +185,42 @@ def _top_rank_badge(index: int) -> str:
     return badges.get(index, f"{index}th")
 
 
+def build_help_embed(prefix: str) -> discord.Embed:
+    embed = discord.Embed(
+        title="Prefix Command Guide",
+        description=(
+            "Use these member commands for queueing, rank checks, and player stats.\n"
+            "Match commands use the configured play rooms and Waiting Voice rules."
+        ),
+        colour=discord.Colour.blurple(),
+    )
+    embed.add_field(
+        name="Match Queue",
+        value=(
+            f"`{prefix}play <mode> <type>`\n"
+            "Examples:\n"
+            f"`{prefix}play 1v1 apos`\n"
+            f"`{prefix}play 2v2 high`\n"
+            f"`{prefix}play 4v4 apostado`"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Player Commands",
+        value=(
+            f"`{prefix}profile`\n"
+            f"`{prefix}rank`\n"
+            f"`{prefix}r`\n"
+            f"`{prefix}leaderboard`\n"
+            f"`{prefix}top`\n"
+            f"`{prefix}stats [user]`"
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="Type the command exactly as shown with your server prefix.")
+    return embed
+
+
 def build_match_room_setup_embed(match: MatchRecord, guild: discord.Guild | None) -> discord.Embed:
     embed = discord.Embed(
         title=_match_public_title(match),
