@@ -138,6 +138,67 @@ class ConfigService:
             )
         return config, role, created
 
+    async def ensure_mvp_reward_role(
+        self,
+        guild: discord.Guild,
+        config: GuildConfig,
+        *,
+        create_missing: bool,
+    ) -> tuple[GuildConfig, discord.Role | None, bool]:
+        role = guild.get_role(config.mvp_reward_role_id) if config.mvp_reward_role_id else None
+        created = False
+        if role is None:
+            role = discord.utils.find(
+                lambda item: item.name.lower() == config.mvp_reward_role_name.lower(),
+                guild.roles,
+            )
+        if role is None and create_missing and config.features.auto_create_mvp_reward_role:
+            role = await guild.create_role(
+                name=config.mvp_reward_role_name,
+                permissions=discord.Permissions(
+                    move_members=True,
+                    mute_members=True,
+                    deafen_members=True,
+                ),
+                colour=discord.Colour.gold(),
+                reason="Highlight Manager MVP achievement role",
+            )
+            created = True
+        elif role is not None:
+            desired_permissions = discord.Permissions(
+                move_members=True,
+                mute_members=True,
+                deafen_members=True,
+            )
+            desired_colour = discord.Colour.gold()
+            if role.permissions != desired_permissions or role.colour != desired_colour:
+                try:
+                    role = await role.edit(
+                        permissions=desired_permissions,
+                        colour=desired_colour,
+                        reason="Highlight Manager MVP achievement role sync",
+                    )
+                except discord.HTTPException as exc:
+                    self.logger.warning(
+                        "mvp_reward_role_sync_failed",
+                        guild_id=guild.id,
+                        role_id=role.id,
+                        error=str(exc),
+                    )
+
+        if role and (
+            config.mvp_reward_role_id != role.id
+            or config.mvp_reward_role_name != role.name
+        ):
+            config = await self.update(
+                guild.id,
+                {
+                    "mvp_reward_role_id": role.id,
+                    "mvp_reward_role_name": role.name,
+                },
+            )
+        return config, role, created
+
     async def run_setup(
         self,
         guild: discord.Guild,
@@ -151,6 +212,8 @@ class ConfigService:
         log_channel: discord.TextChannel | None = None,
         admin_role: discord.Role | None = None,
         staff_role: discord.Role | None = None,
+        mvp_reward_role: discord.Role | None = None,
+        mvp_reward_role_name: str | None = None,
         season_reward_role: discord.Role | None = None,
         season_reward_role_name: str | None = None,
         create_missing: bool = False,
@@ -238,6 +301,13 @@ class ConfigService:
             "log_channel_id": log_channel.id if log_channel else config.log_channel_id,
             "admin_role_ids": [admin_role.id] if admin_role else config.admin_role_ids,
             "staff_role_ids": [staff_role.id] if staff_role else config.staff_role_ids,
+            "mvp_reward_role_id": (
+                mvp_reward_role.id if mvp_reward_role else config.mvp_reward_role_id
+            ),
+            "mvp_reward_role_name": (
+                mvp_reward_role_name
+                or (mvp_reward_role.name if mvp_reward_role else config.mvp_reward_role_name)
+            ),
             "season_reward_role_id": (
                 season_reward_role.id if season_reward_role else config.season_reward_role_id
             ),

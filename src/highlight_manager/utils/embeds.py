@@ -98,9 +98,11 @@ def build_profile_embed(
         title=f"Profile | {_member_label(guild, profile.user_id)}",
         colour=discord.Colour.green(),
     )
-    embed.add_field(name="Current Points", value=str(profile.current_points), inline=True)
+    embed.add_field(name="Season Points", value=str(profile.current_points), inline=True)
     embed.add_field(name="Lifetime Points", value=str(profile.lifetime_points), inline=True)
-    embed.add_field(name="Current Rank", value=f"Rank {profile.current_rank}", inline=True)
+    embed.add_field(name="Current Placement", value=f"Rank {profile.current_rank}", inline=True)
+    embed.add_field(name="MVP Winner Count", value=str(profile.mvp_winner_count), inline=True)
+    embed.add_field(name="MVP Loser Count", value=str(profile.mvp_loser_count), inline=True)
     embed.add_field(
         name="Season",
         value=season_name or "Active season",
@@ -187,20 +189,30 @@ def build_config_embed(config: GuildConfig, guild: discord.Guild | None) -> disc
         ),
         inline=False,
     )
-    rank_lines = []
-    for threshold in sorted(config.rank_thresholds, key=lambda item: item.rank):
-        if threshold.max_points is not None:
-            lower = threshold.min_points if threshold.min_points is not None else "-inf"
-            rank_lines.append(f"Rank {threshold.rank}: {lower} to {threshold.max_points}")
-        elif threshold.min_points is not None:
-            rank_lines.append(f"Rank {threshold.rank}: {threshold.min_points}+")
-        else:
-            rank_lines.append(f"Rank {threshold.rank}: all points")
-    embed.add_field(name="Internal Rank Thresholds", value="\n".join(rank_lines) if rank_lines else "None", inline=False)
+    embed.add_field(
+        name="Ranking Model",
+        value=(
+            "Rank is live leaderboard placement.\n"
+            "Tiebreaks: points > wins > winner MVPs > older join date > user ID."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Mvp Achievement Role",
+        value=(
+            f"{config.mvp_reward_role_name} | {_role_label(guild, config.mvp_reward_role_id)}\n"
+            f"Winner MVP requirement: {config.mvp_winner_requirement}\n"
+            f"Loser MVP requirement: {config.mvp_loser_requirement}"
+        ),
+        inline=False,
+    )
     reward_role_label = _role_label(guild, config.season_reward_role_id)
     embed.add_field(
         name="Season Reward Role",
-        value=f"{config.season_reward_role_name} | {reward_role_label}",
+        value=(
+            f"{config.season_reward_role_name} | {reward_role_label}\n"
+            f"Top Count: {config.season_reward_top_count}"
+        ),
         inline=False,
     )
     embed.add_field(
@@ -210,22 +222,23 @@ def build_config_embed(config: GuildConfig, guild: discord.Guild | None) -> disc
     )
     bootstrap_summary = config.bootstrap_last_summary
     if bootstrap_summary:
-        rank_lines = [
-            f"Rank {rank}: {count}"
-            for rank, count in sorted(bootstrap_summary.rank_counts.items(), key=lambda item: int(item[0]))
-        ]
+        assigned_range = (
+            f"Rank {bootstrap_summary.first_assigned_rank} to Rank {bootstrap_summary.last_assigned_rank}"
+            if bootstrap_summary.first_assigned_rank and bootstrap_summary.last_assigned_rank
+            else "N/A"
+        )
         embed.add_field(
             name="Bootstrap",
             value=(
                 f"Completed: {'Yes' if config.bootstrap_completed else 'No'}\n"
                 f"Processed: {bootstrap_summary.processed_members}\n"
+                f"Assigned Ranks: {assigned_range}\n"
                 f"Renamed: {bootstrap_summary.renamed_members}\n"
                 f"Rename Failures: {bootstrap_summary.rename_failures}\n"
                 f"Rename Already Correct: {bootstrap_summary.rename_already_correct}\n"
                 f"Rename Hierarchy: {bootstrap_summary.rename_skipped_due_to_hierarchy}\n"
                 f"Rename Missing Permission: {bootstrap_summary.rename_skipped_due_to_missing_permission}\n"
-                f"Rename Other: {bootstrap_summary.rename_skipped_other}\n"
-                f"Ranks: {', '.join(rank_lines) if rank_lines else 'N/A'}"
+                f"Rename Other: {bootstrap_summary.rename_skipped_other}"
             ),
             inline=False,
         )

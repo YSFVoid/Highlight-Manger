@@ -30,6 +30,7 @@ from highlight_manager.services.config_service import ConfigService
 from highlight_manager.services.match_service import MatchService
 from highlight_manager.services.profile_service import ProfileService
 from highlight_manager.services.rank_service import RankService
+from highlight_manager.services.reward_service import RewardService
 from highlight_manager.services.result_channel_service import ResultChannelService
 from highlight_manager.services.season_service import SeasonService
 from highlight_manager.services.setup_service import SetupService
@@ -64,6 +65,7 @@ class HighlightBot(commands.Bot):
         self.vote_service: VoteService | None = None
         self.audit_service: AuditService | None = None
         self.rank_service: RankService | None = None
+        self.reward_service: RewardService | None = None
         self.voice_service: VoiceService | None = None
         self.result_channel_service: ResultChannelService | None = None
         self.bootstrap_service: BootstrapService | None = None
@@ -90,16 +92,17 @@ class HighlightBot(commands.Bot):
             audit_repository.ensure_indexes(),
         )
 
-        self.rank_service = RankService()
         self.config_service = ConfigService(config_repository, self.settings)
-        self.profile_service = ProfileService(profile_repository, self.rank_service)
+        self.audit_service = AuditService(audit_repository, self.config_service)
+        self.rank_service = RankService()
+        self.reward_service = RewardService(self.config_service, self.audit_service)
+        self.profile_service = ProfileService(profile_repository, self.rank_service, self.reward_service)
         self.season_service = SeasonService(season_repository, self.profile_service, self.config_service)
         self.vote_service = VoteService(vote_repository)
         self.voice_service = VoiceService()
         self.result_channel_service = ResultChannelService()
         self.bootstrap_service = BootstrapService(self.profile_service)
         self.setup_service = SetupService(self.config_service, self.bootstrap_service)
-        self.audit_service = AuditService(audit_repository, self.config_service)
         self.match_service = MatchService(
             self,
             match_repository,
@@ -134,7 +137,7 @@ class HighlightBot(commands.Bot):
         if member.bot or self.config_service is None or self.profile_service is None:
             return
         config = await self.config_service.get_or_create(member.guild.id)
-        await self.profile_service.ensure_member_profile(member, config)
+        await self.profile_service.handle_member_join(member, config)
 
     async def on_voice_state_update(
         self,

@@ -1,10 +1,8 @@
 # Highlight Manager
 
-Highlight Manager is a production-minded Discord bot for a single Free Fire server. It manages ranked Apostado and Highlight matches, waiting voice validation, auto-created team voices, private result channels, player voting, points, ranks, blacklists, and seasons.
+Highlight Manager is a Python Discord bot for one competitive Free Fire server. It manages Apostado and Highlight matches, waiting voice validation, private match result rooms, temporary team voice channels, player voting, seasonal points, live placement ranks, blacklist checks, and reward roles.
 
-Ranks are stored internally in MongoDB and synced to nicknames as `Rank X UserName`. The bot does not use Discord rank roles. The only Discord reward role is the seasonal top-5 role: `Professional Highlight Player`.
-
-Bot-created setup resources default to stylized Unicode names such as `𝗪𝗮𝗶𝘁𝗶𝗻𝗴-𝗩𝗼𝗶𝗰𝗲` and `𝗛𝗶𝗴𝗵𝗹𝗶𝗴𝗵𝘁-𝗟𝗼𝗴𝘀`. If Discord rejects a styled name for a specific resource type, setup falls back cleanly to the ASCII legacy name and reports that in setup output.
+Ranks are stored internally and synced to nicknames as `Rank X UserName`. Rank is live leaderboard placement, not a fixed tier and not a Discord role.
 
 ## Stack
 
@@ -16,71 +14,111 @@ Bot-created setup resources default to stylized Unicode names such as `𝗪𝗮�
 - `python-dotenv`
 - `structlog`
 
-## What It Does
+## Member Commands
 
-- Member prefix commands for gameplay:
-  - `!play <mode> <type>`
-  - `!profile`
-  - `!rank`
-  - `!leaderboard`
-  - `!top`
-  - `!stats [user]`
-- Admin slash commands for setup and moderation:
-  - `/setup`
-  - `/bootstrap preview`
-  - `/bootstrap rerun`
-  - `/config`
-  - `/season start`
-  - `/season end`
-  - `/rank set`
-  - `/rank0 grant`
-  - `/rank0 revoke`
-  - `/points add`
-  - `/points remove`
-  - `/points set`
-  - `/match cancel`
-  - `/match force-result`
-  - `/match force-close`
-  - `/blacklist add`
-  - `/blacklist remove`
+- `!play <mode> <type>`
+- `!profile`
+- `!rank`
+- `!leaderboard`
+- `!top`
+- `!stats [user]`
 
-## Core Flow
+Supported match modes:
 
-1. Player joins the configured Waiting Voice.
-2. Player runs `!play 2v2 apos`, `!play 4v4 high`, and similar variants in the configured Apostado or Highlight play room.
-3. Bot creates the public match queue embed with buttons.
-4. Players join teams through buttons.
-5. When the queue fills, the bot:
-   - creates `TEAM 1` and `TEAM 2` temporary voice channels
-   - moves players into team voices
-   - creates a private result channel named like `match-001-result`
-   - opens vote flow and starts the voting deadline
-6. Players submit result votes in the result channel.
-7. When consensus is valid, the bot finalizes the match, updates points/ranks, posts the summary, and cleans resources.
-8. If queue fill or vote reporting times out, the bot persists the failure state, applies the configured penalties, and cleans up safely.
+- `1v1`
+- `2v2`
+- `3v3`
+- `4v4`
 
-## Project Structure
+Supported type aliases:
 
-```text
-src/highlight_manager/
-  bot.py
-  commands/
-    prefix/gameplay.py
-    slash/admin.py
-  config/
-    logging.py
-    settings.py
-  interactions/
-    views.py
-  models/
-  repositories/
-  services/
-  utils/
-tests/
-deploy/
-  systemd/highlight-manager.service
-  supervisor/highlight-manager.conf
-```
+- `apos`
+- `apostado`
+- `high`
+- `highlight`
+
+## Admin Commands
+
+- `/setup`
+- `/setup action:status`
+- `/setup action:repair`
+- `/bootstrap preview`
+- `/bootstrap rerun`
+- `/config`
+- `/season start`
+- `/season end`
+- `/points add`
+- `/points remove`
+- `/points set`
+- `/match cancel`
+- `/match force-result`
+- `/match force-close`
+- `/blacklist add`
+- `/blacklist remove`
+
+## Rank Model
+
+- Rank is live seasonal leaderboard placement.
+- Rank 1 means first place, Rank 2 means second place, and so on with no hard cap.
+- Tiebreak order is:
+  - higher seasonal points
+  - higher seasonal wins
+  - higher seasonal winner-MVP count
+  - older server join date
+  - lower user ID as a stable fallback
+- Nicknames are always synced as `Rank X UserName`.
+
+## Reward Roles
+
+### `Mvp`
+
+Permanent achievement role.
+
+- awarded once `mvpWinnerCount >= 50`
+- or `mvpLoserCount >= 75`
+- created during setup if missing
+- limited to `Move Members`, `Mute Members`, and `Deafen Members`
+- never removed automatically
+
+### `Professional Highlight Player`
+
+Season reward role.
+
+- granted to the configured top seasonal placements when a season ends
+- removed from previous holders who are no longer in the configured top group
+- default top count is `5`
+
+## Default Setup Resources
+
+The bot auto-creates or reuses these resources during `/setup`:
+
+- `𝗔𝗽𝗼𝘀𝘁𝗮𝗱𝗼-𝗣𝗹𝗮𝘆`
+- `𝗛𝗶𝗴𝗵𝗹𝗶𝗴𝗵𝘁-𝗣𝗹𝗮𝘆`
+- `𝗪𝗮𝗶𝘁𝗶𝗻𝗴-𝗩𝗼𝗶𝗰𝗲`
+- `𝗛𝗶𝗴𝗵𝗹𝗶𝗴𝗵𝘁-𝗠𝗮𝘁𝗰𝗵-𝗩𝗼𝗶𝗰𝗲𝘀`
+- `𝗠𝗮𝘁𝗰𝗵-𝗥𝗲𝘀𝘂𝗹𝘁𝘀`
+- `𝗛𝗶𝗴𝗵𝗹𝗶𝗴𝗵𝘁-𝗟𝗼𝗴𝘀`
+- `Mvp`
+- `Professional Highlight Player`
+
+If Discord rejects a stylized Unicode name for a resource type, setup falls back cleanly to the ASCII legacy name instead of crashing.
+
+## Bootstrap Behavior
+
+On the first successful `/setup` only:
+
+1. All non-bot members are sorted by server join date, oldest first.
+2. Oldest member gets Rank 1, next gets Rank 2, and so on with no limit.
+3. Everyone starts with `0` season points.
+4. Everyone is renamed to `Rank X UserName` when permissions allow.
+5. Rename results are reported separately for:
+   - renamed members
+   - already-correct nicknames
+   - hierarchy skips
+   - missing-permission skips
+   - other failures
+
+New members who join later start with `0` points and are assigned the last current rank position by default.
 
 ## Installation
 
@@ -91,9 +129,7 @@ pip install -e .[dev]
 cp .env.example .env
 ```
 
-Update `.env` with your bot token, client ID, and MongoDB URI.
-
-If you prefer plain requirements files for VPS automation:
+Or for VPS automation:
 
 ```bash
 pip install -r requirements-dev.txt
@@ -119,22 +155,22 @@ See [.env.example](.env.example).
 python -m highlight_manager
 ```
 
-## Production Run
+## VPS / Production
 
 ### systemd
 
-Copy [highlight-manager.service](deploy/systemd/highlight-manager.service) to `/etc/systemd/system/highlight-manager.service`, adjust paths/user, then:
+Copy [highlight-manager.service](deploy/systemd/highlight-manager.service) to `/etc/systemd/system/highlight-manager.service`, adjust paths and user, then:
 
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable highlight-manager
-sudo systemctl start highlight-manager
-sudo systemctl status highlight-manager
+sudo systemctl restart highlight-manager
+sudo journalctl -u highlight-manager -f
 ```
 
 ### Supervisor
 
-Use [highlight-manager.conf](deploy/supervisor/highlight-manager.conf) inside your Supervisor config directory, adjust paths/user, then:
+Use [highlight-manager.conf](deploy/supervisor/highlight-manager.conf), adjust paths and user, then:
 
 ```bash
 sudo supervisorctl reread
@@ -144,38 +180,15 @@ sudo supervisorctl status highlight-manager
 
 ### Pterodactyl
 
-If you are hosting inside a Pterodactyl Python server, upload this repo and use:
+If you host this bot in a Pterodactyl Python server:
 
 ```bash
 bash /home/container/start.sh
 ```
 
-Then set the required environment variables in the panel Startup or Environment section. Full panel-specific notes are in [deploy/PTERODACTYL.md](deploy/PTERODACTYL.md).
+Full panel notes are in [deploy/PTERODACTYL.md](deploy/PTERODACTYL.md).
 
-## Setup Guide
-
-1. Invite the bot with the permissions listed below.
-2. Run `/setup` and optionally provide a prefix.
-3. The bot automatically reuses or creates:
-   - `𝗔𝗽𝗼𝘀𝘁𝗮𝗱𝗮-𝗣𝗹𝗮𝘆`
-   - `𝗛𝗶𝗴𝗵𝗹𝗶𝗴𝗵𝘁-𝗣𝗹𝗮𝘆`
-   - `𝗪𝗮𝗶𝘁𝗶𝗻𝗴-𝗩𝗼𝗶𝗰𝗲`
-   - `𝗛𝗶𝗴𝗵𝗹𝗶𝗴𝗵𝘁-𝗠𝗮𝘁𝗰𝗵-𝗩𝗼𝗶𝗰𝗲𝘀`
-   - `𝗠𝗮𝘁𝗰𝗵-𝗥𝗲𝘀𝘂𝗹𝘁𝘀`
-   - `𝗛𝗶𝗴𝗵𝗹𝗶𝗴𝗵𝘁-𝗟𝗼𝗴𝘀`
-   - `Professional Highlight Player` reward role when auto-create is enabled
-4. On the first successful setup, the bot runs a one-time bootstrap for current members:
-   - assigns starting rank by server age across the configured ladder
-   - assigns aligned starting points
-   - saves the internal rank in the database
-   - attempts nickname sync for every eligible processed member using `Rank X UserName`
-   - reports rename outcomes separately for renamed members, already-correct nicknames, hierarchy skips, missing-permission skips, and other rename failures
-5. Use `/setup action:status` to inspect saved setup state.
-6. Use `/setup action:repair` to repair missing resources safely.
-7. Use `/bootstrap preview` and `/bootstrap rerun` for maintenance.
-8. Use `/config` later for additional manual adjustments.
-
-## Permissions Required
+## Required Discord Permissions
 
 - View Channels
 - Send Messages
@@ -185,41 +198,35 @@ Then set the required environment variables in the panel Startup or Environment 
 - Move Members
 - Manage Channels
 - Use Application Commands
-- Manage Roles for the seasonal `Professional Highlight Player` reward role
-- Manage Nicknames recommended for automatic rename sync, but setup no longer hard-fails if it is missing
+- Manage Roles
+- Manage Nicknames
 
-## Data Stored
+## What Setup Must Validate
 
-- Guild config
-- Player profiles
-- Matches
-- Match votes
-- Seasons
-- Audit logs
+- Waiting Voice exists
+- temp match voice category exists
+- results parent exists
+- logs channel exists
+- Apostado play room exists
+- Highlight play room exists
+- `Mvp` role exists
+- `Professional Highlight Player` role exists or is reusable
 
-## Startup and Recovery
+## Startup / Recovery
 
 On startup the bot:
 
-- validates settings
-- pings and connects to MongoDB
-- ensures Mongo indexes
-- loads commands
+- validates env settings
+- connects to MongoDB
+- ensures indexes
 - syncs slash commands
-- reconciles active matches
-- resumes matches that were stuck in `FULL`
-- recreates missing result channels for active matches when possible
-- processes due queue, vote, and result cleanup events immediately
-- cleans stale team voice channels from already-closed matches
+- reconciles unfinished matches
+- restores timeout polling
+- recreates missing result rooms when possible
+- cleans stale temporary match voices
 - restores persistent button views
-- resumes polling for queue and vote deadlines
-- keeps ongoing rank nickname sync active through the normal rank-update path
 
-Timeouts are persisted in MongoDB and polled from storage, so the bot does not rely only on in-memory timers.
-
-## Automated Validation
-
-Run:
+## Validation Commands
 
 ```bash
 ruff check src tests
@@ -227,50 +234,12 @@ pytest -q
 python -m compileall src
 ```
 
-## Manual Verification Checklist
-
-1. New member joins and receives a profile, default lowest internal rank, and nickname sync when possible.
-2. First `/setup` creates or reuses all required resources automatically.
-3. First `/setup` bootstraps existing members by server age and renames them to `Rank X UserName`.
-4. `/setup action:status` shows configured resources and stored IDs.
-5. `/setup action:repair` repairs missing resources without duplicating existing ones.
-6. Member outside Waiting Voice is blocked from `!play`.
-7. Member using `!play 2v2 apos` outside the configured Apostado play room is blocked with a clear message.
-8. Member inside Waiting Voice creates `!play 2v2 apos` in the configured play room.
-9. Team buttons fill both teams.
-10. TEAM 1 and TEAM 2 voice channels are created.
-11. Players are moved into the correct temporary voices.
-12. Private result channel is created and only players/staff can see it.
-13. The private result channel name follows `match-001-result`.
-14. Players submit votes and consensus finalizes correctly.
-15. Result summary shows old balance, delta, and new balance.
-16. Points, internal rank, and nicknames update automatically when rank changes, without any rank-role sync.
-17. Bootstrap summary clearly reports rename failures for hierarchy, missing permissions, and other causes.
-18. Ending a season assigns `Professional Highlight Player` to the top 5 seasonal players and removes it from old holders who fell out of the top 5.
-19. An open queue expires after 5 minutes.
-20. An unresolved active match expires after 30 minutes and applies penalties.
-21. Restart the bot during an active match and confirm buttons, result room recovery, and timers recover.
-22. Staff-only slash commands reject non-staff users.
-
 ## Troubleshooting
 
-- If `!play` says setup is missing, run `/setup` or `/config` and ensure Waiting Voice plus temp voice category exist.
-- If `!play` is rejected in the wrong room, use it in the configured Apostado or Highlight play channel shown in `/setup status` or `/config`.
-- If you want the default setup names to stay stylized, do not manually rename the auto-created resources back to plain ASCII after setup.
-- If setup bootstrap reports rename hierarchy skips, move the bot's highest role above the member's highest role.
-- If setup bootstrap reports rename missing-permission skips, grant the bot `Manage Nicknames`.
-- If a member already has the correct `Rank X UserName` nickname, bootstrap reports that separately instead of counting it as a hidden success or silent skip.
-- If players are not moved, verify `Move Members`, `Connect`, and `Manage Channels`.
-- If the seasonal `Professional Highlight Player` reward is not updating, verify `Manage Roles` and ensure the bot role is above that reward role.
-- If slash commands appear late globally, set `DISCORD_GUILD_ID` for faster guild sync during development.
-- If MongoDB connection fails, verify the URI, network allowlist, and database user permissions.
-- For VPS deployment notes, see [deploy/PRODUCTION.md](deploy/PRODUCTION.md).
-
-## Notes for v2
-
-Potential future improvements:
-
-- richer slash config subcommands for point/rank rule editing
-- better stale-resource cleanup heuristics on startup
-- more advanced admin review workflows for conflicting votes
-- richer audit exports and dashboarding
+- If `!play` is rejected, use the configured Apostado or Highlight play room shown by `/setup status` or `/config`.
+- If `!play` says setup is incomplete, run `/setup` or `/setup action:repair`.
+- If nickname sync fails, check `Manage Nicknames` and role hierarchy.
+- If waiting-voice enforcement fails, confirm the configured Waiting Voice still exists.
+- If the `Mvp` role is not being granted, check `Manage Roles`, bot hierarchy, and the configured MVP thresholds.
+- If the season reward role is not updating, check `Manage Roles` and that the bot role is above `Professional Highlight Player`.
+- If MongoDB Atlas rejects the connection, allow the VPS or panel node IP in the Atlas allowlist.

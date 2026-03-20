@@ -27,9 +27,10 @@ class PointsUpdateResult:
 
 
 class ProfileService:
-    def __init__(self, repository: ProfileRepository, rank_service: RankService) -> None:
+    def __init__(self, repository: ProfileRepository, rank_service: RankService, reward_service=None) -> None:
         self.repository = repository
         self.rank_service = rank_service
+        self.reward_service = reward_service
         self.logger = get_logger(__name__)
 
     async def get(self, guild_id: int, user_id: int) -> PlayerProfile | None:
@@ -45,14 +46,22 @@ class ProfileService:
     ) -> PlayerProfile:
         existing = await self.repository.get(guild.id, user_id)
         if existing:
+            member = guild.get_member(user_id)
+            if existing.joined_at is None and member and member.joined_at:
+                existing.joined_at = member.joined_at
+                existing.updated_at = utcnow()
+                existing = await self.repository.upsert(existing)
             return existing
+        member = guild.get_member(user_id)
+        next_rank = await self.repository.count_for_guild(guild.id) + 1
         profile = PlayerProfile(
             guild_id=guild.id,
             user_id=user_id,
-            current_rank=self.rank_service.resolve_rank(0, config.rank_thresholds),
+            current_points=0,
+            current_rank=next_rank,
+            joined_at=member.joined_at if member and member.joined_at else utcnow(),
         )
         profile = await self.repository.upsert(profile)
-        member = guild.get_member(user_id)
         if member and sync_identity:
             await self.rank_service.sync_member_rank(member, profile, config)
         self.logger.info("profile_created", guild_id=guild.id, user_id=user_id)
@@ -61,53 +70,28 @@ class ProfileService:
     async def ensure_member_profile(self, member: discord.Member, config: GuildConfig) -> PlayerProfile:
         return await self.ensure_profile(member.guild, member.id, config)
 
+    async def handle_member_join(self, member: discord.Member, config: GuildConfig) -> PlayerProfile:
+        profile = await self.repository.get(member.guild.id, member.id)
+        if profile is None:
+            profile = await self.ensure_profile(member.guild, member.id, config, sync_identity=False)
+            profile.current_points = 0
+            profile.current_rank = await self.repository.count_for_guild(member.guild.id)
+            profile.joined_at = member.joined_at or profile.joined_at or utcnow()
+            profile.updated_at = utcnow()
+            profile = await self.repository.upsert(profile)
+        elif profile.joined_at is None and member.joined_at:
+            profile.joined_at = member.joined_at
+            profile.updated_at = utcnow()
+            profile = await self.repository.upsert(profile)
+        await self.rank_service.sync_member_rank(member, profile, config)
+        return profile
+
     async def set_blacklist(self, guild: discord.Guild, user_id: int, blacklisted: bool) -> PlayerProfile:
         config = GuildConfig(guild_id=guild.id)
         profile = await self.ensure_profile(guild, user_id, config)
         profile.blacklisted = blacklisted
         profile.updated_at = utcnow()
         return await self.repository.upsert(profile)
-
-    async def set_rank0(
-        self,
-        guild: discord.Guild,
-        user_id: int,
-        config: GuildConfig,
-        enabled: bool,
-    ) -> PlayerProfile:
-        profile = await self.ensure_profile(guild, user_id, config)
-        profile.rank0 = enabled
-        profile.current_rank = 0 if enabled else self.rank_service.resolve_rank(
-            profile.current_points,
-            config.rank_thresholds,
-        )
-        profile.updated_at = utcnow()
-        profile = await self.repository.upsert(profile)
-        member = guild.get_member(user_id)
-        if member:
-            await self.rank_service.sync_member_rank(member, profile, config)
-        return profile
-
-    async def set_rank(
-        self,
-        guild: discord.Guild,
-        user_id: int,
-        config: GuildConfig,
-        rank: int,
-    ) -> PlayerProfile:
-        configured_ranks = self.rank_service.configured_ranks(config.rank_thresholds)
-        if rank not in configured_ranks:
-            allowed = ", ".join(f"Rank {configured_rank}" for configured_rank in configured_ranks)
-            raise UserFacingError(f"Rank must match a configured ladder value. Allowed ranks: {allowed}.")
-        profile = await self.ensure_profile(guild, user_id, config)
-        profile.rank0 = False
-        profile.current_rank = rank
-        profile.updated_at = utcnow()
-        profile = await self.repository.upsert(profile)
-        member = guild.get_member(user_id)
-        if member:
-            await self.rank_service.sync_member_rank(member, profile, config)
-        return profile
 
     async def set_points(
         self,
@@ -122,20 +106,17 @@ class ProfileService:
         profile.current_points = new_points
         profile.lifetime_points += delta
         rank_before = profile.current_rank
-        if not (profile.rank0 and config.features.preserve_rank0):
-            profile.current_rank = self.rank_service.resolve_rank(profile.current_points, config.rank_thresholds)
         profile.updated_at = utcnow()
         profile = await self.repository.upsert(profile)
-        member = guild.get_member(user_id)
-        if member:
-            await self.rank_service.sync_member_rank(member, profile, config)
+        ranked_profiles = await self.recalculate_rank_positions(guild, config)
+        updated_profile = next((item for item in ranked_profiles if item.user_id == user_id), profile)
         return PointsUpdateResult(
-            profile=profile,
+            profile=updated_profile,
             previous_points=previous,
-            new_points=profile.current_points,
+            new_points=updated_profile.current_points,
             delta=delta,
             rank_before=rank_before,
-            rank_after=profile.current_rank,
+            rank_after=updated_profile.current_rank,
         )
 
     async def adjust_points(
@@ -172,6 +153,7 @@ class ProfileService:
             loser_ids = list(match.team1_player_ids)
 
         deltas: list[PlayerPointDelta] = []
+        updated_profiles: dict[int, PlayerProfile] = {}
         for user_id in match.all_player_ids:
             profile = await self.ensure_profile(guild, user_id, config)
             previous_points = profile.current_points
@@ -183,6 +165,7 @@ class ProfileService:
                 if winner_mvp_id == user_id:
                     profile.season_stats.mvp_wins += 1
                     profile.lifetime_stats.mvp_wins += 1
+                    profile.mvp_winner_count += 1
             else:
                 delta = rule.loser_mvp if loser_mvp_id == user_id and rule.loser_mvp is not None else rule.loser
                 profile.season_stats.losses += 1
@@ -190,18 +173,15 @@ class ProfileService:
                 if loser_mvp_id == user_id:
                     profile.season_stats.mvp_losses += 1
                     profile.lifetime_stats.mvp_losses += 1
+                    profile.mvp_loser_count += 1
 
             profile.current_points += delta
             profile.lifetime_points += delta
             profile.season_stats.matches_played += 1
             profile.lifetime_stats.matches_played += 1
-            if not (profile.rank0 and config.features.preserve_rank0):
-                profile.current_rank = self.rank_service.resolve_rank(profile.current_points, config.rank_thresholds)
             profile.updated_at = utcnow()
             saved = await self.repository.upsert(profile)
-            member = guild.get_member(user_id)
-            if member:
-                await self.rank_service.sync_member_rank(member, saved, config)
+            updated_profiles[user_id] = saved
             deltas.append(
                 PlayerPointDelta(
                     user_id=user_id,
@@ -209,9 +189,21 @@ class ProfileService:
                     delta=delta,
                     new_points=saved.current_points,
                     rank_before=rank_before,
-                    rank_after=saved.current_rank,
+                    rank_after=rank_before,
                 ),
             )
+        ranked_profiles = await self.recalculate_rank_positions(guild, config)
+        ranked_by_user_id = {profile.user_id: profile for profile in ranked_profiles}
+        for delta in deltas:
+            ranked_profile = ranked_by_user_id.get(delta.user_id)
+            if ranked_profile is not None:
+                delta.rank_after = ranked_profile.current_rank
+                delta.new_points = ranked_profile.current_points
+        if self.reward_service:
+            for candidate_id in {winner_mvp_id, loser_mvp_id} - {None}:
+                ranked_profile = ranked_by_user_id.get(candidate_id)
+                if ranked_profile is not None:
+                    await self.reward_service.sync_mvp_role_if_qualified(guild, ranked_profile, config)
         return MatchResultSummary(
             winner_team=winner_team,
             winner_player_ids=winner_ids,
@@ -243,13 +235,8 @@ class ProfileService:
             profile.lifetime_points += delta
             profile.season_stats.matches_played += 1
             profile.lifetime_stats.matches_played += 1
-            if not (profile.rank0 and config.features.preserve_rank0):
-                profile.current_rank = self.rank_service.resolve_rank(profile.current_points, config.rank_thresholds)
             profile.updated_at = utcnow()
             saved = await self.repository.upsert(profile)
-            member = guild.get_member(user_id)
-            if member:
-                await self.rank_service.sync_member_rank(member, saved, config)
             deltas.append(
                 PlayerPointDelta(
                     user_id=user_id,
@@ -257,9 +244,16 @@ class ProfileService:
                     delta=delta,
                     new_points=saved.current_points,
                     rank_before=rank_before,
-                    rank_after=saved.current_rank,
+                    rank_after=rank_before,
                 ),
             )
+        ranked_profiles = await self.recalculate_rank_positions(guild, config)
+        ranked_by_user_id = {profile.user_id: profile for profile in ranked_profiles}
+        for delta in deltas:
+            ranked_profile = ranked_by_user_id.get(delta.user_id)
+            if ranked_profile is not None:
+                delta.rank_after = ranked_profile.current_rank
+                delta.new_points = ranked_profile.current_points
         return MatchResultSummary(
             winner_team=None,
             winner_player_ids=[],
@@ -273,17 +267,12 @@ class ProfileService:
         )
 
     async def reset_for_new_season(self, guild: discord.Guild, config: GuildConfig) -> None:
-        lowest_rank = self.rank_service.resolve_rank(0, config.rank_thresholds)
-        await self.repository.reset_for_new_season(guild.id, utcnow(), lowest_rank=lowest_rank)
+        await self.repository.reset_for_new_season(guild.id, utcnow())
         for member in guild.members:
             if member.bot:
                 continue
-            profile = await self.ensure_profile(guild, member.id, config)
-            if not profile.rank0:
-                profile.current_rank = self.rank_service.resolve_rank(profile.current_points, config.rank_thresholds)
-                profile.updated_at = utcnow()
-                profile = await self.repository.upsert(profile)
-            await self.rank_service.sync_member_rank(member, profile, config)
+            await self.ensure_profile(guild, member.id, config, sync_identity=False)
+        await self.recalculate_rank_positions(guild, config)
 
     async def require_not_blacklisted(
         self,
@@ -295,3 +284,34 @@ class ProfileService:
         if profile.blacklisted:
             raise UserFacingError("You are blacklisted from match participation.")
         return profile
+
+    async def recalculate_rank_positions(
+        self,
+        guild: discord.Guild,
+        config: GuildConfig,
+        *,
+        sync_nicknames: bool = True,
+    ) -> list[PlayerProfile]:
+        profiles = await self.repository.list_for_ranking(guild.id)
+        if not profiles:
+            return []
+
+        for profile in profiles:
+            member = guild.get_member(profile.user_id)
+            if profile.joined_at is None and member and member.joined_at:
+                profile.joined_at = member.joined_at
+                profile.updated_at = utcnow()
+                await self.repository.upsert(profile)
+
+        ordered = self.rank_service.sort_profiles_for_ranking(profiles)
+        saved_profiles: list[PlayerProfile] = []
+        for position, profile in enumerate(ordered, start=1):
+            profile.current_rank = position
+            profile.updated_at = utcnow()
+            saved = await self.repository.upsert(profile)
+            saved_profiles.append(saved)
+            if sync_nicknames:
+                member = guild.get_member(saved.user_id)
+                if member is not None:
+                    await self.rank_service.sync_member_rank(member, saved, config)
+        return saved_profiles

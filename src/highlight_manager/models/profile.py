@@ -15,8 +15,10 @@ class PlayerProfile(AppModel):
     current_points: int = 0
     lifetime_points: int = 0
     current_rank: int = 1
-    rank0: bool = False
     blacklisted: bool = False
+    joined_at: datetime | None = None
+    mvp_winner_count: int = 0
+    mvp_loser_count: int = 0
     season_stats: PlayerStats = Field(default_factory=PlayerStats)
     lifetime_stats: PlayerStats = Field(default_factory=PlayerStats)
     created_at: datetime = Field(default_factory=utcnow)

@@ -5,7 +5,7 @@ from pydantic import Field
 from highlight_manager.models.base import AppModel
 from datetime import datetime
 
-from highlight_manager.models.common import BootstrapSummary, BootstrapThreshold, PointRule, RankThreshold
+from highlight_manager.models.common import BootstrapSummary, PointRule
 from highlight_manager.models.enums import MatchMode, MatchType, ResultChannelBehavior
 
 
@@ -14,7 +14,7 @@ class ResourceNameConfig(AppModel):
     temp_voice_category: str = "𝗛𝗶𝗴𝗵𝗹𝗶𝗴𝗵𝘁-𝗠𝗮𝘁𝗰𝗵-𝗩𝗼𝗶𝗰𝗲𝘀"
     result_category: str = "𝗠𝗮𝘁𝗰𝗵-𝗥𝗲𝘀𝘂𝗹𝘁𝘀"
     log_channel: str = "𝗛𝗶𝗴𝗵𝗹𝗶𝗴𝗵𝘁-𝗟𝗼𝗴𝘀"
-    apostado_play_channel: str = "𝗔𝗽𝗼𝘀𝘁𝗮𝗱𝗮-𝗣𝗹𝗮𝘆"
+    apostado_play_channel: str = "𝗔𝗽𝗼𝘀𝘁𝗮𝗱𝗼-𝗣𝗹𝗮𝘆"
     highlight_play_channel: str = "𝗛𝗶𝗴𝗵𝗹𝗶𝗴𝗵𝘁-𝗣𝗹𝗮𝘆"
 
 
@@ -67,44 +67,12 @@ def default_point_rules() -> dict[str, dict[str, PointRule]]:
         },
     }
 
-
-def default_rank_thresholds() -> list[RankThreshold]:
-    return [
-        RankThreshold(rank=1, min_points=0),
-        RankThreshold(rank=2, min_points=100),
-        RankThreshold(rank=3, min_points=200),
-        RankThreshold(rank=4, min_points=300),
-        RankThreshold(rank=5, min_points=400),
-        RankThreshold(rank=6, min_points=500),
-        RankThreshold(rank=7, min_points=650),
-        RankThreshold(rank=8, min_points=800),
-        RankThreshold(rank=9, min_points=1000),
-        RankThreshold(rank=10, min_points=1250),
-    ]
-
-
-def default_bootstrap_thresholds() -> list[BootstrapThreshold]:
-    return [
-        BootstrapThreshold(minimum_days=365, rank=10, starting_points=1250),
-        BootstrapThreshold(minimum_days=300, rank=9, starting_points=1000),
-        BootstrapThreshold(minimum_days=240, rank=8, starting_points=800),
-        BootstrapThreshold(minimum_days=180, rank=7, starting_points=650),
-        BootstrapThreshold(minimum_days=150, rank=6, starting_points=500),
-        BootstrapThreshold(minimum_days=120, rank=5, starting_points=400),
-        BootstrapThreshold(minimum_days=90, rank=4, starting_points=300),
-        BootstrapThreshold(minimum_days=60, rank=3, starting_points=200),
-        BootstrapThreshold(minimum_days=30, rank=2, starting_points=100),
-        BootstrapThreshold(minimum_days=0, rank=1, starting_points=0),
-    ]
-
-
 class GuildFeatures(AppModel):
-    auto_create_resources: bool = True
     creator_auto_join_team1: bool = True
-    preserve_rank0: bool = True
     auto_create_waiting_voice: bool = True
     auto_create_temp_category: bool = True
     auto_create_season_reward_role: bool = True
+    auto_create_mvp_reward_role: bool = True
     nickname_rank_sync: bool = True
     bootstrap_on_first_setup: bool = True
 
@@ -121,10 +89,13 @@ class GuildConfig(AppModel):
     log_channel_id: int | None = None
     admin_role_ids: list[int] = Field(default_factory=list)
     staff_role_ids: list[int] = Field(default_factory=list)
+    mvp_reward_role_id: int | None = None
+    mvp_reward_role_name: str = "Mvp"
+    mvp_winner_requirement: int = 50
+    mvp_loser_requirement: int = 75
     season_reward_role_id: int | None = None
     season_reward_role_name: str = "Professional Highlight Player"
-    rank_thresholds: list[RankThreshold] = Field(default_factory=default_rank_thresholds)
-    bootstrap_thresholds: list[BootstrapThreshold] = Field(default_factory=default_bootstrap_thresholds)
+    season_reward_top_count: int = 5
     point_rules: dict[str, dict[str, PointRule]] = Field(default_factory=default_point_rules)
     result_channel_behavior: ResultChannelBehavior = ResultChannelBehavior.DELETE
     result_channel_delete_delay_seconds: int = 600

@@ -22,18 +22,6 @@ class PointRule(AppModel):
     loser_mvp: int | None = None
 
 
-class RankThreshold(AppModel):
-    rank: int
-    min_points: int | None = None
-    max_points: int | None = None
-
-
-class BootstrapThreshold(AppModel):
-    minimum_days: int
-    rank: int
-    starting_points: int
-
-
 class PlayerPointDelta(AppModel):
     user_id: int
     previous_points: int
@@ -57,7 +45,8 @@ class MatchResultSummary(AppModel):
 
 class BootstrapSummary(AppModel):
     processed_members: int = 0
-    rank_counts: dict[str, int] = Field(default_factory=dict)
+    first_assigned_rank: int | None = None
+    last_assigned_rank: int | None = None
     renamed_members: int = 0
     rename_failures: int = 0
     rename_already_correct: int = 0

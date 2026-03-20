@@ -8,7 +8,7 @@ from highlight_manager.models.season import SeasonRecord
 from highlight_manager.services.season_service import SeasonService
 
 
-@dataclass
+@dataclass(eq=True, frozen=True)
 class FakeRole:
     id: int
     name: str
@@ -79,7 +79,7 @@ class FakeConfigService:
 
 
 @pytest.mark.asyncio
-async def test_finalize_active_season_reassigns_reward_role_to_top_players() -> None:
+async def test_finalize_active_season_uses_configured_top_count_for_reward_role() -> None:
     reward_role = FakeRole(id=55, name="Professional Highlight Player")
     members = [
         FakeMember(id=1, roles=[]),
@@ -100,11 +100,11 @@ async def test_finalize_active_season_reassigns_reward_role_to_top_players() -> 
         FakeConfigService(reward_role),
     )
 
-    ended = await service.finalize_active_season(guild, GuildConfig(guild_id=123))
+    ended = await service.finalize_active_season(guild, GuildConfig(guild_id=123, season_reward_top_count=1))
 
     assert ended is not None
-    assert ended.top_player_ids == [1, 3]
+    assert ended.top_player_ids == [1]
     assert reward_role in members[0].roles
-    assert reward_role in members[2].roles
+    assert reward_role not in members[2].roles
     assert reward_role not in members[1].roles
     assert reward_role not in members[3].roles

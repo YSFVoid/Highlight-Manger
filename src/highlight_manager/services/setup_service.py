@@ -39,6 +39,7 @@ class SetupService:
         "read_message_history",
         "embed_links",
         "manage_roles",
+        "manage_nicknames",
     ]
 
     def __init__(self, config_service: ConfigService, bootstrap_service: BootstrapService) -> None:
@@ -159,6 +160,16 @@ class SetupService:
         created_resources.append(label) if log_channel_result.created else reused_resources.append(label)
         setup_resource_ids["log_channel_id"] = log_channel.id
 
+        config, mvp_reward_role, created = await self.config_service.ensure_mvp_reward_role(
+            guild,
+            config,
+            create_missing=True,
+        )
+        if mvp_reward_role is not None:
+            setup_resource_ids["mvp_reward_role_id"] = mvp_reward_role.id
+            label = f"Mvp Role: {mvp_reward_role.mention}"
+            created_resources.append(label) if created else reused_resources.append(label)
+
         config, season_reward_role, created = await self.config_service.ensure_season_reward_role(
             guild,
             config,
@@ -177,6 +188,10 @@ class SetupService:
             "temp_voice_category_id": temp_category.id,
             "result_category_id": result_category.id,
             "log_channel_id": log_channel.id,
+            "mvp_reward_role_id": mvp_reward_role.id if mvp_reward_role else config.mvp_reward_role_id,
+            "mvp_reward_role_name": (
+                mvp_reward_role.name if mvp_reward_role else config.mvp_reward_role_name
+            ),
             "season_reward_role_id": season_reward_role.id if season_reward_role else config.season_reward_role_id,
             "season_reward_role_name": (
                 season_reward_role.name if season_reward_role else config.season_reward_role_name

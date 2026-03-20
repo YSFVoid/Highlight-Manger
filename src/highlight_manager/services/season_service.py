@@ -73,7 +73,7 @@ class SeasonService:
         active = await self.repository.get_active(guild.id)
         if active is None:
             return None
-        top_profiles = await self.profile_service.list_leaderboard(guild.id, limit=5)
+        top_profiles = await self.profile_service.list_leaderboard(guild.id, limit=config.season_reward_top_count)
         top_player_ids = [profile.user_id for profile in top_profiles]
         await self._sync_season_reward_role(guild, config, top_player_ids)
         ended = await self.repository.end_active(
@@ -106,9 +106,9 @@ class SeasonService:
             should_have_role = member.id in target_ids
             try:
                 if should_have_role and not has_role:
-                    await member.add_roles(role, reason="Season top 5 reward")
+                    await member.add_roles(role, reason="Highlight Manager season reward sync")
                 elif has_role and not should_have_role:
-                    await member.remove_roles(role, reason="Season top 5 reward recalculation")
+                    await member.remove_roles(role, reason="Highlight Manager season reward sync")
             except discord.Forbidden:
                 self.logger.warning(
                     "season_reward_role_sync_forbidden",

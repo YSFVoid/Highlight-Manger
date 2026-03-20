@@ -49,15 +49,16 @@ def register_admin_commands(bot: "HighlightBot") -> None:
             inline=False,
         )
         if result.bootstrap_summary:
-            rank_lines = [
-                f"Rank {rank}: {count}"
-                for rank, count in sorted(result.bootstrap_summary.rank_counts.items(), key=lambda item: int(item[0]))
-            ]
+            assigned_range = (
+                f"Rank {result.bootstrap_summary.first_assigned_rank} to Rank {result.bootstrap_summary.last_assigned_rank}"
+                if result.bootstrap_summary.first_assigned_rank and result.bootstrap_summary.last_assigned_rank
+                else "N/A"
+            )
             embed.add_field(
                 name="Bootstrap",
                 value=(
                     f"Processed: {result.bootstrap_summary.processed_members}\n"
-                    f"Ranks: {', '.join(rank_lines) if rank_lines else 'N/A'}\n"
+                    f"Assigned Ranks: {assigned_range}\n"
                     f"Renamed: {result.bootstrap_summary.renamed_members}\n"
                     f"Rename Failures: {result.bootstrap_summary.rename_failures}\n"
                     f"Rename Already Correct: {result.bootstrap_summary.rename_already_correct}\n"
@@ -133,6 +134,8 @@ def register_admin_commands(bot: "HighlightBot") -> None:
         log_channel: discord.TextChannel | None = None,
         admin_role: discord.Role | None = None,
         staff_role: discord.Role | None = None,
+        mvp_reward_role: discord.Role | None = None,
+        mvp_reward_role_name: str | None = None,
         season_reward_role: discord.Role | None = None,
         season_reward_role_name: str | None = None,
         result_behavior: app_commands.Choice[str] | None = None,
@@ -140,7 +143,7 @@ def register_admin_commands(bot: "HighlightBot") -> None:
         if not await ensure_staff(interaction):
             return
         config = await bot.config_service.get_or_create(interaction.guild.id)
-        if not any([prefix, apostado_play_channel, highlight_play_channel, waiting_voice, temp_voice_category, result_category, log_channel, admin_role, staff_role, season_reward_role, season_reward_role_name, result_behavior]):
+        if not any([prefix, apostado_play_channel, highlight_play_channel, waiting_voice, temp_voice_category, result_category, log_channel, admin_role, staff_role, mvp_reward_role, mvp_reward_role_name, season_reward_role, season_reward_role_name, result_behavior]):
             return await interaction.response.send_message(embed=build_config_embed(config, interaction.guild), ephemeral=True)
         config, _ = await bot.config_service.run_setup(
             interaction.guild,
@@ -153,6 +156,8 @@ def register_admin_commands(bot: "HighlightBot") -> None:
             log_channel=log_channel,
             admin_role=admin_role,
             staff_role=staff_role,
+            mvp_reward_role=mvp_reward_role,
+            mvp_reward_role_name=mvp_reward_role_name,
             season_reward_role=season_reward_role,
             season_reward_role_name=season_reward_role_name,
             create_missing=False,
@@ -163,8 +168,6 @@ def register_admin_commands(bot: "HighlightBot") -> None:
 
     season = app_commands.Group(name="season", description="Season management")
     bootstrap = app_commands.Group(name="bootstrap", description="Bootstrap preview and rerun")
-    rank = app_commands.Group(name="rank", description="Rank management")
-    rank0 = app_commands.Group(name="rank0", description="Manual Rank 0 management")
     points = app_commands.Group(name="points", description="Point adjustments")
     match = app_commands.Group(name="match", description="Match moderation")
     blacklist = app_commands.Group(name="blacklist", description="Blacklist management")
@@ -206,18 +209,20 @@ def register_admin_commands(bot: "HighlightBot") -> None:
         config = await bot.config_service.get_or_create(interaction.guild.id)
         summary, preview_entries = await bot.bootstrap_service.preview(interaction.guild, config)
         lines = [
-            f"{entry.display_name} -> Rank {entry.rank} ({entry.starting_points} pts, {entry.age_days}d)"
+            f"{entry.display_name} -> Rank {entry.rank} (0 pts, {entry.age_days}d)"
             for entry in preview_entries[:20]
         ]
         embed = discord.Embed(title="Bootstrap Preview", colour=discord.Colour.orange())
         embed.description = "\n".join(lines) if lines else "No members found."
         embed.add_field(name="Members Processed", value=str(summary.processed_members), inline=True)
         embed.add_field(
-            name="Rank Counts",
-            value=", ".join(
-                f"Rank {rank}: {count}" for rank, count in sorted(summary.rank_counts.items(), key=lambda item: int(item[0]))
-            ) or "N/A",
-            inline=False,
+            name="Assigned Rank Range",
+            value=(
+                f"Rank {summary.first_assigned_rank} to Rank {summary.last_assigned_rank}"
+                if summary.first_assigned_rank and summary.last_assigned_rank
+                else "N/A"
+            ),
+            inline=True,
         )
         if len(preview_entries) > 20:
             embed.set_footer(text=f"Showing 20 of {len(preview_entries)} members.")
@@ -247,42 +252,17 @@ def register_admin_commands(bot: "HighlightBot") -> None:
         embed.add_field(name="Rename Skipped Due To Missing Permission", value=str(summary.rename_skipped_due_to_missing_permission), inline=True)
         embed.add_field(name="Rename Skipped Other", value=str(summary.rename_skipped_other), inline=True)
         embed.add_field(
-            name="Rank Counts",
-            value=", ".join(
-                f"Rank {rank}: {count}" for rank, count in sorted(summary.rank_counts.items(), key=lambda item: int(item[0]))
-            ) or "N/A",
+            name="Assigned Rank Range",
+            value=(
+                f"Rank {summary.first_assigned_rank} to Rank {summary.last_assigned_rank}"
+                if summary.first_assigned_rank and summary.last_assigned_rank
+                else "N/A"
+            ),
             inline=False,
         )
         if summary.skipped_members:
             embed.add_field(name="Skipped Members", value="\n".join(summary.skipped_members[:10])[:1024], inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @rank.command(name="set", description="Manually set a player's rank")
-    async def rank_set(interaction: discord.Interaction, member: discord.Member, rank_number: app_commands.Range[int, 1, 999]) -> None:
-        if not await ensure_staff(interaction):
-            return
-        config = await bot.config_service.get_or_create(interaction.guild.id)
-        profile = await bot.profile_service.set_rank(interaction.guild, member.id, config, rank_number)
-        await bot.audit_service.log(interaction.guild, AuditAction.RANK_UPDATED, f"Set {member.mention} to Rank {rank_number}.", actor_id=interaction.user.id, target_id=member.id)
-        await interaction.response.send_message(f"{member.mention} is now **Rank {profile.current_rank}**.", ephemeral=True)
-
-    @rank0.command(name="grant", description="Grant manual Rank 0")
-    async def rank0_grant(interaction: discord.Interaction, member: discord.Member) -> None:
-        if not await ensure_staff(interaction):
-            return
-        config = await bot.config_service.get_or_create(interaction.guild.id)
-        await bot.profile_service.set_rank0(interaction.guild, member.id, config, True)
-        await bot.audit_service.log(interaction.guild, AuditAction.RANK_UPDATED, f"Granted Rank 0 to {member.mention}.", actor_id=interaction.user.id, target_id=member.id)
-        await interaction.response.send_message(f"Granted Rank 0 to {member.mention}.", ephemeral=True)
-
-    @rank0.command(name="revoke", description="Revoke manual Rank 0")
-    async def rank0_revoke(interaction: discord.Interaction, member: discord.Member) -> None:
-        if not await ensure_staff(interaction):
-            return
-        config = await bot.config_service.get_or_create(interaction.guild.id)
-        profile = await bot.profile_service.set_rank0(interaction.guild, member.id, config, False)
-        await bot.audit_service.log(interaction.guild, AuditAction.RANK_UPDATED, f"Revoked Rank 0 from {member.mention}.", actor_id=interaction.user.id, target_id=member.id)
-        await interaction.response.send_message(f"Revoked Rank 0 from {member.mention}. They are now Rank {profile.current_rank}.", ephemeral=True)
 
     @points.command(name="add", description="Add points to a player")
     async def points_add(interaction: discord.Interaction, member: discord.Member, amount: int) -> None:
@@ -367,5 +347,5 @@ def register_admin_commands(bot: "HighlightBot") -> None:
         await bot.audit_service.log(interaction.guild, AuditAction.BLACKLIST_UPDATED, f"Removed blacklist for {member.mention}.", actor_id=interaction.user.id, target_id=member.id)
         await interaction.response.send_message(f"{member.mention} is no longer blacklisted. Current points: {profile.current_points}.", ephemeral=True)
 
-    for group in [season, bootstrap, rank, rank0, points, match, blacklist]:
+    for group in [season, bootstrap, points, match, blacklist]:
         bot.tree.add_command(group)

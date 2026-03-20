@@ -6,7 +6,6 @@ from dataclasses import dataclass
 import discord
 
 from highlight_manager.config.logging import get_logger
-from highlight_manager.models.common import RankThreshold
 from highlight_manager.models.guild_config import GuildConfig
 from highlight_manager.models.profile import PlayerProfile
 
@@ -27,31 +26,17 @@ class RankService:
     def __init__(self) -> None:
         self.logger = get_logger(__name__)
 
-    def resolve_rank(self, points: int, thresholds: list[RankThreshold]) -> int:
-        ordered = self.sort_thresholds(thresholds)
-        if not ordered:
-            return 1
-        for threshold in reversed(ordered):
-            min_ok = threshold.min_points is None or points >= threshold.min_points
-            max_ok = threshold.max_points is None or points <= threshold.max_points
-            if min_ok and max_ok:
-                return threshold.rank
-        return ordered[0].rank
-
-    def sort_thresholds(self, thresholds: list[RankThreshold]) -> list[RankThreshold]:
+    def sort_profiles_for_ranking(self, profiles: list[PlayerProfile]) -> list[PlayerProfile]:
         return sorted(
-            thresholds,
-            key=lambda item: (
-                item.min_points if item.min_points is not None else -10**9,
-                item.rank,
+            profiles,
+            key=lambda profile: (
+                -profile.current_points,
+                -profile.season_stats.wins,
+                -profile.season_stats.mvp_wins,
+                profile.joined_at or profile.created_at,
+                profile.user_id,
             ),
         )
-
-    def configured_ranks(self, thresholds: list[RankThreshold]) -> list[int]:
-        return sorted({threshold.rank for threshold in thresholds}) or [1]
-
-    def is_configured_rank(self, rank: int, thresholds: list[RankThreshold]) -> bool:
-        return rank in set(self.configured_ranks(thresholds))
 
     async def sync_member_rank(
         self,
