@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 import discord
 from discord.ext import commands
 
+from highlight_manager.config.logging import get_logger
 from highlight_manager.utils.embeds import build_leaderboard_embed, build_profile_embed
 from highlight_manager.utils.exceptions import HighlightError
 
@@ -15,15 +16,34 @@ if TYPE_CHECKING:
 class GameplayCog(commands.Cog):
     def __init__(self, bot: "HighlightBot") -> None:
         self.bot = bot
+        self.logger = get_logger(__name__)
 
     @commands.command(name="play")
     async def play(self, ctx: commands.Context, mode: str, match_type: str) -> None:
         if not ctx.guild or not isinstance(ctx.author, discord.Member):
             return await ctx.reply("This command can only be used inside the server.")
         try:
-            result = await self.bot.match_service.create_match(ctx.channel, ctx.guild, ctx.author, mode, match_type)
+            result = await self.bot.match_service.create_match(
+                ctx.channel,
+                ctx.guild,
+                ctx.author,
+                mode,
+                match_type,
+                raw_command_content=ctx.message.content if ctx.message else None,
+            )
         except HighlightError as exc:
             return await ctx.reply(str(exc))
+        except Exception:
+            self.logger.exception(
+                "play_command_handler_failed",
+                guild_id=ctx.guild.id,
+                user_id=ctx.author.id,
+                channel_id=getattr(ctx.channel, "id", None),
+                raw_command_content=ctx.message.content if ctx.message else None,
+                raw_mode=mode,
+                raw_type=match_type,
+            )
+            return await ctx.reply("I hit an internal error while processing that request.")
         await ctx.reply(result.message)
 
     @commands.command(name="profile")

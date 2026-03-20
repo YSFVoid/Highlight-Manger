@@ -1,41 +1,158 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Awaitable, Callable
 
 import discord
 from discord import app_commands
 
 from highlight_manager.models.enums import AuditAction, ResultSource
 from highlight_manager.utils.embeds import build_config_embed
+from highlight_manager.utils.exceptions import HighlightError
 if TYPE_CHECKING:
     from highlight_manager.bot import HighlightBot
 
 
-def register_admin_commands(bot: "HighlightBot") -> None:
-    async def ensure_staff(interaction: discord.Interaction) -> bool:
-        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-            if not interaction.response.is_done():
-                await interaction.response.send_message("This command can only be used inside the server.", ephemeral=True)
-            return False
-        if not await bot.config_service.is_staff(interaction.user):
-            if not interaction.response.is_done():
-                await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
-            return False
-        return True
+@dataclass(slots=True)
+class InteractionResponsePayload:
+    content: str | None = None
+    embed: discord.Embed | None = None
 
-    async def ensure_setup_admin(interaction: discord.Interaction) -> bool:
-        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-            if not interaction.response.is_done():
-                await interaction.response.send_message("This command can only be used inside the server.", ephemeral=True)
-            return False
-        if interaction.user.guild_permissions.administrator or interaction.user.guild_permissions.manage_guild:
-            return True
-        existing_config = await bot.config_service.get(interaction.guild.id)
-        if existing_config and await bot.config_service.is_staff(interaction.user):
-            return True
-        if not interaction.response.is_done():
-            await interaction.response.send_message("You need Manage Guild, Administrator, or a configured staff role to use setup commands.", ephemeral=True)
+
+async def _send_interaction_response(
+    interaction: discord.Interaction,
+    *,
+    content: str | None = None,
+    embed: discord.Embed | None = None,
+    ephemeral: bool = True,
+) -> None:
+    if interaction.response.is_done():
+        await interaction.followup.send(content=content, embed=embed, ephemeral=ephemeral)
+        return
+    await interaction.response.send_message(content=content, embed=embed, ephemeral=ephemeral)
+
+
+def _interaction_log_context(
+    interaction: discord.Interaction,
+    command_name: str,
+    *,
+    deferred: bool = False,
+    **extra,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "command_name": command_name,
+        "guild_id": interaction.guild.id if interaction.guild else None,
+        "invoking_user_id": interaction.user.id if interaction.user else None,
+        "interaction_responded": interaction.response.is_done(),
+        "interaction_deferred": deferred,
+    }
+    payload.update(extra)
+    return payload
+
+
+async def _ensure_guild_member_context(interaction: discord.Interaction) -> bool:
+    if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+        await _send_interaction_response(
+            interaction,
+            content="This command can only be used inside the server.",
+            ephemeral=True,
+        )
         return False
+    return True
+
+
+async def _ensure_staff(bot: "HighlightBot", interaction: discord.Interaction) -> bool:
+    if not await _ensure_guild_member_context(interaction):
+        return False
+    assert isinstance(interaction.user, discord.Member)
+    if not await bot.config_service.is_staff(interaction.user):
+        await _send_interaction_response(
+            interaction,
+            content="You do not have permission to use this command.",
+            ephemeral=True,
+        )
+        return False
+    return True
+
+
+async def _ensure_setup_admin(bot: "HighlightBot", interaction: discord.Interaction) -> bool:
+    if not await _ensure_guild_member_context(interaction):
+        return False
+    assert isinstance(interaction.user, discord.Member)
+    if interaction.user.guild_permissions.administrator or interaction.user.guild_permissions.manage_guild:
+        return True
+    existing_config = await bot.config_service.get(interaction.guild.id)
+    if existing_config and await bot.config_service.is_staff(interaction.user):
+        return True
+    await _send_interaction_response(
+        interaction,
+        content="You need Manage Guild, Administrator, or a configured staff role to use setup commands.",
+        ephemeral=True,
+    )
+    return False
+
+
+async def _defer_ephemeral_response(interaction: discord.Interaction) -> bool:
+    if interaction.response.is_done():
+        return False
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    return True
+
+
+async def _run_deferred_admin_command(
+    bot: "HighlightBot",
+    interaction: discord.Interaction,
+    *,
+    command_name: str,
+    permission_check: Callable[[discord.Interaction], Awaitable[bool]],
+    operation: Callable[[], Awaitable[InteractionResponsePayload]],
+) -> None:
+    if not await _ensure_guild_member_context(interaction):
+        return
+    deferred = False
+    try:
+        deferred = await _defer_ephemeral_response(interaction)
+        if not await permission_check(interaction):
+            bot.logger.info(
+                "slash_command_permission_denied",
+                **_interaction_log_context(interaction, command_name, deferred=deferred),
+            )
+            return
+        bot.logger.info(
+            "slash_command_started",
+            **_interaction_log_context(interaction, command_name, deferred=deferred),
+        )
+        payload = await operation()
+        bot.logger.info(
+            "slash_command_completed",
+            **_interaction_log_context(interaction, command_name, deferred=deferred),
+        )
+        await _send_interaction_response(
+            interaction,
+            content=payload.content,
+            embed=payload.embed,
+            ephemeral=True,
+        )
+    except HighlightError as exc:
+        bot.logger.warning(
+            "slash_command_validation_failed",
+            error=str(exc),
+            **_interaction_log_context(interaction, command_name, deferred=deferred),
+        )
+        await _send_interaction_response(interaction, content=str(exc), ephemeral=True)
+    except Exception:
+        bot.logger.exception(
+            "slash_command_unexpected_failure",
+            **_interaction_log_context(interaction, command_name, deferred=deferred),
+        )
+        await _send_interaction_response(
+            interaction,
+            content="I hit an internal error while processing that request.",
+            ephemeral=True,
+        )
+
+
+def register_admin_commands(bot: "HighlightBot") -> None:
 
     def build_setup_embed(result, guild: discord.Guild) -> discord.Embed:
         embed = build_config_embed(result.config, guild)
@@ -84,37 +201,61 @@ def register_admin_commands(bot: "HighlightBot") -> None:
         action: app_commands.Choice[str] | None = None,
         prefix: str | None = None,
     ) -> None:
-        if not await ensure_setup_admin(interaction):
-            return
         selected_action = action.value if action else "run"
         if selected_action == "status":
+            if not await _ensure_setup_admin(bot, interaction):
+                return
             config = await bot.config_service.get_or_create(interaction.guild.id)
-            return await interaction.response.send_message(embed=build_config_embed(config, interaction.guild), ephemeral=True)
+            await _send_interaction_response(
+                interaction,
+                embed=build_config_embed(config, interaction.guild),
+                ephemeral=True,
+            )
+            return
 
         if selected_action == "repair":
-            result = await bot.setup_service.repair(interaction.guild)
+            async def repair_operation() -> InteractionResponsePayload:
+                result = await bot.setup_service.repair(interaction.guild)
+                await bot.audit_service.log(
+                    interaction.guild,
+                    AuditAction.SETUP,
+                    "Setup repair completed.",
+                    actor_id=interaction.user.id,
+                    metadata={"created": result.created_resources, "reused": result.reused_resources},
+                )
+                return InteractionResponsePayload(embed=build_setup_embed(result, interaction.guild))
+
+            await _run_deferred_admin_command(
+                bot,
+                interaction,
+                command_name="/setup repair",
+                permission_check=lambda current: _ensure_setup_admin(bot, current),
+                operation=repair_operation,
+            )
+            return
+
+        async def setup_operation() -> InteractionResponsePayload:
+            result = await bot.setup_service.run(interaction.guild, prefix=prefix)
             await bot.audit_service.log(
                 interaction.guild,
                 AuditAction.SETUP,
-                "Setup repair completed.",
+                "Automatic setup completed.",
                 actor_id=interaction.user.id,
-                metadata={"created": result.created_resources, "reused": result.reused_resources},
+                metadata={
+                    "created": result.created_resources,
+                    "reused": result.reused_resources,
+                    "bootstrap_ran": result.first_bootstrap_ran,
+                },
             )
-            return await interaction.response.send_message(embed=build_setup_embed(result, interaction.guild), ephemeral=True)
+            return InteractionResponsePayload(embed=build_setup_embed(result, interaction.guild))
 
-        result = await bot.setup_service.run(interaction.guild, prefix=prefix)
-        await bot.audit_service.log(
-            interaction.guild,
-            AuditAction.SETUP,
-            "Automatic setup completed.",
-            actor_id=interaction.user.id,
-            metadata={
-                "created": result.created_resources,
-                "reused": result.reused_resources,
-                "bootstrap_ran": result.first_bootstrap_ran,
-            },
+        await _run_deferred_admin_command(
+            bot,
+            interaction,
+            command_name="/setup",
+            permission_check=lambda current: _ensure_setup_admin(bot, current),
+            operation=setup_operation,
         )
-        await interaction.response.send_message(embed=build_setup_embed(result, interaction.guild), ephemeral=True)
 
     @bot.tree.command(name="config", description="View or update guild configuration")
     @app_commands.choices(
@@ -140,31 +281,51 @@ def register_admin_commands(bot: "HighlightBot") -> None:
         season_reward_role_name: str | None = None,
         result_behavior: app_commands.Choice[str] | None = None,
     ) -> None:
-        if not await ensure_staff(interaction):
-            return
-        config = await bot.config_service.get_or_create(interaction.guild.id)
         if not any([prefix, apostado_play_channel, highlight_play_channel, waiting_voice, temp_voice_category, result_category, log_channel, admin_role, staff_role, mvp_reward_role, mvp_reward_role_name, season_reward_role, season_reward_role_name, result_behavior]):
-            return await interaction.response.send_message(embed=build_config_embed(config, interaction.guild), ephemeral=True)
-        config, _ = await bot.config_service.run_setup(
-            interaction.guild,
-            prefix=prefix,
-            apostado_play_channel=apostado_play_channel,
-            highlight_play_channel=highlight_play_channel,
-            waiting_voice=waiting_voice,
-            temp_voice_category=temp_voice_category,
-            result_category=result_category,
-            log_channel=log_channel,
-            admin_role=admin_role,
-            staff_role=staff_role,
-            mvp_reward_role=mvp_reward_role,
-            mvp_reward_role_name=mvp_reward_role_name,
-            season_reward_role=season_reward_role,
-            season_reward_role_name=season_reward_role_name,
-            create_missing=False,
-            result_behavior=result_behavior.value if result_behavior else None,
+            if not await _ensure_staff(bot, interaction):
+                return
+            current_config = await bot.config_service.get_or_create(interaction.guild.id)
+            await _send_interaction_response(
+                interaction,
+                embed=build_config_embed(current_config, interaction.guild),
+                ephemeral=True,
+            )
+            return
+
+        async def config_operation() -> InteractionResponsePayload:
+            updated_config, _ = await bot.config_service.run_setup(
+                interaction.guild,
+                prefix=prefix,
+                apostado_play_channel=apostado_play_channel,
+                highlight_play_channel=highlight_play_channel,
+                waiting_voice=waiting_voice,
+                temp_voice_category=temp_voice_category,
+                result_category=result_category,
+                log_channel=log_channel,
+                admin_role=admin_role,
+                staff_role=staff_role,
+                mvp_reward_role=mvp_reward_role,
+                mvp_reward_role_name=mvp_reward_role_name,
+                season_reward_role=season_reward_role,
+                season_reward_role_name=season_reward_role_name,
+                create_missing=False,
+                result_behavior=result_behavior.value if result_behavior else None,
+            )
+            await bot.audit_service.log(
+                interaction.guild,
+                AuditAction.CONFIG_UPDATED,
+                "Guild config updated.",
+                actor_id=interaction.user.id,
+            )
+            return InteractionResponsePayload(embed=build_config_embed(updated_config, interaction.guild))
+
+        await _run_deferred_admin_command(
+            bot,
+            interaction,
+            command_name="/config",
+            permission_check=lambda current: _ensure_staff(bot, current),
+            operation=config_operation,
         )
-        await bot.audit_service.log(interaction.guild, AuditAction.CONFIG_UPDATED, "Guild config updated.", actor_id=interaction.user.id)
-        await interaction.response.send_message(embed=build_config_embed(config, interaction.guild), ephemeral=True)
 
     season = app_commands.Group(name="season", description="Season management")
     bootstrap = app_commands.Group(name="bootstrap", description="Bootstrap preview and rerun")
@@ -174,37 +335,196 @@ def register_admin_commands(bot: "HighlightBot") -> None:
 
     @season.command(name="start", description="Start a new season")
     async def season_start(interaction: discord.Interaction, name: str | None = None) -> None:
-        if not await ensure_staff(interaction):
+        command_name = "/season start"
+        if not await _ensure_guild_member_context(interaction):
             return
-        config = await bot.config_service.get_or_create(interaction.guild.id)
-        season_record = await bot.season_service.start_new_season(interaction.guild, config, name=name)
-        await bot.audit_service.log(interaction.guild, AuditAction.SEASON_STARTED, f"Started {season_record.name}.", actor_id=interaction.user.id)
-        await interaction.response.send_message(f"Started **{season_record.name}**.", ephemeral=True)
+        deferred = False
+        active_before = None
+        try:
+            deferred = await _defer_ephemeral_response(interaction)
+            if not await _ensure_staff(bot, interaction):
+                bot.logger.info(
+                    "season_command_permission_denied",
+                    **_interaction_log_context(interaction, command_name, deferred=deferred),
+                )
+                return
+            active_before = await bot.season_service.get_active(interaction.guild.id)
+            bot.logger.info(
+                "season_command_requested",
+                **_interaction_log_context(
+                    interaction,
+                    command_name,
+                    deferred=deferred,
+                    active_season_before=active_before.name if active_before else None,
+                    active_season_number_before=active_before.season_number if active_before else None,
+                ),
+            )
+            config = await bot.config_service.get_or_create(interaction.guild.id)
+            season_record = await bot.season_service.start_new_season(interaction.guild, config, name=name)
+            await bot.audit_service.log(
+                interaction.guild,
+                AuditAction.SEASON_STARTED,
+                f"Started {season_record.name}.",
+                actor_id=interaction.user.id,
+            )
+            bot.logger.info(
+                "season_command_completed",
+                **_interaction_log_context(
+                    interaction,
+                    command_name,
+                    deferred=deferred,
+                    active_season_before=active_before.name if active_before else None,
+                    active_season_number_before=active_before.season_number if active_before else None,
+                    db_result="season_started",
+                    started_season_name=season_record.name,
+                    started_season_number=season_record.season_number,
+                ),
+            )
+            await _send_interaction_response(
+                interaction,
+                content=f"Started **{season_record.name}**.",
+                ephemeral=True,
+            )
+        except HighlightError as exc:
+            bot.logger.warning(
+                "season_command_validation_failed",
+                error=str(exc),
+                **_interaction_log_context(
+                    interaction,
+                    command_name,
+                    deferred=deferred,
+                    active_season_before=active_before.name if active_before else None,
+                    active_season_number_before=active_before.season_number if active_before else None,
+                ),
+            )
+            await _send_interaction_response(interaction, content=str(exc), ephemeral=True)
+        except Exception:
+            bot.logger.exception(
+                "season_command_failed",
+                **_interaction_log_context(
+                    interaction,
+                    command_name,
+                    deferred=deferred,
+                    active_season_before=active_before.name if active_before else None,
+                    active_season_number_before=active_before.season_number if active_before else None,
+                ),
+            )
+            await _send_interaction_response(
+                interaction,
+                content="I hit an internal error while processing that request.",
+                ephemeral=True,
+            )
 
     @season.command(name="end", description="End the current season")
     async def season_end(interaction: discord.Interaction) -> None:
-        if not await ensure_staff(interaction):
+        command_name = "/season end"
+        if not await _ensure_guild_member_context(interaction):
             return
-        config = await bot.config_service.get_or_create(interaction.guild.id)
-        ended = await bot.season_service.end_active(interaction.guild, config)
-        if ended is None:
-            return await interaction.response.send_message("There is no active season to end.", ephemeral=True)
-        await bot.audit_service.log(
-            interaction.guild,
-            AuditAction.SEASON_ENDED,
-            f"Ended {ended.name}.",
-            actor_id=interaction.user.id,
-            metadata={"top_player_ids": ended.top_player_ids},
-        )
-        reward_count = len(ended.top_player_ids)
-        await interaction.response.send_message(
-            f"Ended **{ended.name}** and synced the Professional Highlight Player reward for **{reward_count}** player(s).",
-            ephemeral=True,
-        )
+        deferred = False
+        active_before = None
+        try:
+            deferred = await _defer_ephemeral_response(interaction)
+            if not await _ensure_staff(bot, interaction):
+                bot.logger.info(
+                    "season_command_permission_denied",
+                    **_interaction_log_context(interaction, command_name, deferred=deferred),
+                )
+                return
+            active_before = await bot.season_service.get_active(interaction.guild.id)
+            bot.logger.info(
+                "season_command_requested",
+                **_interaction_log_context(
+                    interaction,
+                    command_name,
+                    deferred=deferred,
+                    active_season_before=active_before.name if active_before else None,
+                    active_season_number_before=active_before.season_number if active_before else None,
+                ),
+            )
+            config = await bot.config_service.get_or_create(interaction.guild.id)
+            ended = await bot.season_service.end_active(interaction.guild, config)
+            if ended is None:
+                bot.logger.info(
+                    "season_command_completed",
+                    **_interaction_log_context(
+                        interaction,
+                        command_name,
+                        deferred=deferred,
+                        active_season_before=None,
+                        active_season_number_before=None,
+                        db_result="no_active_season",
+                    ),
+                )
+                await _send_interaction_response(
+                    interaction,
+                    content="There is no active season to end.",
+                    ephemeral=True,
+                )
+                return
+            await bot.audit_service.log(
+                interaction.guild,
+                AuditAction.SEASON_ENDED,
+                f"Ended {ended.name}.",
+                actor_id=interaction.user.id,
+                metadata={"top_player_ids": ended.top_player_ids},
+            )
+            reward_count = len(ended.top_player_ids)
+            bot.logger.info(
+                "season_command_completed",
+                **_interaction_log_context(
+                    interaction,
+                    command_name,
+                    deferred=deferred,
+                    active_season_before=active_before.name if active_before else None,
+                    active_season_number_before=active_before.season_number if active_before else None,
+                    db_result="season_ended",
+                    ended_season_name=ended.name,
+                    ended_season_number=ended.season_number,
+                    reward_top_player_ids=ended.top_player_ids,
+                    reward_count=reward_count,
+                ),
+            )
+            await _send_interaction_response(
+                interaction,
+                content=(
+                    f"Ended **{ended.name}** and synced the Professional Highlight Player "
+                    f"reward for **{reward_count}** player(s)."
+                ),
+                ephemeral=True,
+            )
+        except HighlightError as exc:
+            bot.logger.warning(
+                "season_command_validation_failed",
+                error=str(exc),
+                **_interaction_log_context(
+                    interaction,
+                    command_name,
+                    deferred=deferred,
+                    active_season_before=active_before.name if active_before else None,
+                    active_season_number_before=active_before.season_number if active_before else None,
+                ),
+            )
+            await _send_interaction_response(interaction, content=str(exc), ephemeral=True)
+        except Exception:
+            bot.logger.exception(
+                "season_command_failed",
+                **_interaction_log_context(
+                    interaction,
+                    command_name,
+                    deferred=deferred,
+                    active_season_before=active_before.name if active_before else None,
+                    active_season_number_before=active_before.season_number if active_before else None,
+                ),
+            )
+            await _send_interaction_response(
+                interaction,
+                content="I hit an internal error while processing that request.",
+                ephemeral=True,
+            )
 
     @bootstrap.command(name="preview", description="Preview server-age bootstrap assignments")
     async def bootstrap_preview(interaction: discord.Interaction) -> None:
-        if not await ensure_setup_admin(interaction):
+        if not await _ensure_setup_admin(bot, interaction):
             return
         config = await bot.config_service.get_or_create(interaction.guild.id)
         summary, preview_entries = await bot.bootstrap_service.preview(interaction.guild, config)
@@ -226,77 +546,151 @@ def register_admin_commands(bot: "HighlightBot") -> None:
         )
         if len(preview_entries) > 20:
             embed.set_footer(text=f"Showing 20 of {len(preview_entries)} members.")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await _send_interaction_response(interaction, embed=embed, ephemeral=True)
 
     @bootstrap.command(name="rerun", description="Explicitly rerun server-age bootstrap")
     async def bootstrap_rerun(interaction: discord.Interaction) -> None:
-        if not await ensure_setup_admin(interaction):
-            return
-        config = await bot.config_service.get_or_create(interaction.guild.id)
-        summary = await bot.bootstrap_service.run(interaction.guild, config)
-        await bot.config_service.update(
-            interaction.guild.id,
-            {
-                "bootstrap_completed": True,
-                "bootstrap_completed_at": summary.completed_at,
-                "bootstrap_last_summary": summary.model_dump(mode="python"),
-            },
+        async def rerun_operation() -> InteractionResponsePayload:
+            config = await bot.config_service.get_or_create(interaction.guild.id)
+            summary = await bot.bootstrap_service.run(interaction.guild, config)
+            await bot.config_service.update(
+                interaction.guild.id,
+                {
+                    "bootstrap_completed": True,
+                    "bootstrap_completed_at": summary.completed_at,
+                    "bootstrap_last_summary": summary.model_dump(mode="python"),
+                },
+            )
+            await bot.audit_service.log(
+                interaction.guild,
+                AuditAction.SETUP,
+                "Bootstrap rerun completed.",
+                actor_id=interaction.user.id,
+            )
+            embed = discord.Embed(title="Bootstrap Rerun Complete", colour=discord.Colour.green())
+            embed.add_field(name="Processed Members", value=str(summary.processed_members), inline=True)
+            embed.add_field(name="Renamed Members", value=str(summary.renamed_members), inline=True)
+            embed.add_field(name="Rename Failures", value=str(summary.rename_failures), inline=True)
+            embed.add_field(name="Rename Already Correct", value=str(summary.rename_already_correct), inline=True)
+            embed.add_field(name="Rename Skipped Due To Hierarchy", value=str(summary.rename_skipped_due_to_hierarchy), inline=True)
+            embed.add_field(name="Rename Skipped Due To Missing Permission", value=str(summary.rename_skipped_due_to_missing_permission), inline=True)
+            embed.add_field(name="Rename Skipped Other", value=str(summary.rename_skipped_other), inline=True)
+            embed.add_field(
+                name="Assigned Rank Range",
+                value=(
+                    f"Rank {summary.first_assigned_rank} to Rank {summary.last_assigned_rank}"
+                    if summary.first_assigned_rank and summary.last_assigned_rank
+                    else "N/A"
+                ),
+                inline=False,
+            )
+            if summary.skipped_members:
+                embed.add_field(
+                    name="Skipped Members",
+                    value="\n".join(summary.skipped_members[:10])[:1024],
+                    inline=False,
+                )
+            return InteractionResponsePayload(embed=embed)
+
+        await _run_deferred_admin_command(
+            bot,
+            interaction,
+            command_name="/bootstrap rerun",
+            permission_check=lambda current: _ensure_setup_admin(bot, current),
+            operation=rerun_operation,
         )
-        await bot.audit_service.log(interaction.guild, AuditAction.SETUP, "Bootstrap rerun completed.", actor_id=interaction.user.id)
-        embed = discord.Embed(title="Bootstrap Rerun Complete", colour=discord.Colour.green())
-        embed.add_field(name="Processed Members", value=str(summary.processed_members), inline=True)
-        embed.add_field(name="Renamed Members", value=str(summary.renamed_members), inline=True)
-        embed.add_field(name="Rename Failures", value=str(summary.rename_failures), inline=True)
-        embed.add_field(name="Rename Already Correct", value=str(summary.rename_already_correct), inline=True)
-        embed.add_field(name="Rename Skipped Due To Hierarchy", value=str(summary.rename_skipped_due_to_hierarchy), inline=True)
-        embed.add_field(name="Rename Skipped Due To Missing Permission", value=str(summary.rename_skipped_due_to_missing_permission), inline=True)
-        embed.add_field(name="Rename Skipped Other", value=str(summary.rename_skipped_other), inline=True)
-        embed.add_field(
-            name="Assigned Rank Range",
-            value=(
-                f"Rank {summary.first_assigned_rank} to Rank {summary.last_assigned_rank}"
-                if summary.first_assigned_rank and summary.last_assigned_rank
-                else "N/A"
-            ),
-            inline=False,
-        )
-        if summary.skipped_members:
-            embed.add_field(name="Skipped Members", value="\n".join(summary.skipped_members[:10])[:1024], inline=False)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @points.command(name="add", description="Add points to a player")
     async def points_add(interaction: discord.Interaction, member: discord.Member, amount: int) -> None:
-        if not await ensure_staff(interaction):
-            return
-        config = await bot.config_service.get_or_create(interaction.guild.id)
-        result = await bot.profile_service.adjust_points(interaction.guild, member.id, config, abs(amount))
-        await bot.audit_service.log(interaction.guild, AuditAction.POINTS_UPDATED, f"Added {abs(amount)} points to {member.mention}.", actor_id=interaction.user.id, target_id=member.id)
-        await interaction.response.send_message(f"{member.mention}: {result.previous_points} -> {result.new_points} points.", ephemeral=True)
+        async def points_add_operation() -> InteractionResponsePayload:
+            config = await bot.config_service.get_or_create(interaction.guild.id)
+            result = await bot.profile_service.adjust_points(interaction.guild, member.id, config, abs(amount))
+            await bot.audit_service.log(
+                interaction.guild,
+                AuditAction.POINTS_UPDATED,
+                f"Added {abs(amount)} points to {member.mention}.",
+                actor_id=interaction.user.id,
+                target_id=member.id,
+            )
+            return InteractionResponsePayload(
+                content=f"{member.mention}: {result.previous_points} -> {result.new_points} points.",
+            )
+
+        await _run_deferred_admin_command(
+            bot,
+            interaction,
+            command_name="/points add",
+            permission_check=lambda current: _ensure_staff(bot, current),
+            operation=points_add_operation,
+        )
 
     @points.command(name="remove", description="Remove points from a player")
     async def points_remove(interaction: discord.Interaction, member: discord.Member, amount: int) -> None:
-        if not await ensure_staff(interaction):
-            return
-        config = await bot.config_service.get_or_create(interaction.guild.id)
-        result = await bot.profile_service.adjust_points(interaction.guild, member.id, config, -abs(amount))
-        await bot.audit_service.log(interaction.guild, AuditAction.POINTS_UPDATED, f"Removed {abs(amount)} points from {member.mention}.", actor_id=interaction.user.id, target_id=member.id)
-        await interaction.response.send_message(f"{member.mention}: {result.previous_points} -> {result.new_points} points.", ephemeral=True)
+        async def points_remove_operation() -> InteractionResponsePayload:
+            config = await bot.config_service.get_or_create(interaction.guild.id)
+            result = await bot.profile_service.adjust_points(interaction.guild, member.id, config, -abs(amount))
+            await bot.audit_service.log(
+                interaction.guild,
+                AuditAction.POINTS_UPDATED,
+                f"Removed {abs(amount)} points from {member.mention}.",
+                actor_id=interaction.user.id,
+                target_id=member.id,
+            )
+            return InteractionResponsePayload(
+                content=f"{member.mention}: {result.previous_points} -> {result.new_points} points.",
+            )
+
+        await _run_deferred_admin_command(
+            bot,
+            interaction,
+            command_name="/points remove",
+            permission_check=lambda current: _ensure_staff(bot, current),
+            operation=points_remove_operation,
+        )
 
     @points.command(name="set", description="Set a player's points exactly")
     async def points_set(interaction: discord.Interaction, member: discord.Member, amount: int) -> None:
-        if not await ensure_staff(interaction):
-            return
-        config = await bot.config_service.get_or_create(interaction.guild.id)
-        result = await bot.profile_service.set_points(interaction.guild, member.id, config, amount)
-        await bot.audit_service.log(interaction.guild, AuditAction.POINTS_UPDATED, f"Set {member.mention} to {amount} points.", actor_id=interaction.user.id, target_id=member.id)
-        await interaction.response.send_message(f"{member.mention}: {result.previous_points} -> {result.new_points} points.", ephemeral=True)
+        async def points_set_operation() -> InteractionResponsePayload:
+            config = await bot.config_service.get_or_create(interaction.guild.id)
+            result = await bot.profile_service.set_points(interaction.guild, member.id, config, amount)
+            await bot.audit_service.log(
+                interaction.guild,
+                AuditAction.POINTS_UPDATED,
+                f"Set {member.mention} to {amount} points.",
+                actor_id=interaction.user.id,
+                target_id=member.id,
+            )
+            return InteractionResponsePayload(
+                content=f"{member.mention}: {result.previous_points} -> {result.new_points} points.",
+            )
+
+        await _run_deferred_admin_command(
+            bot,
+            interaction,
+            command_name="/points set",
+            permission_check=lambda current: _ensure_staff(bot, current),
+            operation=points_set_operation,
+        )
 
     @match.command(name="cancel", description="Cancel a match")
     async def match_cancel(interaction: discord.Interaction, match_number: int, reason: str | None = None) -> None:
-        if not await ensure_staff(interaction):
-            return
-        result = await bot.match_service.cancel_match(interaction.guild, match_number, actor_id=interaction.user.id, force=True, reason=reason or "Canceled by staff.")
-        await interaction.response.send_message(result.message, ephemeral=True)
+        async def cancel_operation() -> InteractionResponsePayload:
+            result = await bot.match_service.cancel_match(
+                interaction.guild,
+                match_number,
+                actor_id=interaction.user.id,
+                force=True,
+                reason=reason or "Canceled by staff.",
+            )
+            return InteractionResponsePayload(content=result.message)
+
+        await _run_deferred_admin_command(
+            bot,
+            interaction,
+            command_name="/match cancel",
+            permission_check=lambda current: _ensure_staff(bot, current),
+            operation=cancel_operation,
+        )
 
     @match.command(name="force-result", description="Force a result for a match")
     async def match_force_result(
@@ -307,45 +701,94 @@ def register_admin_commands(bot: "HighlightBot") -> None:
         loser_mvp: discord.Member | None = None,
         notes: str | None = None,
     ) -> None:
-        if not await ensure_staff(interaction):
-            return
-        current_match = await bot.match_service.require_match(interaction.guild.id, match_number)
-        if current_match.mode.team_size > 1 and (winner_mvp is None or loser_mvp is None):
-            return await interaction.response.send_message("Team matches require both winner MVP and loser MVP.", ephemeral=True)
-        finalized = await bot.match_service.finalize_match(
-            interaction.guild,
-            match_number,
-            winner_team=winner_team,
-            winner_mvp_id=winner_mvp.id if winner_mvp else None,
-            loser_mvp_id=loser_mvp.id if loser_mvp else None,
-            source=ResultSource.FORCE_RESULT,
-            actor_id=interaction.user.id,
-            notes=notes or "Forced by staff command.",
+        async def force_result_operation() -> InteractionResponsePayload:
+            current_match = await bot.match_service.require_match(interaction.guild.id, match_number)
+            if current_match.mode.team_size > 1 and (winner_mvp is None or loser_mvp is None):
+                raise HighlightError("Team matches require both winner MVP and loser MVP.")
+            finalized = await bot.match_service.finalize_match(
+                interaction.guild,
+                match_number,
+                winner_team=winner_team,
+                winner_mvp_id=winner_mvp.id if winner_mvp else None,
+                loser_mvp_id=loser_mvp.id if loser_mvp else None,
+                source=ResultSource.FORCE_RESULT,
+                actor_id=interaction.user.id,
+                notes=notes or "Forced by staff command.",
+            )
+            return InteractionResponsePayload(content=f"Forced result for Match #{finalized.display_id}.")
+
+        await _run_deferred_admin_command(
+            bot,
+            interaction,
+            command_name="/match force-result",
+            permission_check=lambda current: _ensure_staff(bot, current),
+            operation=force_result_operation,
         )
-        await interaction.response.send_message(f"Forced result for Match #{finalized.display_id}.", ephemeral=True)
 
     @match.command(name="force-close", description="Force close a match")
     async def match_force_close(interaction: discord.Interaction, match_number: int, reason: str | None = None) -> None:
-        if not await ensure_staff(interaction):
-            return
-        result = await bot.match_service.force_close(interaction.guild, match_number, interaction.user.id, reason or "Force closed by staff.")
-        await interaction.response.send_message(result.message, ephemeral=True)
+        async def force_close_operation() -> InteractionResponsePayload:
+            result = await bot.match_service.force_close(
+                interaction.guild,
+                match_number,
+                interaction.user.id,
+                reason or "Force closed by staff.",
+            )
+            return InteractionResponsePayload(content=result.message)
+
+        await _run_deferred_admin_command(
+            bot,
+            interaction,
+            command_name="/match force-close",
+            permission_check=lambda current: _ensure_staff(bot, current),
+            operation=force_close_operation,
+        )
 
     @blacklist.command(name="add", description="Blacklist a player from matches")
     async def blacklist_add(interaction: discord.Interaction, member: discord.Member) -> None:
-        if not await ensure_staff(interaction):
-            return
-        profile = await bot.profile_service.set_blacklist(interaction.guild, member.id, True)
-        await bot.audit_service.log(interaction.guild, AuditAction.BLACKLIST_UPDATED, f"Blacklisted {member.mention}.", actor_id=interaction.user.id, target_id=member.id)
-        await interaction.response.send_message(f"{member.mention} is now blacklisted. Current points: {profile.current_points}.", ephemeral=True)
+        async def blacklist_add_operation() -> InteractionResponsePayload:
+            profile = await bot.profile_service.set_blacklist(interaction.guild, member.id, True)
+            await bot.audit_service.log(
+                interaction.guild,
+                AuditAction.BLACKLIST_UPDATED,
+                f"Blacklisted {member.mention}.",
+                actor_id=interaction.user.id,
+                target_id=member.id,
+            )
+            return InteractionResponsePayload(
+                content=f"{member.mention} is now blacklisted. Current points: {profile.current_points}.",
+            )
+
+        await _run_deferred_admin_command(
+            bot,
+            interaction,
+            command_name="/blacklist add",
+            permission_check=lambda current: _ensure_staff(bot, current),
+            operation=blacklist_add_operation,
+        )
 
     @blacklist.command(name="remove", description="Remove a player from the blacklist")
     async def blacklist_remove(interaction: discord.Interaction, member: discord.Member) -> None:
-        if not await ensure_staff(interaction):
-            return
-        profile = await bot.profile_service.set_blacklist(interaction.guild, member.id, False)
-        await bot.audit_service.log(interaction.guild, AuditAction.BLACKLIST_UPDATED, f"Removed blacklist for {member.mention}.", actor_id=interaction.user.id, target_id=member.id)
-        await interaction.response.send_message(f"{member.mention} is no longer blacklisted. Current points: {profile.current_points}.", ephemeral=True)
+        async def blacklist_remove_operation() -> InteractionResponsePayload:
+            profile = await bot.profile_service.set_blacklist(interaction.guild, member.id, False)
+            await bot.audit_service.log(
+                interaction.guild,
+                AuditAction.BLACKLIST_UPDATED,
+                f"Removed blacklist for {member.mention}.",
+                actor_id=interaction.user.id,
+                target_id=member.id,
+            )
+            return InteractionResponsePayload(
+                content=f"{member.mention} is no longer blacklisted. Current points: {profile.current_points}.",
+            )
+
+        await _run_deferred_admin_command(
+            bot,
+            interaction,
+            command_name="/blacklist remove",
+            permission_check=lambda current: _ensure_staff(bot, current),
+            operation=blacklist_remove_operation,
+        )
 
     for group in [season, bootstrap, points, match, blacklist]:
         bot.tree.add_command(group)

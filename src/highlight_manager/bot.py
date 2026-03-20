@@ -160,8 +160,15 @@ class HighlightBot(commands.Bot):
         if isinstance(original, HighlightError):
             await context.reply(str(original))
             return
-        self.logger.exception("prefix_command_error", command=context.command.qualified_name if context.command else None, error=str(original))
-        await context.reply("Something went wrong while processing that command.")
+        self.logger.exception(
+            "prefix_command_error",
+            command=context.command.qualified_name if context.command else None,
+            guild_id=context.guild.id if context.guild else None,
+            user_id=context.author.id if context.author else None,
+            message_content=context.message.content if context.message else None,
+            error=str(original),
+        )
+        await context.reply("I hit an internal error while processing that command.")
 
     async def on_error(self, event_method: str, *args: Any, **kwargs: Any) -> None:
         self.logger.exception("discord_event_error", event=event_method)
@@ -191,11 +198,18 @@ def main() -> None:
             else:
                 await interaction.response.send_message(str(original), ephemeral=True)
             return
-        bot.logger.exception("app_command_error", error=str(original))
+        bot.logger.exception(
+            "app_command_error",
+            command=interaction.command.qualified_name if interaction.command else None,
+            guild_id=interaction.guild.id if interaction.guild else None,
+            user_id=interaction.user.id if interaction.user else None,
+            interaction_responded=interaction.response.is_done(),
+            error=str(original),
+        )
         if interaction.response.is_done():
-            await interaction.followup.send("Something went wrong while processing that command.", ephemeral=True)
+            await interaction.followup.send("I hit an internal error while processing that request.", ephemeral=True)
         else:
-            await interaction.response.send_message("Something went wrong while processing that command.", ephemeral=True)
+            await interaction.response.send_message("I hit an internal error while processing that request.", ephemeral=True)
 
     bot.run(settings.discord_token, log_handler=None)
 

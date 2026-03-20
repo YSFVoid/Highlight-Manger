@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import discord
 
@@ -18,13 +19,45 @@ from highlight_manager.services.voice_service import VoiceService
 from highlight_manager.services.vote_service import VoteService
 from highlight_manager.utils.dates import minutes_from_now, seconds_from_now, utcnow
 from highlight_manager.utils.embeds import build_match_embed, build_result_summary_embed, build_vote_status_embed
-from highlight_manager.utils.exceptions import StateTransitionError, UserFacingError
+from highlight_manager.utils.exceptions import HighlightError, StateTransitionError, UserFacingError
 
 
 @dataclass(slots=True)
 class MatchActionResult:
     match: MatchRecord
     message: str
+
+
+@dataclass(slots=True)
+class PlayRequestLogContext:
+    raw_command_content: str | None
+    raw_mode: str
+    raw_type: str
+    parsed_mode: str | None = None
+    normalized_type: str | None = None
+    current_channel_id: int | None = None
+    allowed_apostado_channel_id: int | None = None
+    allowed_highlight_channel_id: int | None = None
+    waiting_voice_id: int | None = None
+    member_current_voice_id: int | None = None
+    validation_stage: str = "parse_command"
+
+    def as_log_kwargs(self, **extra: Any) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "raw_command_content": self.raw_command_content,
+            "raw_mode": self.raw_mode,
+            "raw_type": self.raw_type,
+            "parsed_mode": self.parsed_mode,
+            "normalized_type": self.normalized_type,
+            "current_channel_id": self.current_channel_id,
+            "allowed_apostado_channel_id": self.allowed_apostado_channel_id,
+            "allowed_highlight_channel_id": self.allowed_highlight_channel_id,
+            "waiting_voice_id": self.waiting_voice_id,
+            "member_current_voice_id": self.member_current_voice_id,
+            "validation_stage": self.validation_stage,
+        }
+        payload.update(extra)
+        return payload
 
 
 class MatchService:
@@ -62,46 +95,156 @@ class MatchService:
         creator: discord.Member,
         mode_input: str,
         type_input: str,
+        *,
+        raw_command_content: str | None = None,
     ) -> MatchActionResult:
-        mode = MatchMode.from_input(mode_input)
-        match_type = MatchType.from_input(type_input)
-        if not isinstance(channel, discord.abc.GuildChannel):
-            raise UserFacingError("Use match commands only in the configured play room.")
-        config = await self.config_service.ensure_match_resources(guild, await self.config_service.get_or_create(guild.id))
-        config = await self.config_service.validate_ready_for_matches(guild.id)
-        self.config_service.validate_play_channel(channel, config, match_type)
-        await self.profile_service.require_not_blacklisted(guild, creator.id, config)
-        self.voice_service.ensure_member_in_waiting_voice(creator, config)
-
-        match_number = await self.config_service.reserve_next_match_number(guild.id)
-        season = await self.season_service.ensure_active(guild.id)
-        match = MatchRecord(
+        context = PlayRequestLogContext(
+            raw_command_content=raw_command_content,
+            raw_mode=mode_input,
+            raw_type=type_input,
+            current_channel_id=getattr(channel, "id", None),
+            member_current_voice_id=(
+                creator.voice.channel.id
+                if creator.voice is not None and creator.voice.channel is not None
+                else None
+            ),
+        )
+        self.logger.info(
+            "play_command_received",
             guild_id=guild.id,
-            match_number=match_number,
-            creator_id=creator.id,
-            mode=mode,
-            match_type=match_type,
-            status=MatchStatus.OPEN,
-            team1_player_ids=[creator.id] if config.features.creator_auto_join_team1 else [],
-            source_channel_id=getattr(channel, "id", None),
-            waiting_voice_channel_id=config.waiting_voice_channel_id,
-            created_at=utcnow(),
-            queue_expires_at=minutes_from_now(config.queue_timeout_minutes),
-            season_id=season.season_number,
+            user_id=creator.id,
+            **context.as_log_kwargs(validation_result="received"),
         )
-        await self.repository.create(match)
-        self.register_views(match)
-        public_message = await channel.send(embed=build_match_embed(match, guild), view=self._build_queue_view(match))
-        match.public_message_id = public_message.id
-        match = await self.repository.replace(match)
-        await self.audit_service.log(
-            guild,
-            AuditAction.MATCH_CREATED,
-            f"{creator.mention} created Match #{match.display_id} ({match.mode.value} {match.match_type.label}).",
-            actor_id=creator.id,
-            metadata={"match_number": match.match_number, "type": match.match_type.value, "mode": match.mode.value},
-        )
-        return MatchActionResult(match=match, message=f"Created Match #{match.display_id}.")
+        match: MatchRecord | None = None
+        try:
+            context.validation_stage = "normalize_type"
+            match_type = MatchType.from_input(type_input)
+            context.normalized_type = match_type.value
+            self.logger.info(
+                "play_command_stage_passed",
+                guild_id=guild.id,
+                user_id=creator.id,
+                **context.as_log_kwargs(validation_result="passed"),
+            )
+
+            context.validation_stage = "validate_mode"
+            mode = MatchMode.from_input(mode_input)
+            context.parsed_mode = mode.value
+            self.logger.info(
+                "play_command_stage_passed",
+                guild_id=guild.id,
+                user_id=creator.id,
+                **context.as_log_kwargs(validation_result="passed"),
+            )
+
+            context.validation_stage = "validate_play_channel"
+            if not isinstance(channel, discord.abc.GuildChannel):
+                raise UserFacingError("Use match commands only in the configured play room.")
+            config = await self.config_service.ensure_match_resources(
+                guild,
+                await self.config_service.get_or_create(guild.id),
+            )
+            context.allowed_apostado_channel_id = config.apostado_play_channel_id
+            context.allowed_highlight_channel_id = config.highlight_play_channel_id
+            context.waiting_voice_id = config.waiting_voice_channel_id
+            config = await self.config_service.validate_ready_for_matches(guild.id)
+            context.allowed_apostado_channel_id = config.apostado_play_channel_id
+            context.allowed_highlight_channel_id = config.highlight_play_channel_id
+            context.waiting_voice_id = config.waiting_voice_channel_id
+            self.config_service.validate_play_channel(channel, config, match_type)
+            self.logger.info(
+                "play_command_stage_passed",
+                guild_id=guild.id,
+                user_id=creator.id,
+                **context.as_log_kwargs(validation_result="passed"),
+            )
+
+            context.validation_stage = "validate_waiting_voice"
+            self.voice_service.ensure_member_in_waiting_voice(creator, config)
+            self.logger.info(
+                "play_command_stage_passed",
+                guild_id=guild.id,
+                user_id=creator.id,
+                **context.as_log_kwargs(validation_result="passed"),
+            )
+
+            context.validation_stage = "validate_eligibility"
+            await self.profile_service.require_not_blacklisted(guild, creator.id, config)
+            self.logger.info(
+                "play_command_stage_passed",
+                guild_id=guild.id,
+                user_id=creator.id,
+                **context.as_log_kwargs(validation_result="passed"),
+            )
+
+            context.validation_stage = "reserve_match_number"
+            match_number = await self.config_service.reserve_next_match_number(guild.id)
+
+            context.validation_stage = "ensure_active_season"
+            season = await self.season_service.ensure_active(guild.id)
+
+            context.validation_stage = "persist_match"
+            match = MatchRecord(
+                guild_id=guild.id,
+                match_number=match_number,
+                creator_id=creator.id,
+                mode=mode,
+                match_type=match_type,
+                status=MatchStatus.OPEN,
+                team1_player_ids=[creator.id] if config.features.creator_auto_join_team1 else [],
+                source_channel_id=channel.id,
+                waiting_voice_channel_id=config.waiting_voice_channel_id,
+                created_at=utcnow(),
+                queue_expires_at=minutes_from_now(config.queue_timeout_minutes),
+                season_id=season.season_number,
+            )
+            await self.repository.create(match)
+
+            context.validation_stage = "register_queue_view"
+            self.register_views(match)
+
+            context.validation_stage = "post_public_message"
+            public_message = await channel.send(embed=build_match_embed(match, guild), view=self._build_queue_view(match))
+
+            context.validation_stage = "persist_public_message"
+            match.public_message_id = public_message.id
+            match = await self.repository.replace(match)
+
+            context.validation_stage = "audit_log"
+            await self.audit_service.log(
+                guild,
+                AuditAction.MATCH_CREATED,
+                f"{creator.mention} created Match #{match.display_id} ({match.mode.value} {match.match_type.label}).",
+                actor_id=creator.id,
+                metadata={"match_number": match.match_number, "type": match.match_type.value, "mode": match.mode.value},
+            )
+            self.logger.info(
+                "play_command_completed",
+                guild_id=guild.id,
+                user_id=creator.id,
+                match_number=match.match_number,
+                match_display_id=match.display_id,
+                **context.as_log_kwargs(validation_result="success"),
+            )
+            return MatchActionResult(match=match, message=f"Created Match #{match.display_id}.")
+        except HighlightError as exc:
+            self.logger.warning(
+                "play_command_validation_failed",
+                guild_id=guild.id,
+                user_id=creator.id,
+                error=str(exc),
+                **context.as_log_kwargs(validation_result="failed"),
+            )
+            raise
+        except Exception:
+            self.logger.exception(
+                "play_command_unexpected_failure",
+                guild_id=guild.id,
+                user_id=creator.id,
+                match_number=match.match_number if match is not None else None,
+                **context.as_log_kwargs(validation_result="error"),
+            )
+            raise
 
     async def join_team(self, member: discord.Member, match_number: int, team_number: int) -> MatchActionResult:
         config = await self.config_service.ensure_match_resources(
