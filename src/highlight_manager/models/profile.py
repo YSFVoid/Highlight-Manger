@@ -15,6 +15,7 @@ class PlayerProfile(AppModel):
     current_points: int = 0
     lifetime_points: int = 0
     current_rank: int = 1
+    manual_rank_override: int | None = None
     blacklisted: bool = False
     joined_at: datetime | None = None
     mvp_winner_count: int = 0

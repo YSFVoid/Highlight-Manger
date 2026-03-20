@@ -14,6 +14,7 @@ class ProfileRepository(BaseRepository[PlayerProfile]):
         await self.collection.create_index(
             [
                 ("guild_id", 1),
+                ("manual_rank_override", 1),
                 ("current_points", -1),
                 ("season_stats.wins", -1),
                 ("season_stats.mvp_wins", -1),
@@ -45,7 +46,7 @@ class ProfileRepository(BaseRepository[PlayerProfile]):
 
     async def list_leaderboard(self, guild_id: int, limit: int = 10) -> list[PlayerProfile]:
         cursor = (
-            self.collection.find({"guild_id": guild_id})
+            self.collection.find({"guild_id": guild_id, "manual_rank_override": None})
             .sort(
                 [
                     ("current_points", -1),
@@ -62,6 +63,7 @@ class ProfileRepository(BaseRepository[PlayerProfile]):
     async def list_for_ranking(self, guild_id: int) -> list[PlayerProfile]:
         cursor = self.collection.find({"guild_id": guild_id}).sort(
             [
+                ("manual_rank_override", 1),
                 ("current_points", -1),
                 ("season_stats.wins", -1),
                 ("season_stats.mvp_wins", -1),
@@ -74,10 +76,12 @@ class ProfileRepository(BaseRepository[PlayerProfile]):
     async def count_for_guild(self, guild_id: int) -> int:
         return await self.collection.count_documents({"guild_id": guild_id})
 
+    async def count_ranked_for_guild(self, guild_id: int) -> int:
+        return await self.collection.count_documents({"guild_id": guild_id, "manual_rank_override": None})
+
     async def reset_for_new_season(self, guild_id: int, updated_at: datetime) -> None:
         base_reset = {
             "current_points": 0,
-            "current_rank": 1,
             "season_stats": {
                 "matches_played": 0,
                 "wins": 0,

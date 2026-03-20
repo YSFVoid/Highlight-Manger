@@ -154,10 +154,10 @@ class FakeTextChannel(discord.abc.GuildChannel):
         self.sent_payloads: list[dict] = []
         self.fail_send = fail_send
 
-    async def send(self, *, embed=None, view=None):
+    async def send(self, content=None, *, embed=None, view=None):
         if self.fail_send:
             raise RuntimeError("boom")
-        self.sent_payloads.append({"embed": embed, "view": view})
+        self.sent_payloads.append({"content": content, "embed": embed, "view": view})
         return SimpleNamespace(id=900 + len(self.sent_payloads))
 
 

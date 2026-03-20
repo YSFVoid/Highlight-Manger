@@ -279,9 +279,32 @@ def register_admin_commands(bot: "HighlightBot") -> None:
         mvp_reward_role_name: str | None = None,
         season_reward_role: discord.Role | None = None,
         season_reward_role_name: str | None = None,
+        ping_here_on_match_create: bool | None = None,
+        ping_here_on_match_ready: bool | None = None,
+        private_match_key_required: bool | None = None,
         result_behavior: app_commands.Choice[str] | None = None,
     ) -> None:
-        if not any([prefix, apostado_play_channel, highlight_play_channel, waiting_voice, temp_voice_category, result_category, log_channel, admin_role, staff_role, mvp_reward_role, mvp_reward_role_name, season_reward_role, season_reward_role_name, result_behavior]):
+        if not any(
+            [
+                prefix,
+                apostado_play_channel,
+                highlight_play_channel,
+                waiting_voice,
+                temp_voice_category,
+                result_category,
+                log_channel,
+                admin_role,
+                staff_role,
+                mvp_reward_role,
+                mvp_reward_role_name,
+                season_reward_role,
+                season_reward_role_name,
+                ping_here_on_match_create is not None,
+                ping_here_on_match_ready is not None,
+                private_match_key_required is not None,
+                result_behavior,
+            ]
+        ):
             if not await _ensure_staff(bot, interaction):
                 return
             current_config = await bot.config_service.get_or_create(interaction.guild.id)
@@ -308,6 +331,9 @@ def register_admin_commands(bot: "HighlightBot") -> None:
                 mvp_reward_role_name=mvp_reward_role_name,
                 season_reward_role=season_reward_role,
                 season_reward_role_name=season_reward_role_name,
+                ping_here_on_match_create=ping_here_on_match_create,
+                ping_here_on_match_ready=ping_here_on_match_ready,
+                private_match_key_required=private_match_key_required,
                 create_missing=False,
                 result_behavior=result_behavior.value if result_behavior else None,
             )
@@ -330,6 +356,7 @@ def register_admin_commands(bot: "HighlightBot") -> None:
     season = app_commands.Group(name="season", description="Season management")
     bootstrap = app_commands.Group(name="bootstrap", description="Bootstrap preview and rerun")
     points = app_commands.Group(name="points", description="Point adjustments")
+    rank0 = app_commands.Group(name="rank0", description="Manual Rank 0 override")
     match = app_commands.Group(name="match", description="Match moderation")
     blacklist = app_commands.Group(name="blacklist", description="Blacklist management")
 
@@ -672,6 +699,77 @@ def register_admin_commands(bot: "HighlightBot") -> None:
             operation=points_set_operation,
         )
 
+    @rank0.command(name="grant", description="Grant the manual Rank 0 override to a member")
+    async def rank0_grant(interaction: discord.Interaction, member: discord.Member) -> None:
+        async def rank0_grant_operation() -> InteractionResponsePayload:
+            config = await bot.config_service.get_or_create(interaction.guild.id)
+            profile = await bot.profile_service.set_manual_rank_override(
+                interaction.guild,
+                member.id,
+                config,
+                manual_rank_override=0,
+            )
+            await bot.audit_service.log(
+                interaction.guild,
+                AuditAction.RANK_OVERRIDE_UPDATED,
+                f"Granted Rank 0 to {member.mention}.",
+                actor_id=interaction.user.id,
+                target_id=member.id,
+                metadata={"manual_rank_override": profile.manual_rank_override},
+            )
+            bot.logger.info(
+                "rank0_granted",
+                guild_id=interaction.guild.id,
+                actor_id=interaction.user.id,
+                target_id=member.id,
+            )
+            return InteractionResponsePayload(content=f"{member.mention} is now **Rank 0**.")
+
+        await _run_deferred_admin_command(
+            bot,
+            interaction,
+            command_name="/rank0 grant",
+            permission_check=lambda current: _ensure_staff(bot, current),
+            operation=rank0_grant_operation,
+        )
+
+    @rank0.command(name="revoke", description="Remove the manual Rank 0 override from a member")
+    async def rank0_revoke(interaction: discord.Interaction, member: discord.Member) -> None:
+        async def rank0_revoke_operation() -> InteractionResponsePayload:
+            config = await bot.config_service.get_or_create(interaction.guild.id)
+            profile = await bot.profile_service.set_manual_rank_override(
+                interaction.guild,
+                member.id,
+                config,
+                manual_rank_override=None,
+            )
+            await bot.audit_service.log(
+                interaction.guild,
+                AuditAction.RANK_OVERRIDE_UPDATED,
+                f"Revoked Rank 0 from {member.mention}.",
+                actor_id=interaction.user.id,
+                target_id=member.id,
+                metadata={"manual_rank_override": profile.manual_rank_override},
+            )
+            bot.logger.info(
+                "rank0_revoked",
+                guild_id=interaction.guild.id,
+                actor_id=interaction.user.id,
+                target_id=member.id,
+                new_rank=profile.current_rank,
+            )
+            return InteractionResponsePayload(
+                content=f"Removed Rank 0 from {member.mention}. They are now **Rank {profile.current_rank}**.",
+            )
+
+        await _run_deferred_admin_command(
+            bot,
+            interaction,
+            command_name="/rank0 revoke",
+            permission_check=lambda current: _ensure_staff(bot, current),
+            operation=rank0_revoke_operation,
+        )
+
     @match.command(name="cancel", description="Cancel a match")
     async def match_cancel(interaction: discord.Interaction, match_number: int, reason: str | None = None) -> None:
         async def cancel_operation() -> InteractionResponsePayload:
@@ -790,5 +888,5 @@ def register_admin_commands(bot: "HighlightBot") -> None:
             operation=blacklist_remove_operation,
         )
 
-    for group in [season, bootstrap, points, match, blacklist]:
+    for group in [season, bootstrap, points, rank0, match, blacklist]:
         bot.tree.add_command(group)

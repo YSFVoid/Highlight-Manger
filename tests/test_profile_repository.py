@@ -15,7 +15,7 @@ class FakeCollection:
 
 
 @pytest.mark.asyncio
-async def test_reset_for_new_season_resets_everyone_to_zero_points_and_rank_one() -> None:
+async def test_reset_for_new_season_resets_points_without_overwriting_manual_rank_state() -> None:
     collection = FakeCollection()
     repository = ProfileRepository(collection, PlayerProfile)
 
@@ -23,5 +23,5 @@ async def test_reset_for_new_season_resets_everyone_to_zero_points_and_rank_one(
 
     assert collection.calls[0][0] == {"guild_id": 123}
     assert collection.calls[0][1]["$set"]["current_points"] == 0
-    assert collection.calls[0][1]["$set"]["current_rank"] == 1
+    assert "current_rank" not in collection.calls[0][1]["$set"]
     assert len(collection.calls) == 1

@@ -1,6 +1,6 @@
 import pytest
 
-from highlight_manager.interactions.views import MatchQueueView, ResultEntryView
+from highlight_manager.interactions.views import MatchQueueView, ResultEntryView, RoomInfoEntryView
 
 
 class DummyMatchService:
@@ -23,3 +23,11 @@ async def test_result_entry_view_custom_ids_include_guild_and_match_number() -> 
 
     assert view.submit_vote.custom_id == "result:321:7:submit"
     assert view.refresh_status.custom_id == "result:321:7:status"
+    assert view.enter_room_info.custom_id == "result:321:7:roominfo"
+
+
+@pytest.mark.asyncio
+async def test_room_info_entry_view_custom_id_includes_guild_and_match_number() -> None:
+    view = RoomInfoEntryView(DummyMatchService(), guild_id=321, match_number=7)
+
+    assert view.enter_room_info.custom_id == "roominfo:321:7:open"

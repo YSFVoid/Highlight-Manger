@@ -216,6 +216,9 @@ class ConfigService:
         mvp_reward_role_name: str | None = None,
         season_reward_role: discord.Role | None = None,
         season_reward_role_name: str | None = None,
+        ping_here_on_match_create: bool | None = None,
+        ping_here_on_match_ready: bool | None = None,
+        private_match_key_required: bool | None = None,
         create_missing: bool = False,
         result_behavior: str | None = None,
     ) -> tuple[GuildConfig, list[str]]:
@@ -314,6 +317,21 @@ class ConfigService:
             "season_reward_role_name": (
                 season_reward_role_name
                 or (season_reward_role.name if season_reward_role else config.season_reward_role_name)
+            ),
+            "ping_here_on_match_create": (
+                ping_here_on_match_create
+                if ping_here_on_match_create is not None
+                else config.ping_here_on_match_create
+            ),
+            "ping_here_on_match_ready": (
+                ping_here_on_match_ready
+                if ping_here_on_match_ready is not None
+                else config.ping_here_on_match_ready
+            ),
+            "private_match_key_required": (
+                private_match_key_required
+                if private_match_key_required is not None
+                else config.private_match_key_required
             ),
             "setup_created_resources": created_ids,
         }

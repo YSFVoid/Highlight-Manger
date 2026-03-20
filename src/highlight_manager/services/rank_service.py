@@ -38,6 +38,9 @@ class RankService:
             ),
         )
 
+    def display_rank_for_profile(self, profile: PlayerProfile) -> int:
+        return profile.manual_rank_override if profile.manual_rank_override is not None else profile.current_rank
+
     async def sync_member_rank(
         self,
         member: discord.Member,
@@ -82,7 +85,7 @@ class RankService:
             return result
 
         base_name = self.strip_rank_prefix(member.nick or member.global_name or member.name)
-        target_nickname = self.build_rank_nickname(profile.current_rank, base_name)
+        target_nickname = self.build_rank_nickname(self.display_rank_for_profile(profile), base_name)
         if member.nick == target_nickname:
             result.nickname_already_correct = True
             return result

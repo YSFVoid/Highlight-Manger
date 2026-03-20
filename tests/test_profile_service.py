@@ -31,6 +31,13 @@ class FakeProfileRepository:
     async def count_for_guild(self, guild_id: int) -> int:
         return sum(1 for stored_guild_id, _ in self.storage if stored_guild_id == guild_id)
 
+    async def count_ranked_for_guild(self, guild_id: int) -> int:
+        return sum(
+            1
+            for (stored_guild_id, _), profile in self.storage.items()
+            if stored_guild_id == guild_id and profile.manual_rank_override is None
+        )
+
     async def list_leaderboard(self, guild_id: int, limit: int = 10) -> list[PlayerProfile]:
         profiles = await self.list_for_ranking(guild_id)
         ranked = RankService().sort_profiles_for_ranking(profiles)
@@ -192,3 +199,87 @@ async def test_handle_member_join_preserves_existing_profile_state() -> None:
     assert profile.lifetime_points == 120
     assert profile.current_rank == 4
     assert profile.joined_at == now - timedelta(days=45)
+
+
+@pytest.mark.asyncio
+async def test_manual_rank_zero_override_is_preserved_outside_normal_rank_recalculation() -> None:
+    repository = FakeProfileRepository()
+    service = ProfileService(repository, QuietRankService())
+    now = datetime.now(UTC)
+    guild = FakeGuild(
+        1,
+        members={
+            10: FakeMember(10, joined_at=now - timedelta(days=30)),
+            20: FakeMember(20, joined_at=now - timedelta(days=20)),
+        },
+    )
+    config = GuildConfig(guild_id=1)
+    for member in guild._members.values():
+        member.guild = guild
+    await repository.upsert(
+        PlayerProfile(
+            guild_id=1,
+            user_id=10,
+            current_points=500,
+            current_rank=0,
+            manual_rank_override=0,
+            joined_at=guild.get_member(10).joined_at,
+        )
+    )
+    await repository.upsert(
+        PlayerProfile(
+            guild_id=1,
+            user_id=20,
+            current_points=100,
+            current_rank=2,
+            joined_at=guild.get_member(20).joined_at,
+        )
+    )
+
+    ranked_profiles = await service.recalculate_rank_positions(guild, config, sync_nicknames=False)
+
+    ranked_by_user_id = {profile.user_id: profile for profile in ranked_profiles}
+    assert ranked_by_user_id[10].current_rank == 0
+    assert ranked_by_user_id[20].current_rank == 1
+
+
+@pytest.mark.asyncio
+async def test_revoking_manual_rank_zero_returns_member_to_normal_placement() -> None:
+    repository = FakeProfileRepository()
+    service = ProfileService(repository, QuietRankService())
+    now = datetime.now(UTC)
+    guild = FakeGuild(
+        1,
+        members={
+            10: FakeMember(10, joined_at=now - timedelta(days=30)),
+            20: FakeMember(20, joined_at=now - timedelta(days=20)),
+        },
+    )
+    config = GuildConfig(guild_id=1)
+    for member in guild._members.values():
+        member.guild = guild
+    await repository.upsert(
+        PlayerProfile(
+            guild_id=1,
+            user_id=10,
+            current_points=500,
+            current_rank=0,
+            manual_rank_override=0,
+            joined_at=guild.get_member(10).joined_at,
+        )
+    )
+    await repository.upsert(
+        PlayerProfile(
+            guild_id=1,
+            user_id=20,
+            current_points=100,
+            current_rank=1,
+            joined_at=guild.get_member(20).joined_at,
+        )
+    )
+
+    profile = await service.set_manual_rank_override(guild, 10, config, manual_rank_override=None)
+
+    assert profile.manual_rank_override is None
+    assert profile.current_rank == 1
+    assert repository.storage[(1, 20)].current_rank == 2

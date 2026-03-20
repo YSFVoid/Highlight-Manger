@@ -17,6 +17,13 @@ def test_reward_role_defaults_match_expected_configuration() -> None:
     assert config.season_reward_top_count == 5
 
 
+def test_match_announcement_defaults_are_ready_ping_only() -> None:
+    config = GuildConfig(guild_id=1)
+    assert config.ping_here_on_match_create is False
+    assert config.ping_here_on_match_ready is True
+    assert config.private_match_key_required is False
+
+
 def test_default_resource_names_use_styled_unicode_labels() -> None:
     config = GuildConfig(guild_id=1)
     assert config.resource_names.waiting_voice == "𝗪𝗮𝗶𝘁𝗶𝗻𝗴-𝗩𝗼𝗶𝗰𝗲"

@@ -53,7 +53,7 @@ class ProfileService:
                 existing = await self.repository.upsert(existing)
             return existing
         member = guild.get_member(user_id)
-        next_rank = await self.repository.count_for_guild(guild.id) + 1
+        next_rank = await self.repository.count_ranked_for_guild(guild.id) + 1
         profile = PlayerProfile(
             guild_id=guild.id,
             user_id=user_id,
@@ -74,8 +74,6 @@ class ProfileService:
         profile = await self.repository.get(member.guild.id, member.id)
         if profile is None:
             profile = await self.ensure_profile(member.guild, member.id, config, sync_identity=False)
-            profile.current_points = 0
-            profile.current_rank = await self.repository.count_for_guild(member.guild.id)
             profile.joined_at = member.joined_at or profile.joined_at or utcnow()
             profile.updated_at = utcnow()
             profile = await self.repository.upsert(profile)
@@ -105,7 +103,7 @@ class ProfileService:
         delta = new_points - previous
         profile.current_points = new_points
         profile.lifetime_points += delta
-        rank_before = profile.current_rank
+        rank_before = self.rank_service.display_rank_for_profile(profile)
         profile.updated_at = utcnow()
         profile = await self.repository.upsert(profile)
         ranked_profiles = await self.recalculate_rank_positions(guild, config)
@@ -129,8 +127,83 @@ class ProfileService:
         profile = await self.ensure_profile(guild, user_id, config)
         return await self.set_points(guild, user_id, config, profile.current_points + delta)
 
-    async def list_leaderboard(self, guild_id: int, limit: int = 10) -> list[PlayerProfile]:
-        return await self.repository.list_leaderboard(guild_id, limit=limit)
+    async def list_leaderboard(
+        self,
+        guild_id: int,
+        limit: int = 10,
+        *,
+        metric: str = "points",
+        offset: int = 0,
+        include_manual_overrides: bool = False,
+    ) -> list[PlayerProfile]:
+        profiles = await self.list_leaderboard_snapshot(
+            guild_id,
+            metric=metric,
+            include_manual_overrides=include_manual_overrides,
+        )
+        return profiles[offset : offset + limit]
+
+    async def list_leaderboard_snapshot(
+        self,
+        guild_id: int,
+        *,
+        metric: str = "points",
+        include_manual_overrides: bool = False,
+    ) -> list[PlayerProfile]:
+        profiles = await self.repository.list_for_ranking(guild_id)
+        filtered = [
+            profile
+            for profile in profiles
+            if include_manual_overrides or profile.manual_rank_override is None
+        ]
+        if metric == "wins":
+            return sorted(
+                filtered,
+                key=lambda profile: (
+                    -profile.season_stats.wins,
+                    -profile.current_points,
+                    -profile.season_stats.mvp_wins,
+                    profile.joined_at or profile.created_at,
+                    profile.user_id,
+                ),
+            )
+        if metric == "mvp":
+            return sorted(
+                filtered,
+                key=lambda profile: (
+                    -(profile.season_stats.mvp_wins + profile.season_stats.mvp_losses),
+                    -profile.season_stats.mvp_wins,
+                    -profile.season_stats.wins,
+                    -profile.current_points,
+                    profile.joined_at or profile.created_at,
+                    profile.user_id,
+                ),
+            )
+        return self.rank_service.sort_profiles_for_ranking(filtered)
+
+    async def set_manual_rank_override(
+        self,
+        guild: discord.Guild,
+        user_id: int,
+        config: GuildConfig,
+        *,
+        manual_rank_override: int | None,
+    ) -> PlayerProfile:
+        profile = await self.ensure_profile(guild, user_id, config, sync_identity=False)
+        profile.manual_rank_override = manual_rank_override
+        if manual_rank_override is not None:
+            profile.current_rank = manual_rank_override
+            profile.updated_at = utcnow()
+            profile = await self.repository.upsert(profile)
+            member = guild.get_member(user_id)
+            if member is not None:
+                await self.rank_service.sync_member_rank(member, profile, config)
+            return profile
+
+        profile.updated_at = utcnow()
+        profile = await self.repository.upsert(profile)
+        ranked_profiles = await self.recalculate_rank_positions(guild, config)
+        return next((item for item in ranked_profiles if item.user_id == user_id), profile)
 
     async def apply_match_outcome(
         self,
@@ -157,7 +230,7 @@ class ProfileService:
         for user_id in match.all_player_ids:
             profile = await self.ensure_profile(guild, user_id, config)
             previous_points = profile.current_points
-            rank_before = profile.current_rank
+            rank_before = self.rank_service.display_rank_for_profile(profile)
             if user_id in winner_ids:
                 delta = rule.winner_mvp if winner_mvp_id == user_id and rule.winner_mvp is not None else rule.winner
                 profile.season_stats.wins += 1
@@ -229,7 +302,7 @@ class ProfileService:
         for user_id in match.all_player_ids:
             profile = await self.ensure_profile(guild, user_id, config)
             previous_points = profile.current_points
-            rank_before = profile.current_rank
+            rank_before = self.rank_service.display_rank_for_profile(profile)
             delta = timeout_rule.winner
             profile.current_points += delta
             profile.lifetime_points += delta
@@ -303,8 +376,21 @@ class ProfileService:
                 profile.updated_at = utcnow()
                 await self.repository.upsert(profile)
 
-        ordered = self.rank_service.sort_profiles_for_ranking(profiles)
+        manual_profiles = [profile for profile in profiles if profile.manual_rank_override is not None]
+        ranked_profiles = [profile for profile in profiles if profile.manual_rank_override is None]
+
         saved_profiles: list[PlayerProfile] = []
+        for profile in manual_profiles:
+            profile.current_rank = profile.manual_rank_override or 0
+            profile.updated_at = utcnow()
+            saved = await self.repository.upsert(profile)
+            saved_profiles.append(saved)
+            if sync_nicknames:
+                member = guild.get_member(saved.user_id)
+                if member is not None:
+                    await self.rank_service.sync_member_rank(member, saved, config)
+
+        ordered = self.rank_service.sort_profiles_for_ranking(ranked_profiles)
         for position, profile in enumerate(ordered, start=1):
             profile.current_rank = position
             profile.updated_at = utcnow()

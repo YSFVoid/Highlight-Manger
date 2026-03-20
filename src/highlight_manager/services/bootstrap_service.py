@@ -70,6 +70,7 @@ class BootstrapService:
             processed_members += 1
             profile = await self.profile_service.ensure_profile(member.guild, member.id, config, sync_identity=False)
             age_days = max((utcnow() - (member.joined_at or utcnow())).days, 0)
+            profile.manual_rank_override = None
             profile.current_rank = position
             profile.current_points = 0
             profile.season_stats = PlayerStats()

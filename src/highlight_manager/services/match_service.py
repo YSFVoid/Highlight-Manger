@@ -8,7 +8,7 @@ import discord
 from highlight_manager.config.logging import get_logger
 from highlight_manager.models.enums import AuditAction, MatchMode, MatchStatus, MatchType, ResultSource
 from highlight_manager.models.guild_config import GuildConfig
-from highlight_manager.models.match import MatchRecord
+from highlight_manager.models.match import MatchRecord, MatchRoomInfo
 from highlight_manager.repositories.match_repository import MatchRepository
 from highlight_manager.services.audit_service import AuditService
 from highlight_manager.services.config_service import ConfigService
@@ -18,7 +18,14 @@ from highlight_manager.services.season_service import SeasonService
 from highlight_manager.services.voice_service import VoiceService
 from highlight_manager.services.vote_service import VoteService
 from highlight_manager.utils.dates import minutes_from_now, seconds_from_now, utcnow
-from highlight_manager.utils.embeds import build_match_embed, build_result_summary_embed, build_vote_status_embed
+from highlight_manager.utils.embeds import (
+    build_match_embed,
+    build_match_ready_embed,
+    build_result_room_embed,
+    build_result_summary_embed,
+    build_room_info_embed,
+    build_vote_status_embed,
+)
 from highlight_manager.utils.exceptions import HighlightError, StateTransitionError, UserFacingError
 
 
@@ -87,6 +94,7 @@ class MatchService:
         self.logger = get_logger(__name__)
         self._registered_queue_views: set[tuple[int, int]] = set()
         self._registered_result_views: set[tuple[int, int]] = set()
+        self._registered_room_info_views: set[tuple[int, int]] = set()
 
     async def create_match(
         self,
@@ -208,6 +216,17 @@ class MatchService:
 
             context.validation_stage = "persist_public_message"
             match.public_message_id = public_message.id
+            if config.ping_here_on_match_create and not match.create_here_ping_sent:
+                try:
+                    await self._send_match_here_ping(guild, match, stage="create")
+                    match.create_here_ping_sent = True
+                except Exception as exc:
+                    self.logger.warning(
+                        "match_create_here_ping_failed",
+                        guild_id=guild.id,
+                        match_number=match.match_number,
+                        error=str(exc),
+                    )
             match = await self.repository.replace(match)
 
             context.validation_stage = "audit_log"
@@ -389,7 +408,7 @@ class MatchService:
         if result_channel is not None:
             if created_result_channel:
                 await result_channel.send(
-                    embed=self._build_result_room_embed(match),
+                    embed=build_result_room_embed(match, guild),
                     view=self._build_result_view(match),
                 )
             elif resume:
@@ -399,6 +418,7 @@ class MatchService:
                 )
             if warnings:
                 await result_channel.send("\n".join(warnings))
+        match = await self._announce_match_ready_if_needed(guild, match, config)
         await self.audit_service.log(
             guild,
             AuditAction.MATCH_FULL,
@@ -621,6 +641,8 @@ class MatchService:
                     )
             match = await self.repository.replace(match)
             await self.refresh_match_message(guild, match)
+            if match.status in {MatchStatus.IN_PROGRESS, MatchStatus.VOTING}:
+                match = await self._announce_match_ready_if_needed(guild, match, config)
             if result_channel is not None:
                 await result_channel.send(
                     "Bot restarted. Voting controls have been restored.",
@@ -649,6 +671,107 @@ class MatchService:
     async def force_close(self, guild: discord.Guild, match_number: int, actor_id: int | None, reason: str) -> MatchActionResult:
         return await self.cancel_match(guild, match_number, actor_id=actor_id, force=True, reason=reason)
 
+    async def submit_room_info(
+        self,
+        guild: discord.Guild,
+        match_number: int,
+        actor: discord.Member,
+        *,
+        room_id: str,
+        password: str | None,
+        private_match_key: str | None,
+    ) -> MatchActionResult:
+        match = await self.require_match(guild.id, match_number)
+        if match.status not in {MatchStatus.FULL, MatchStatus.IN_PROGRESS, MatchStatus.VOTING}:
+            raise StateTransitionError("Room info can only be submitted for an active match.")
+        if actor.id != match.creator_id and not await self.config_service.is_staff(actor):
+            raise UserFacingError("Only the match creator or staff can submit room info.")
+
+        config = await self.config_service.get_or_create(guild.id)
+        normalized_room_id = room_id.strip()
+        normalized_password = password.strip() if password else None
+        normalized_key = private_match_key.strip() if private_match_key else None
+        if not normalized_room_id.isdigit():
+            self.logger.warning(
+                "room_info_validation_failed",
+                guild_id=guild.id,
+                match_number=match.match_number,
+                actor_id=actor.id,
+                validation_error="room_id_not_numeric",
+            )
+            raise UserFacingError("Room ID must contain numbers only.")
+        if config.private_match_key_required and not normalized_key:
+            self.logger.warning(
+                "room_info_validation_failed",
+                guild_id=guild.id,
+                match_number=match.match_number,
+                actor_id=actor.id,
+                validation_error="missing_private_match_key",
+            )
+            raise UserFacingError("Private Match Key is required before this room info can be saved.")
+
+        was_edit = match.room_info is not None
+        if was_edit and match.room_info is not None:
+            room_info = match.room_info.model_copy(
+                update={
+                    "room_id": normalized_room_id,
+                    "password": normalized_password or None,
+                    "private_match_key": normalized_key or None,
+                    "updated_by": actor.id,
+                    "updated_at": utcnow(),
+                }
+            )
+        else:
+            room_info = MatchRoomInfo(
+                room_id=normalized_room_id,
+                password=normalized_password or None,
+                private_match_key=normalized_key or None,
+                submitted_by=actor.id,
+            )
+        match.room_info = room_info
+        if not match.result_channel_id:
+            result_channel, _ = await self._ensure_result_channel(guild, match, config)
+            match.result_channel_id = result_channel.id
+        match = await self.repository.replace(match)
+        await self.refresh_match_message(guild, match)
+        await self.post_room_info_summary(guild, match)
+        await self.post_public_note(
+            guild,
+            match,
+            (
+                f"Room info for Match #{match.display_id} was {'updated' if was_edit else 'submitted'} "
+                "and shared privately with match participants."
+            ),
+        )
+        self.logger.info(
+            "room_info_saved",
+            guild_id=guild.id,
+            match_number=match.match_number,
+            actor_id=actor.id,
+            edited=was_edit,
+            has_password=bool(room_info.password),
+            has_private_match_key=bool(room_info.private_match_key),
+        )
+        await self.audit_service.log(
+            guild,
+            AuditAction.ROOM_INFO_UPDATED,
+            (
+                f"{actor.mention} {'updated' if was_edit else 'submitted'} room info "
+                f"for Match #{match.display_id}."
+            ),
+            actor_id=actor.id,
+            metadata={
+                "match_number": match.match_number,
+                "edited": was_edit,
+                "has_password": bool(room_info.password),
+                "private_match_key_provided": bool(room_info.private_match_key),
+            },
+        )
+        return MatchActionResult(
+            match=match,
+            message=f"Room info {'updated' if was_edit else 'saved'} for Match #{match.display_id}.",
+        )
+
     async def require_match(self, guild_id: int, match_number: int) -> MatchRecord:
         match = await self.repository.get(guild_id, match_number)
         if match is None:
@@ -663,6 +786,9 @@ class MatchService:
         if match.status in {MatchStatus.IN_PROGRESS, MatchStatus.VOTING, MatchStatus.FULL} and match_key not in self._registered_result_views:
             self.bot.add_view(self._build_result_view(match))
             self._registered_result_views.add(match_key)
+        if match.status in {MatchStatus.FULL, MatchStatus.IN_PROGRESS, MatchStatus.VOTING} and match_key not in self._registered_room_info_views:
+            self.bot.add_view(self._build_room_info_view(match))
+            self._registered_room_info_views.add(match_key)
 
     async def refresh_match_message(self, guild: discord.Guild, match: MatchRecord) -> None:
         if not match.public_message_id or not match.source_channel_id:
@@ -691,6 +817,13 @@ class MatchService:
         channel = guild.get_channel(match.result_channel_id)
         if isinstance(channel, discord.TextChannel):
             await channel.send(embed=build_result_summary_embed(match, guild))
+
+    async def post_room_info_summary(self, guild: discord.Guild, match: MatchRecord) -> None:
+        if not match.result_channel_id or match.room_info is None:
+            return
+        channel = guild.get_channel(match.result_channel_id)
+        if isinstance(channel, discord.TextChannel):
+            await channel.send(embed=build_room_info_embed(match, guild))
 
     async def post_result_note(self, guild: discord.Guild, match: MatchRecord, message: str) -> None:
         if not match.result_channel_id:
@@ -721,6 +854,16 @@ class MatchService:
             disabled=match.status not in {MatchStatus.IN_PROGRESS, MatchStatus.VOTING},
         )
 
+    def _build_room_info_view(self, match: MatchRecord):
+        from highlight_manager.interactions.views import RoomInfoEntryView
+
+        return RoomInfoEntryView(
+            self,
+            match.guild_id,
+            match.match_number,
+            disabled=match.status not in {MatchStatus.FULL, MatchStatus.IN_PROGRESS, MatchStatus.VOTING},
+        )
+
     async def _ensure_match_voice_channels(
         self,
         guild: discord.Guild,
@@ -748,16 +891,77 @@ class MatchService:
             return existing, False
         return await self.result_channel_service.create_private_channel(guild, match, config), True
 
-    def _build_result_room_embed(self, match: MatchRecord) -> discord.Embed:
-        vote_deadline = int(match.vote_expires_at.timestamp()) if match.vote_expires_at else None
-        deadline_label = f"<t:{vote_deadline}:R>" if vote_deadline else "Not set"
-        return discord.Embed(
-            title=f"Result Room | Match #{match.display_id}",
-            description=(
-                f"Mode: **{match.mode.value}**\n"
-                f"Type: **{match.match_type.label}**\n"
-                f"Vote deadline: {deadline_label}\n"
-                "When the match ends, every player must submit a result vote here."
-            ),
-            colour=discord.Colour.orange(),
+    async def _announce_match_ready_if_needed(
+        self,
+        guild: discord.Guild,
+        match: MatchRecord,
+        config: GuildConfig,
+    ) -> MatchRecord:
+        if match.ready_announcement_sent or not match.source_channel_id:
+            return match
+        channel = guild.get_channel(match.source_channel_id)
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            return match
+        content = "@here" if config.ping_here_on_match_ready and not match.ready_here_ping_sent else None
+        try:
+            await channel.send(
+                content=content,
+                embed=build_match_ready_embed(match, guild),
+                view=self._build_room_info_view(match),
+            )
+            match.ready_announcement_sent = True
+            if content:
+                match.ready_here_ping_sent = True
+            match = await self.repository.replace(match)
+            self.logger.info(
+                "match_ready_announced",
+                guild_id=guild.id,
+                match_number=match.match_number,
+                channel_id=channel.id,
+                here_ping_sent=bool(content),
+            )
+            await self.audit_service.log(
+                guild,
+                AuditAction.MATCH_NOTIFICATION,
+                f"Posted the Match Ready announcement for Match #{match.display_id}.",
+                metadata={
+                    "match_number": match.match_number,
+                    "here_ping_sent": bool(content),
+                },
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "match_ready_announcement_failed",
+                guild_id=guild.id,
+                match_number=match.match_number,
+                channel_id=channel.id,
+                error=str(exc),
+            )
+        return match
+
+    async def _send_match_here_ping(
+        self,
+        guild: discord.Guild,
+        match: MatchRecord,
+        *,
+        stage: str,
+    ) -> None:
+        if not match.source_channel_id:
+            return
+        channel = guild.get_channel(match.source_channel_id)
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            return
+        await channel.send("@here")
+        self.logger.info(
+            "match_here_ping_sent",
+            guild_id=guild.id,
+            match_number=match.match_number,
+            channel_id=channel.id,
+            stage=stage,
+        )
+        await self.audit_service.log(
+            guild,
+            AuditAction.MATCH_NOTIFICATION,
+            f"Sent @here for Match #{match.display_id} during the {stage} stage.",
+            metadata={"match_number": match.match_number, "stage": stage},
         )
