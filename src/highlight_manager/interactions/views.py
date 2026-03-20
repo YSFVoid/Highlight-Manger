@@ -180,7 +180,7 @@ class RoomInfoModal(discord.ui.Modal, title="Enter Room Information"):
         current_room_info = match.room_info
         self.room_id = discord.ui.TextInput(
             label="Room ID (Numbers Only)",
-            placeholder="Enter the game room ID",
+            placeholder="Enter the game room ID (numbers only)",
             default=current_room_info.room_id if current_room_info else None,
             max_length=24,
         )
@@ -193,7 +193,7 @@ class RoomInfoModal(discord.ui.Modal, title="Enter Room Information"):
         )
         self.private_match_key = discord.ui.TextInput(
             label="Private Match Key (Optional)",
-            placeholder="Leave blank unless your guild requires a key",
+            placeholder="If set, players must use this key to join",
             default=(
                 current_room_info.private_match_key
                 if current_room_info and current_room_info.private_match_key
@@ -208,11 +208,12 @@ class RoomInfoModal(discord.ui.Modal, title="Enter Room Information"):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
+        actor = interaction.user if isinstance(interaction.user, discord.Member) else self.actor
         try:
             result = await self.match_service.submit_room_info(
                 interaction.guild,
                 self.match.match_number,
-                self.actor,
+                actor,
                 room_id=str(self.room_id.value),
                 password=str(self.password.value) if self.password.value else None,
                 private_match_key=str(self.private_match_key.value) if self.private_match_key.value else None,
@@ -224,7 +225,7 @@ class RoomInfoModal(discord.ui.Modal, title="Enter Room Information"):
                 "room_info_modal_failed",
                 guild_id=interaction.guild.id if interaction.guild else None,
                 match_number=self.match.match_number,
-                actor_id=self.actor.id,
+                actor_id=actor.id,
             )
             return await interaction.followup.send(
                 "I hit an internal error while saving that room info.",

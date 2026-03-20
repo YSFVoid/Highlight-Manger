@@ -94,8 +94,8 @@ Season reward role.
 
 ## Match Room Info Flow
 
-- When a match becomes ready, the bot can announce it publicly and optionally ping `@here`.
-- The creator or staff can press **Enter Room Info** to open a modal.
+- When a member runs `!play`, the bot now posts a room-setup card first instead of opening the public queue immediately.
+- The creator or staff presses **Enter Room Info** to open the modal before the queue goes live.
 - The modal collects:
   - Room ID
   - Password
@@ -103,7 +103,9 @@ Season reward role.
 - Room ID must be numeric.
 - Password is optional.
 - Private Match Key is optional unless the guild config requires it.
+- After valid room info is submitted, the bot opens the public queue card and can send the configured one-time `@here`.
 - Sensitive room details are only posted in the private match result room, never in the public play room.
+- The private result room is created up front so room details always have a private delivery surface.
 - If the private result room is recreated later, the stored room info is reposted there automatically.
 
 ## Leaderboard / Profile UI
@@ -114,6 +116,7 @@ Season reward role.
   - season points
   - season wins
   - season MVP totals
+- Match cards, ready cards, room-info cards, and setup/config cards now share one consistent mobile-friendly visual style.
 
 ## Default Setup Resources
 
@@ -131,6 +134,13 @@ The bot auto-creates or reuses these resources during `/setup`:
 Default channel and category names use stylized Unicode labels. If Discord rejects a stylized name for a resource type, setup falls back cleanly to the ASCII legacy name instead of crashing.
 
 Configured rooms, voice channels, categories, and reward roles are used by their Discord IDs at runtime. Renaming a configured resource later does not break the bot.
+
+Default live announcement behavior:
+
+- `@here` on queue open: enabled
+- `@here` on match ready: disabled
+
+Both can still be changed with `/config`.
 
 ## Bootstrap Behavior
 

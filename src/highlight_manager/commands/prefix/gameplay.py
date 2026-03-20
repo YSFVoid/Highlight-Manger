@@ -45,6 +45,8 @@ class GameplayCog(commands.Cog):
                 raw_type=match_type,
             )
             return await ctx.reply("I hit an internal error while processing that request.")
+        if result.match.public_message_id:
+            return
         await ctx.reply(result.message)
 
     @commands.command(name="profile")

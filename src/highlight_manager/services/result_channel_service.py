@@ -13,17 +13,18 @@ class ResultChannelService:
     def __init__(self) -> None:
         self.logger = get_logger(__name__)
 
-    async def create_private_channel(
+    def _build_overwrites(
         self,
         guild: discord.Guild,
         match: MatchRecord,
         config: GuildConfig,
-    ) -> discord.TextChannel:
+    ) -> dict[discord.Role | discord.Member, discord.PermissionOverwrite]:
         overwrites: dict[discord.Role | discord.Member, discord.PermissionOverwrite] = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
         }
-        if guild.me:
-            overwrites[guild.me] = discord.PermissionOverwrite(
+        me = guild.me
+        if me:
+            overwrites[me] = discord.PermissionOverwrite(
                 view_channel=True,
                 send_messages=True,
                 read_message_history=True,
@@ -38,7 +39,9 @@ class ResultChannelService:
                     send_messages=True,
                     read_message_history=True,
                 )
-        for user_id in match.all_player_ids:
+
+        allowed_user_ids = {match.creator_id, *match.all_player_ids}
+        for user_id in allowed_user_ids:
             member = guild.get_member(user_id)
             if member:
                 overwrites[member] = discord.PermissionOverwrite(
@@ -46,7 +49,14 @@ class ResultChannelService:
                     send_messages=True,
                     read_message_history=True,
                 )
+        return overwrites
 
+    async def create_private_channel(
+        self,
+        guild: discord.Guild,
+        match: MatchRecord,
+        config: GuildConfig,
+    ) -> discord.TextChannel:
         category = guild.get_channel(config.result_category_id) if config.result_category_id else None
         if category is not None and not isinstance(category, discord.CategoryChannel):
             raise UserFacingError("Configured result category no longer exists.")
@@ -54,7 +64,7 @@ class ResultChannelService:
         channel = await guild.create_text_channel(
             name=config.result_channel_name_template.format(match_id=match.display_id),
             category=category if isinstance(category, discord.CategoryChannel) else None,
-            overwrites=overwrites,
+            overwrites=self._build_overwrites(guild, match, config),
             reason=f"Private result channel for Match #{match.display_id}",
         )
         self.logger.info(
@@ -64,6 +74,59 @@ class ResultChannelService:
             channel_id=channel.id,
         )
         return channel
+
+    async def sync_channel_access(
+        self,
+        guild: discord.Guild,
+        channel_id: int,
+        match: MatchRecord,
+        config: GuildConfig,
+    ) -> None:
+        channel = guild.get_channel(channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            self.logger.warning(
+                "result_channel_permission_sync_missing",
+                guild_id=guild.id,
+                match_number=match.match_number,
+                channel_id=channel_id,
+            )
+            return
+
+        desired_overwrites = self._build_overwrites(guild, match, config)
+        desired_user_ids = {
+            target.id
+            for target in desired_overwrites
+            if isinstance(target, discord.Member)
+        }
+        try:
+            for target, overwrite in desired_overwrites.items():
+                await channel.set_permissions(target, overwrite=overwrite)
+
+            stale_members = [
+                target
+                for target in channel.overwrites
+                if isinstance(target, discord.Member)
+                and not target.bot
+                and target.id not in desired_user_ids
+            ]
+            for member in stale_members:
+                await channel.set_permissions(member, overwrite=None)
+
+            self.logger.info(
+                "result_channel_permissions_synced",
+                guild_id=guild.id,
+                match_number=match.match_number,
+                channel_id=channel.id,
+                participant_count=len(match.all_player_ids),
+            )
+        except discord.HTTPException as exc:
+            self.logger.warning(
+                "result_channel_permission_sync_failed",
+                guild_id=guild.id,
+                match_number=match.match_number,
+                channel_id=channel.id,
+                error=str(exc),
+            )
 
     async def archive_channel(
         self,

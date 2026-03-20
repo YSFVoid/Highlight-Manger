@@ -102,8 +102,8 @@ class GuildConfig(AppModel):
     result_channel_name_template: str = "match-{match_id}-result"
     team1_voice_name_template: str = "TEAM 1 - Match #{match_id}"
     team2_voice_name_template: str = "TEAM 2 - Match #{match_id}"
-    ping_here_on_match_create: bool = False
-    ping_here_on_match_ready: bool = True
+    ping_here_on_match_create: bool = True
+    ping_here_on_match_ready: bool = False
     private_match_key_required: bool = False
     queue_timeout_minutes: int = 5
     vote_timeout_minutes: int = 30

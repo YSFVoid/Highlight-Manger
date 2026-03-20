@@ -37,7 +37,8 @@ class MatchRecord(AppModel):
     public_message_id: int | None = None
     source_channel_id: int | None = None
     created_at: datetime
-    queue_expires_at: datetime
+    queue_expires_at: datetime | None = None
+    queue_opened_at: datetime | None = None
     vote_expires_at: datetime | None = None
     finalized_at: datetime | None = None
     canceled_at: datetime | None = None

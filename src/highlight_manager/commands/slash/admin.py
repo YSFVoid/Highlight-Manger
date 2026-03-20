@@ -743,7 +743,15 @@ def register_admin_commands(bot: "HighlightBot") -> None:
                 actor_id=interaction.user.id,
                 target_id=member.id,
             )
-            return InteractionResponsePayload(content=f"{member.mention} is now **Rank 0**.")
+            embed = discord.Embed(
+                title="Rank 0 Granted",
+                description=f"{member.mention} is now on the manual Rank 0 override.",
+                colour=discord.Colour.orange(),
+            )
+            embed.add_field(name="Rank", value="Rank 0", inline=True)
+            embed.add_field(name="Points", value=str(profile.current_points), inline=True)
+            embed.add_field(name="Nickname Sync", value="Rank 0 nickname sync was attempted.", inline=False)
+            return InteractionResponsePayload(embed=embed)
 
         await _run_deferred_admin_command(
             bot,
@@ -778,9 +786,15 @@ def register_admin_commands(bot: "HighlightBot") -> None:
                 target_id=member.id,
                 new_rank=profile.current_rank,
             )
-            return InteractionResponsePayload(
-                content=f"Removed Rank 0 from {member.mention}. They are now **Rank {profile.current_rank}**.",
+            embed = discord.Embed(
+                title="Rank 0 Removed",
+                description=f"Removed the manual Rank 0 override from {member.mention}.",
+                colour=discord.Colour.blurple(),
             )
+            embed.add_field(name="Current Rank", value=f"Rank {profile.current_rank}", inline=True)
+            embed.add_field(name="Points", value=str(profile.current_points), inline=True)
+            embed.add_field(name="Nickname Sync", value="Leaderboard nickname sync was attempted.", inline=False)
+            return InteractionResponsePayload(embed=embed)
 
         await _run_deferred_admin_command(
             bot,

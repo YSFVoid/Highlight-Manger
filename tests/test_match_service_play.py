@@ -43,18 +43,25 @@ class FakeMatchRepository:
         self.created: list = []
         self.replaced: list = []
         self.deleted: list[tuple[int, int]] = []
+        self.storage: dict[tuple[int, int], object] = {}
 
     async def create(self, match):
         self.created.append(match)
+        self.storage[(match.guild_id, match.match_number)] = match
         return match
 
     async def replace(self, match):
         self.replaced.append(match)
+        self.storage[(match.guild_id, match.match_number)] = match
         return match
 
     async def delete(self, guild_id: int, match_number: int):
         self.deleted.append((guild_id, match_number))
+        self.storage.pop((guild_id, match_number), None)
         return True
+
+    async def get(self, guild_id: int, match_number: int):
+        return self.storage.get((guild_id, match_number))
 
 
 class FakeConfigService:
@@ -125,7 +132,22 @@ class FakeVoteService:
 
 
 class FakeResultChannelService:
-    pass
+    def __init__(self) -> None:
+        self.created_channels: list[FakeTextChannel] = []
+        self.synced: list[tuple[int, int]] = []
+        self.deleted: list[int] = []
+
+    async def create_private_channel(self, guild, match, config):
+        channel = FakeTextChannel(500 + len(self.created_channels), guild, f"#match-{match.display_id}-result")
+        guild.add_channel(channel)
+        self.created_channels.append(channel)
+        return channel
+
+    async def sync_channel_access(self, guild, channel_id: int, match, config) -> None:
+        self.synced.append((channel_id, match.match_number))
+
+    async def delete_channel(self, guild, channel_id: int, match_number: int) -> None:
+        self.deleted.append(channel_id)
 
 
 class FakeAuditService:
@@ -153,7 +175,7 @@ class FakeGuild:
 
 
 class FakeTextChannel(discord.TextChannel):
-    __slots__ = ("id", "guild", "mention", "sent_payloads", "fail_send")
+    __slots__ = ("id", "guild", "mention", "sent_payloads", "fail_send", "messages", "permission_updates")
 
     def __init__(self, channel_id: int, guild: FakeGuild, mention: str, *, fail_send: bool = False) -> None:
         self.id = channel_id
@@ -161,12 +183,41 @@ class FakeTextChannel(discord.TextChannel):
         self.mention = mention
         self.sent_payloads: list[dict] = []
         self.fail_send = fail_send
+        self.messages: dict[int, object] = {}
+        self.permission_updates: list[tuple[object, object]] = []
 
     async def send(self, content=None, *, embed=None, view=None):
         if self.fail_send:
             raise RuntimeError("boom")
-        self.sent_payloads.append({"content": content, "embed": embed, "view": view})
-        return SimpleNamespace(id=900 + len(self.sent_payloads))
+        payload = {"content": content, "embed": embed, "view": view}
+        self.sent_payloads.append(payload)
+        message = FakeMessage(900 + len(self.sent_payloads), self, payload)
+        self.messages[message.id] = message
+        return message
+
+    async def fetch_message(self, message_id: int):
+        return self.messages[message_id]
+
+    async def set_permissions(self, target, overwrite=None):
+        self.permission_updates.append((target, overwrite))
+
+
+class FakeMessage:
+    def __init__(self, message_id: int, channel: FakeTextChannel, payload: dict) -> None:
+        self.id = message_id
+        self.channel = channel
+        self.payload = payload
+
+    async def edit(self, *, content=None, embed=None, view=None):
+        self.payload = {
+            "content": content if content is not None else self.payload.get("content"),
+            "embed": embed if embed is not None else self.payload.get("embed"),
+            "view": view if view is not None else self.payload.get("view"),
+        }
+        self.channel.messages[self.id] = self
+
+    async def delete(self):
+        self.channel.messages.pop(self.id, None)
 
 
 class FakeMember:
@@ -212,6 +263,7 @@ def build_service(
 
     repository = FakeMatchRepository()
     bot = FakeBot()
+    result_channel_service = FakeResultChannelService()
     service = MatchService(
         bot,
         repository,
@@ -220,7 +272,7 @@ def build_service(
         FakeSeasonService(),
         FakeVoteService(),
         FakeVoiceService(),
-        FakeResultChannelService(),
+        result_channel_service,
         FakeAuditService(),
     )
     service.logger = bot.logger
@@ -268,8 +320,12 @@ async def test_create_match_accepts_aliases_and_creates_match(
 
     assert result.match.match_type.value == expected_normalized
     assert result.match.mode.value == mode_input
+    assert result.match.queue_opened_at is None
+    assert result.match.queue_expires_at is None
     assert len(repository.created) == 1
     assert repository.created[0].creator_id == creator.id
+    assert len(channel.sent_payloads) == 1
+    assert channel.sent_payloads[0]["embed"].title.endswith("Match Setup")
     assert any(event == "play_command_completed" for _, event, _ in logger.calls)
 
 
@@ -397,10 +453,54 @@ async def test_create_match_logs_traceback_context_on_unexpected_failure() -> No
         )
 
     assert any(
-        level == "exception" and event == "play_command_unexpected_failure" and kwargs["validation_stage"] == "post_public_message"
+        level == "exception" and event == "play_command_unexpected_failure" and kwargs["validation_stage"] == "post_room_setup_message"
         for level, event, kwargs in logger.calls
     )
     assert (123, 1) in service.repository.deleted
+
+
+@pytest.mark.asyncio
+async def test_submit_room_info_opens_queue_and_posts_privately() -> None:
+    config = GuildConfig(
+        guild_id=123,
+        apostado_play_channel_id=10,
+        highlight_play_channel_id=20,
+        waiting_voice_channel_id=30,
+        temp_voice_category_id=40,
+        ping_here_on_match_create=False,
+    )
+    service, guild, apostado_channel, _, creator, repository, _ = build_service(config)
+
+    created = await service.create_match(
+        apostado_channel,
+        guild,
+        creator,
+        "2v2",
+        "apos",
+        raw_command_content="!play 2v2 apos",
+    )
+    assert created.match.queue_opened_at is None
+
+    result = await service.submit_room_info(
+        guild,
+        created.match.match_number,
+        creator,
+        room_id="123456",
+        password="pw",
+        private_match_key="ABCD",
+    )
+
+    assert result.match.queue_opened_at is not None
+    assert result.match.queue_expires_at is not None
+    assert result.match.room_info is not None
+    assert "now open for players" in result.message
+    public_message = apostado_channel.messages[result.match.public_message_id]
+    assert public_message.payload["embed"].title == "Apostado 2v2 Match"
+    result_channel_id = result.match.result_channel_id
+    result_channel = guild.get_channel(result_channel_id)
+    assert isinstance(result_channel, FakeTextChannel)
+    assert any(payload["embed"].title == "Room Access - Match #001" for payload in result_channel.sent_payloads)
+    assert repository.get is not None
 
 
 @pytest.mark.asyncio
@@ -478,5 +578,5 @@ async def test_room_info_is_posted_to_private_result_channel_once_per_channel() 
 
     assert updated_match.metadata["room_info_posted_channel_id"] == result_channel.id
     assert len(result_channel.sent_payloads) == 1
-    assert result_channel.sent_payloads[0]["embed"].title == "Room Info • Match #001"
+    assert result_channel.sent_payloads[0]["embed"].title == "Room Access - Match #001"
     assert apostado_channel.sent_payloads == []

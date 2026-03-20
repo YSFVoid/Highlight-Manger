@@ -21,6 +21,7 @@ from highlight_manager.utils.dates import minutes_from_now, seconds_from_now, ut
 from highlight_manager.utils.embeds import (
     build_match_embed,
     build_match_ready_embed,
+    build_match_room_setup_embed,
     build_result_room_embed,
     build_result_summary_embed,
     build_room_info_embed,
@@ -125,6 +126,7 @@ class MatchService:
         )
         match: MatchRecord | None = None
         public_message: discord.Message | None = None
+        result_channel: discord.TextChannel | None = None
         try:
             context.validation_stage = "normalize_type"
             match_type = MatchType.from_input(type_input)
@@ -204,12 +206,33 @@ class MatchService:
                 source_channel_id=channel.id,
                 waiting_voice_channel_id=config.waiting_voice_channel_id,
                 created_at=utcnow(),
-                queue_expires_at=minutes_from_now(config.queue_timeout_minutes),
+                queue_expires_at=None,
                 season_id=season.season_number,
             )
             await self.repository.create(match)
 
-            context.validation_stage = "register_queue_view"
+            context.validation_stage = "ensure_private_result_channel"
+            try:
+                result_channel, created_result_channel = await self._ensure_result_channel(guild, match, config)
+                match.result_channel_id = result_channel.id
+                await self.result_channel_service.sync_channel_access(guild, result_channel.id, match, config)
+                if created_result_channel:
+                    await result_channel.send(
+                        embed=build_result_room_embed(match, guild),
+                        view=self._build_room_info_view(match),
+                    )
+            except discord.Forbidden as exc:
+                await self._cleanup_failed_match_creation(guild, match, public_message, context.validation_stage)
+                raise UserFacingError(
+                    "I could not create the private match room. Check my channel and permission settings."
+                ) from exc
+            except discord.HTTPException as exc:
+                await self._cleanup_failed_match_creation(guild, match, public_message, context.validation_stage)
+                raise UserFacingError(
+                    "I could not prepare the private match room right now. Please try again."
+                ) from exc
+
+            context.validation_stage = "register_room_setup_view"
             try:
                 self.register_views(match)
             except Exception as exc:
@@ -222,36 +245,25 @@ class MatchService:
                     **context.as_log_kwargs(validation_result="warning"),
                 )
 
-            context.validation_stage = "post_public_message"
+            context.validation_stage = "post_room_setup_message"
             try:
                 public_message = await channel.send(
-                    embed=build_match_embed(match, guild),
-                    view=self._build_queue_view(match),
+                    embed=build_match_room_setup_embed(match, guild),
+                    view=self._build_room_info_view(match),
                 )
             except discord.Forbidden as exc:
                 await self._cleanup_failed_match_creation(guild, match, public_message, context.validation_stage)
                 raise UserFacingError(
-                    "I could not post the match card in this room. Check my Send Messages and Embed Links permissions."
+                    "I could not post the room setup card in this room. Check my Send Messages and Embed Links permissions."
                 ) from exc
             except discord.HTTPException as exc:
                 await self._cleanup_failed_match_creation(guild, match, public_message, context.validation_stage)
                 raise UserFacingError(
-                    "I could not publish the match card in this room right now. Please try again."
+                    "I could not publish the room setup card in this room right now. Please try again."
                 ) from exc
 
-            context.validation_stage = "persist_public_message"
+            context.validation_stage = "persist_room_setup_message"
             match.public_message_id = public_message.id
-            if config.ping_here_on_match_create and not match.create_here_ping_sent:
-                try:
-                    await self._send_match_here_ping(guild, match, stage="create")
-                    match.create_here_ping_sent = True
-                except Exception as exc:
-                    self.logger.warning(
-                        "match_create_here_ping_failed",
-                        guild_id=guild.id,
-                        match_number=match.match_number,
-                        error=str(exc),
-                    )
             match = await self.repository.replace(match)
 
             context.validation_stage = "audit_log"
@@ -280,7 +292,10 @@ class MatchService:
                 match_display_id=match.display_id,
                 **context.as_log_kwargs(validation_result="success"),
             )
-            return MatchActionResult(match=match, message=f"Created Match #{match.display_id}.")
+            return MatchActionResult(
+                match=match,
+                message=f"Match #{match.display_id} is waiting for room info. Use the button in the setup card to open the queue.",
+            )
         except HighlightError as exc:
             self.logger.warning(
                 "play_command_validation_failed",
@@ -291,7 +306,12 @@ class MatchService:
             )
             raise
         except Exception:
-            if match is not None and context.validation_stage in {"persist_match", "post_public_message", "persist_public_message"}:
+            if match is not None and context.validation_stage in {
+                "persist_match",
+                "ensure_private_result_channel",
+                "post_room_setup_message",
+                "persist_room_setup_message",
+            }:
                 await self._cleanup_failed_match_creation(guild, match, public_message, context.validation_stage)
             self.logger.exception(
                 "play_command_unexpected_failure",
@@ -313,6 +333,8 @@ class MatchService:
         match = await self.require_match(member.guild.id, match_number)
         if match.status != MatchStatus.OPEN:
             raise StateTransitionError("That match is no longer open for joining.")
+        if match.queue_opened_at is None:
+            raise StateTransitionError("This match is still waiting for room info before players can join.")
         if member.id in match.all_player_ids:
             raise UserFacingError("You are already in this match.")
 
@@ -322,6 +344,7 @@ class MatchService:
 
         target_team.append(member.id)
         match = await self.repository.replace(match)
+        await self._sync_result_channel_access(member.guild, match, config)
         await self.audit_service.log(
             member.guild,
             AuditAction.MATCH_JOINED,
@@ -357,6 +380,8 @@ class MatchService:
         if member.id in match.team2_player_ids:
             match.team2_player_ids.remove(member.id)
         match = await self.repository.replace(match)
+        config = await self.config_service.get_or_create(member.guild.id)
+        await self._sync_result_channel_access(member.guild, match, config)
         await self.refresh_match_message(member.guild, match)
         if not triggered_by_voice:
             await self.audit_service.log(
@@ -432,6 +457,7 @@ class MatchService:
         try:
             result_channel, created_result_channel = await self._ensure_result_channel(guild, match, config)
             match.result_channel_id = result_channel.id
+            await self.result_channel_service.sync_channel_access(guild, result_channel.id, match, config)
         except Exception as exc:
             warnings.append(f"Could not create private result channel: {exc}")
             self.logger.warning("result_channel_creation_failed", guild_id=guild.id, match_number=match.match_number, error=str(exc))
@@ -678,7 +704,18 @@ class MatchService:
                         error=str(exc),
                     )
             match = await self.repository.replace(match)
+            await self._sync_result_channel_access(guild, match, config)
             await self.refresh_match_message(guild, match)
+            if match.status == MatchStatus.OPEN and match.room_info is not None and match.queue_opened_at is None:
+                try:
+                    match = await self._open_public_queue_after_room_info(guild, match, config)
+                except Exception as exc:
+                    self.logger.warning(
+                        "pending_queue_open_recovery_failed",
+                        guild_id=guild.id,
+                        match_number=match.match_number,
+                        error=str(exc),
+                    )
             if match.status in {MatchStatus.IN_PROGRESS, MatchStatus.VOTING}:
                 match = await self._announce_match_ready_if_needed(guild, match, config)
             match = await self._ensure_room_info_available_in_result_channel(guild, match)
@@ -721,7 +758,7 @@ class MatchService:
         private_match_key: str | None,
     ) -> MatchActionResult:
         match = await self.require_match(guild.id, match_number)
-        if match.status not in {MatchStatus.FULL, MatchStatus.IN_PROGRESS, MatchStatus.VOTING}:
+        if match.status not in {MatchStatus.OPEN, MatchStatus.FULL, MatchStatus.IN_PROGRESS, MatchStatus.VOTING}:
             raise StateTransitionError("Room info can only be submitted for an active match.")
         if actor.id != match.creator_id and not await self.config_service.is_staff(actor):
             raise UserFacingError("Only the match creator or staff can submit room info.")
@@ -771,23 +808,27 @@ class MatchService:
         if not match.result_channel_id:
             result_channel, _ = await self._ensure_result_channel(guild, match, config)
             match.result_channel_id = result_channel.id
+        await self._sync_result_channel_access(guild, match, config)
         match = await self.repository.replace(match)
-        await self.refresh_match_message(guild, match)
         match = await self._ensure_room_info_available_in_result_channel(guild, match, force_post=True)
-        await self.post_public_note(
-            guild,
-            match,
-            (
-                f"Room info for Match #{match.display_id} was {'updated' if was_edit else 'submitted'} "
-                "and shared privately with match participants."
-            ),
-        )
+        queue_opened_now = False
+        if match.queue_opened_at is None:
+            match = await self._open_public_queue_after_room_info(guild, match, config)
+            queue_opened_now = True
+        else:
+            await self.refresh_match_message(guild, match)
+            await self.post_public_note(
+                guild,
+                match,
+                f"Room details for Match #{match.display_id} were updated and shared privately.",
+            )
         self.logger.info(
             "room_info_saved",
             guild_id=guild.id,
             match_number=match.match_number,
             actor_id=actor.id,
             edited=was_edit,
+            queue_opened_now=queue_opened_now,
             has_password=bool(room_info.password),
             has_private_match_key=bool(room_info.private_match_key),
         )
@@ -808,7 +849,11 @@ class MatchService:
         )
         return MatchActionResult(
             match=match,
-            message=f"Room info {'updated' if was_edit else 'saved'} for Match #{match.display_id}.",
+            message=(
+                f"Room info saved and Match #{match.display_id} is now open for players."
+                if queue_opened_now
+                else f"Room info {'updated' if was_edit else 'saved'} for Match #{match.display_id}."
+            ),
         )
 
     async def require_match(self, guild_id: int, match_number: int) -> MatchRecord:
@@ -819,13 +864,13 @@ class MatchService:
 
     def register_views(self, match: MatchRecord) -> None:
         match_key = (match.guild_id, match.match_number)
-        if match_key not in self._registered_queue_views:
+        if match.queue_opened_at is not None and match_key not in self._registered_queue_views:
             self.bot.add_view(self._build_queue_view(match))
             self._registered_queue_views.add(match_key)
         if match.status in {MatchStatus.IN_PROGRESS, MatchStatus.VOTING, MatchStatus.FULL} and match_key not in self._registered_result_views:
             self.bot.add_view(self._build_result_view(match))
             self._registered_result_views.add(match_key)
-        if match.status in {MatchStatus.FULL, MatchStatus.IN_PROGRESS, MatchStatus.VOTING} and match_key not in self._registered_room_info_views:
+        if match.status in {MatchStatus.OPEN, MatchStatus.FULL, MatchStatus.IN_PROGRESS, MatchStatus.VOTING} and match_key not in self._registered_room_info_views:
             self.bot.add_view(self._build_room_info_view(match))
             self._registered_room_info_views.add(match_key)
 
@@ -837,7 +882,10 @@ class MatchService:
             return
         try:
             message = await channel.fetch_message(match.public_message_id)
-            await message.edit(embed=build_match_embed(match, guild), view=self._build_queue_view(match))
+            if match.queue_opened_at is None:
+                await message.edit(embed=build_match_room_setup_embed(match, guild), view=self._build_room_info_view(match))
+            else:
+                await message.edit(embed=build_match_embed(match, guild), view=self._build_queue_view(match))
         except discord.NotFound:
             self.logger.warning("match_public_message_missing", guild_id=guild.id, match_number=match.match_number, message_id=match.public_message_id)
         except discord.HTTPException as exc:
@@ -907,7 +955,12 @@ class MatchService:
     def _build_queue_view(self, match: MatchRecord):
         from highlight_manager.interactions.views import MatchQueueView
 
-        return MatchQueueView(self, match.guild_id, match.match_number, disabled=match.status != MatchStatus.OPEN)
+        return MatchQueueView(
+            self,
+            match.guild_id,
+            match.match_number,
+            disabled=match.status != MatchStatus.OPEN or match.queue_opened_at is None,
+        )
 
     def _build_result_view(self, match: MatchRecord):
         from highlight_manager.interactions.views import ResultEntryView
@@ -926,7 +979,7 @@ class MatchService:
             self,
             match.guild_id,
             match.match_number,
-            disabled=match.status not in {MatchStatus.FULL, MatchStatus.IN_PROGRESS, MatchStatus.VOTING},
+            disabled=match.status in {MatchStatus.FINALIZED, MatchStatus.CANCELED, MatchStatus.EXPIRED},
         )
 
     async def _ensure_match_voice_channels(
@@ -956,6 +1009,96 @@ class MatchService:
             return existing, False
         return await self.result_channel_service.create_private_channel(guild, match, config), True
 
+    async def _sync_result_channel_access(
+        self,
+        guild: discord.Guild,
+        match: MatchRecord,
+        config: GuildConfig,
+    ) -> None:
+        if not match.result_channel_id:
+            return
+        await self.result_channel_service.sync_channel_access(guild, match.result_channel_id, match, config)
+
+    async def _open_public_queue_after_room_info(
+        self,
+        guild: discord.Guild,
+        match: MatchRecord,
+        config: GuildConfig,
+    ) -> MatchRecord:
+        if match.queue_opened_at is not None:
+            return match
+        if not match.source_channel_id:
+            raise UserFacingError("The configured play room for this match is missing.")
+
+        channel = guild.get_channel(match.source_channel_id)
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            raise UserFacingError("The configured play room for this match is missing.")
+
+        match.queue_opened_at = utcnow()
+        match.queue_expires_at = minutes_from_now(config.queue_timeout_minutes)
+        match = await self.repository.replace(match)
+        self.register_views(match)
+
+        queue_message: discord.Message | None = None
+        if match.public_message_id:
+            try:
+                queue_message = await channel.fetch_message(match.public_message_id)
+                await queue_message.edit(
+                    embed=build_match_embed(match, guild),
+                    view=self._build_queue_view(match),
+                )
+            except discord.NotFound:
+                self.logger.warning(
+                    "room_setup_message_missing_before_queue_open",
+                    guild_id=guild.id,
+                    match_number=match.match_number,
+                    message_id=match.public_message_id,
+                )
+                match.public_message_id = None
+            except discord.HTTPException as exc:
+                self.logger.warning(
+                    "room_setup_message_update_failed",
+                    guild_id=guild.id,
+                    match_number=match.match_number,
+                    message_id=match.public_message_id,
+                    error=str(exc),
+                )
+
+        if match.public_message_id is None:
+            queue_message = await channel.send(
+                embed=build_match_embed(match, guild),
+                view=self._build_queue_view(match),
+            )
+            match.public_message_id = queue_message.id
+
+        if config.ping_here_on_match_create and not match.create_here_ping_sent:
+            try:
+                await self._send_match_here_ping(guild, match, stage="create")
+                match.create_here_ping_sent = True
+            except Exception as exc:
+                self.logger.warning(
+                    "match_create_here_ping_failed",
+                    guild_id=guild.id,
+                    match_number=match.match_number,
+                    error=str(exc),
+                )
+
+        match = await self.repository.replace(match)
+        self.logger.info(
+            "match_queue_opened_after_room_info",
+            guild_id=guild.id,
+            match_number=match.match_number,
+            channel_id=channel.id,
+            public_message_id=match.public_message_id,
+        )
+        await self.audit_service.log(
+            guild,
+            AuditAction.MATCH_NOTIFICATION,
+            f"Opened the public queue for Match #{match.display_id} after room info submission.",
+            metadata={"match_number": match.match_number},
+        )
+        return match
+
     async def _cleanup_failed_match_creation(
         self,
         guild: discord.Guild,
@@ -975,6 +1118,8 @@ class MatchService:
                     validation_stage=validation_stage,
                     error=str(exc),
                 )
+        if match.result_channel_id:
+            await self.result_channel_service.delete_channel(guild, match.result_channel_id, match.match_number)
         deleted = False
         delete_match = getattr(self.repository, "delete", None)
         if callable(delete_match):
@@ -1022,7 +1167,7 @@ class MatchService:
             await channel.send(
                 content=content,
                 embed=build_match_ready_embed(match, guild),
-                view=self._build_room_info_view(match),
+                view=None if match.room_info is not None else self._build_room_info_view(match),
             )
             match.ready_announcement_sent = True
             if content:

@@ -64,7 +64,7 @@ class MatchRepository(BaseRepository[MatchRecord]):
         cursor = self.collection.find(
             {
                 "status": MatchStatus.OPEN.value,
-                "queue_expires_at": {"$lte": now},
+                "queue_expires_at": {"$ne": None, "$lte": now},
             },
         )
         return self._to_models(await cursor.to_list(length=None))
