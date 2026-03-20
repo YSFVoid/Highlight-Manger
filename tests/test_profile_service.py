@@ -20,7 +20,7 @@ class FakeProfileRepository:
         self.storage[(profile.guild_id, profile.user_id)] = profile
         return profile
 
-    async def reset_for_new_season(self, guild_id: int, updated_at) -> None:
+    async def reset_for_new_season(self, guild_id: int, updated_at, *, lowest_rank: int) -> None:
         return None
 
 
@@ -68,3 +68,15 @@ async def test_apply_match_outcome_updates_points_and_summary() -> None:
     assert summary.winner_team == 1
     assert repository.storage[(1, 10)].current_points == 10
     assert repository.storage[(1, 20)].current_points == -8
+
+
+@pytest.mark.asyncio
+async def test_set_rank_supports_configured_rank_above_five() -> None:
+    repository = FakeProfileRepository()
+    service = ProfileService(repository, RankService())
+    guild = FakeGuild(1)
+    config = GuildConfig(guild_id=1)
+
+    profile = await service.set_rank(guild, 10, config, 10)
+
+    assert profile.current_rank == 10

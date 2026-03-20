@@ -4,6 +4,8 @@ Highlight Manager is a production-minded Discord bot for a single Free Fire serv
 
 Ranks are stored internally in MongoDB and synced to nicknames as `Rank X UserName`. The bot does not use Discord rank roles. The only Discord reward role is the seasonal top-5 role: `Professional Highlight Player`.
 
+Bot-created setup resources default to stylized Unicode names such as `𝗪𝗮𝗶𝘁𝗶𝗻𝗴-𝗩𝗼𝗶𝗰𝗲` and `𝗛𝗶𝗴𝗵𝗹𝗶𝗴𝗵𝘁-𝗟𝗼𝗴𝘀`. If Discord rejects a styled name for a specific resource type, setup falls back cleanly to the ASCII legacy name and reports that in setup output.
+
 ## Stack
 
 - Python 3.11+
@@ -155,15 +157,15 @@ Then set the required environment variables in the panel Startup or Environment 
 1. Invite the bot with the permissions listed below.
 2. Run `/setup` and optionally provide a prefix.
 3. The bot automatically reuses or creates:
-   - `apostado-play`
-   - `highlight-play`
-   - Waiting Voice
-   - temp match voice category
-   - results category
-   - logs channel
+   - `𝗔𝗽𝗼𝘀𝘁𝗮𝗱𝗮-𝗣𝗹𝗮𝘆`
+   - `𝗛𝗶𝗴𝗵𝗹𝗶𝗴𝗵𝘁-𝗣𝗹𝗮𝘆`
+   - `𝗪𝗮𝗶𝘁𝗶𝗻𝗴-𝗩𝗼𝗶𝗰𝗲`
+   - `𝗛𝗶𝗴𝗵𝗹𝗶𝗴𝗵𝘁-𝗠𝗮𝘁𝗰𝗵-𝗩𝗼𝗶𝗰𝗲𝘀`
+   - `𝗠𝗮𝘁𝗰𝗵-𝗥𝗲𝘀𝘂𝗹𝘁𝘀`
+   - `𝗛𝗶𝗴𝗵𝗹𝗶𝗴𝗵𝘁-𝗟𝗼𝗴𝘀`
    - `Professional Highlight Player` reward role when auto-create is enabled
 4. On the first successful setup, the bot runs a one-time bootstrap for current members:
-   - assigns starting rank by server age
+   - assigns starting rank by server age across the configured ladder
    - assigns aligned starting points
    - saves the internal rank in the database
    - attempts nickname sync for every eligible processed member using `Rank X UserName`
@@ -254,6 +256,7 @@ python -m compileall src
 
 - If `!play` says setup is missing, run `/setup` or `/config` and ensure Waiting Voice plus temp voice category exist.
 - If `!play` is rejected in the wrong room, use it in the configured Apostado or Highlight play channel shown in `/setup status` or `/config`.
+- If you want the default setup names to stay stylized, do not manually rename the auto-created resources back to plain ASCII after setup.
 - If setup bootstrap reports rename hierarchy skips, move the bot's highest role above the member's highest role.
 - If setup bootstrap reports rename missing-permission skips, grant the bot `Manage Nicknames`.
 - If a member already has the correct `Rank X UserName` nickname, bootstrap reports that separately instead of counting it as a hidden success or silent skip.

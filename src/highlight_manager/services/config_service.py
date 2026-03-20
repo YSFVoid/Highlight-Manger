@@ -7,7 +7,7 @@ import discord
 from highlight_manager.config.logging import get_logger
 from highlight_manager.config.settings import Settings
 from highlight_manager.models.enums import MatchType
-from highlight_manager.models.guild_config import GuildConfig
+from highlight_manager.models.guild_config import GuildConfig, fallback_resource_names
 from highlight_manager.repositories.config_repository import ConfigRepository
 from highlight_manager.utils.exceptions import ConfigurationError, UserFacingError
 from highlight_manager.utils.permissions import member_has_any_role
@@ -55,15 +55,26 @@ class ConfigService:
     async def ensure_match_resources(self, guild: discord.Guild, config: GuildConfig) -> GuildConfig:
         updates: dict[str, Any] = {}
         created = dict(config.setup_created_resources)
+        fallback_names = fallback_resource_names()
         waiting_exists = isinstance(guild.get_channel(config.waiting_voice_channel_id), discord.VoiceChannel) if config.waiting_voice_channel_id else False
         temp_exists = isinstance(guild.get_channel(config.temp_voice_category_id), discord.CategoryChannel) if config.temp_voice_category_id else False
 
         if config.features.auto_create_waiting_voice and not waiting_exists:
-            waiting = await guild.create_voice_channel("Waiting Voice", reason="Highlight Manager setup")
+            waiting = await self._create_voice_channel_with_fallback(
+                guild,
+                name=config.resource_names.waiting_voice,
+                fallback_name=fallback_names.waiting_voice,
+                reason="Highlight Manager setup",
+            )
             updates["waiting_voice_channel_id"] = waiting.id
             created["waiting_voice_channel_id"] = waiting.id
         if config.features.auto_create_temp_category and not temp_exists:
-            category = await guild.create_category("Highlight Match Voices", reason="Highlight Manager setup")
+            category = await self._create_category_with_fallback(
+                guild,
+                name=config.resource_names.temp_voice_category,
+                fallback_name=fallback_names.temp_voice_category,
+                reason="Highlight Manager setup",
+            )
             updates["temp_voice_category_id"] = category.id
             created["temp_voice_category_id"] = category.id
         if updates:
@@ -148,6 +159,7 @@ class ConfigService:
         config = await self.get_or_create(guild.id)
         created_resources: list[str] = []
         created_ids = dict(config.setup_created_resources)
+        fallback_names = fallback_resource_names()
         apostado_exists = isinstance(guild.get_channel(config.apostado_play_channel_id), discord.TextChannel) if config.apostado_play_channel_id else False
         highlight_exists = isinstance(guild.get_channel(config.highlight_play_channel_id), discord.TextChannel) if config.highlight_play_channel_id else False
         waiting_exists = isinstance(guild.get_channel(config.waiting_voice_channel_id), discord.VoiceChannel) if config.waiting_voice_channel_id else False
@@ -156,27 +168,57 @@ class ConfigService:
         log_exists = isinstance(guild.get_channel(config.log_channel_id), discord.TextChannel) if config.log_channel_id else False
 
         if create_missing and apostado_play_channel is None and not apostado_exists:
-            apostado_play_channel = await guild.create_text_channel("apostado-play", reason="Highlight Manager setup")
+            apostado_play_channel = await self._create_text_channel_with_fallback(
+                guild,
+                name=config.resource_names.apostado_play_channel,
+                fallback_name=fallback_names.apostado_play_channel,
+                reason="Highlight Manager setup",
+            )
             created_resources.append(f"Created Apostado play room: {apostado_play_channel.mention}")
             created_ids["apostado_play_channel_id"] = apostado_play_channel.id
         if create_missing and highlight_play_channel is None and not highlight_exists:
-            highlight_play_channel = await guild.create_text_channel("highlight-play", reason="Highlight Manager setup")
+            highlight_play_channel = await self._create_text_channel_with_fallback(
+                guild,
+                name=config.resource_names.highlight_play_channel,
+                fallback_name=fallback_names.highlight_play_channel,
+                reason="Highlight Manager setup",
+            )
             created_resources.append(f"Created Highlight play room: {highlight_play_channel.mention}")
             created_ids["highlight_play_channel_id"] = highlight_play_channel.id
         if create_missing and waiting_voice is None and not waiting_exists:
-            waiting_voice = await guild.create_voice_channel("Waiting Voice", reason="Highlight Manager setup")
+            waiting_voice = await self._create_voice_channel_with_fallback(
+                guild,
+                name=config.resource_names.waiting_voice,
+                fallback_name=fallback_names.waiting_voice,
+                reason="Highlight Manager setup",
+            )
             created_resources.append(f"Created waiting voice: {waiting_voice.mention}")
             created_ids["waiting_voice_channel_id"] = waiting_voice.id
         if create_missing and temp_voice_category is None and not temp_exists:
-            temp_voice_category = await guild.create_category("Highlight Match Voices", reason="Highlight Manager setup")
+            temp_voice_category = await self._create_category_with_fallback(
+                guild,
+                name=config.resource_names.temp_voice_category,
+                fallback_name=fallback_names.temp_voice_category,
+                reason="Highlight Manager setup",
+            )
             created_resources.append(f"Created temp voice category: **{temp_voice_category.name}**")
             created_ids["temp_voice_category_id"] = temp_voice_category.id
         if create_missing and result_category is None and not result_exists:
-            result_category = await guild.create_category("Match Results", reason="Highlight Manager setup")
+            result_category = await self._create_category_with_fallback(
+                guild,
+                name=config.resource_names.result_category,
+                fallback_name=fallback_names.result_category,
+                reason="Highlight Manager setup",
+            )
             created_resources.append(f"Created results category: **{result_category.name}**")
             created_ids["result_category_id"] = result_category.id
         if create_missing and log_channel is None and not log_exists:
-            log_channel = await guild.create_text_channel("highlight-logs", reason="Highlight Manager setup")
+            log_channel = await self._create_text_channel_with_fallback(
+                guild,
+                name=config.resource_names.log_channel,
+                fallback_name=fallback_names.log_channel,
+                reason="Highlight Manager setup",
+            )
             created_resources.append(f"Created log channel: {log_channel.mention}")
             created_ids["log_channel_id"] = log_channel.id
 
@@ -226,3 +268,72 @@ class ConfigService:
                 "Missing required setup: " + ", ".join(missing) + ". Run /setup or /config first."
             )
         return config
+
+    async def _create_text_channel_with_fallback(
+        self,
+        guild: discord.Guild,
+        *,
+        name: str,
+        fallback_name: str,
+        reason: str,
+    ) -> discord.TextChannel:
+        try:
+            return await guild.create_text_channel(name, reason=reason)
+        except discord.HTTPException as exc:
+            if exc.status != 400 or name.casefold() == fallback_name.casefold():
+                raise
+            self.logger.warning(
+                "resource_name_fallback_used",
+                guild_id=guild.id,
+                resource_type="text_channel",
+                preferred_name=name,
+                fallback_name=fallback_name,
+                error=str(exc),
+            )
+        return await guild.create_text_channel(fallback_name, reason=reason)
+
+    async def _create_voice_channel_with_fallback(
+        self,
+        guild: discord.Guild,
+        *,
+        name: str,
+        fallback_name: str,
+        reason: str,
+    ) -> discord.VoiceChannel:
+        try:
+            return await guild.create_voice_channel(name, reason=reason)
+        except discord.HTTPException as exc:
+            if exc.status != 400 or name.casefold() == fallback_name.casefold():
+                raise
+            self.logger.warning(
+                "resource_name_fallback_used",
+                guild_id=guild.id,
+                resource_type="voice_channel",
+                preferred_name=name,
+                fallback_name=fallback_name,
+                error=str(exc),
+            )
+        return await guild.create_voice_channel(fallback_name, reason=reason)
+
+    async def _create_category_with_fallback(
+        self,
+        guild: discord.Guild,
+        *,
+        name: str,
+        fallback_name: str,
+        reason: str,
+    ) -> discord.CategoryChannel:
+        try:
+            return await guild.create_category(name, reason=reason)
+        except discord.HTTPException as exc:
+            if exc.status != 400 or name.casefold() == fallback_name.casefold():
+                raise
+            self.logger.warning(
+                "resource_name_fallback_used",
+                guild_id=guild.id,
+                resource_type="category",
+                preferred_name=name,
+                fallback_name=fallback_name,
+                error=str(exc),
+            )
+        return await guild.create_category(fallback_name, reason=reason)

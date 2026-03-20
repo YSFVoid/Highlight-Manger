@@ -19,7 +19,7 @@ async def test_reset_for_new_season_resets_everyone_and_preserves_rank0_marker()
     collection = FakeCollection()
     repository = ProfileRepository(collection, PlayerProfile)
 
-    await repository.reset_for_new_season(123, datetime.now(UTC))
+    await repository.reset_for_new_season(123, datetime.now(UTC), lowest_rank=1)
 
     assert collection.calls[0][0] == {"guild_id": 123}
     assert collection.calls[0][1]["$set"]["current_points"] == 0

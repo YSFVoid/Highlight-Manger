@@ -95,8 +95,10 @@ class ProfileService:
         config: GuildConfig,
         rank: int,
     ) -> PlayerProfile:
-        if rank < 1 or rank > 5:
-            raise UserFacingError("Rank must be between 1 and 5.")
+        configured_ranks = self.rank_service.configured_ranks(config.rank_thresholds)
+        if rank not in configured_ranks:
+            allowed = ", ".join(f"Rank {configured_rank}" for configured_rank in configured_ranks)
+            raise UserFacingError(f"Rank must match a configured ladder value. Allowed ranks: {allowed}.")
         profile = await self.ensure_profile(guild, user_id, config)
         profile.rank0 = False
         profile.current_rank = rank
@@ -271,7 +273,8 @@ class ProfileService:
         )
 
     async def reset_for_new_season(self, guild: discord.Guild, config: GuildConfig) -> None:
-        await self.repository.reset_for_new_season(guild.id, utcnow())
+        lowest_rank = self.rank_service.resolve_rank(0, config.rank_thresholds)
+        await self.repository.reset_for_new_season(guild.id, utcnow(), lowest_rank=lowest_rank)
         for member in guild.members:
             if member.bot:
                 continue

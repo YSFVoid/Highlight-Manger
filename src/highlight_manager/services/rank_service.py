@@ -28,16 +28,30 @@ class RankService:
         self.logger = get_logger(__name__)
 
     def resolve_rank(self, points: int, thresholds: list[RankThreshold]) -> int:
-        for threshold in sorted(
-            thresholds,
-            key=lambda item: (item.min_points if item.min_points is not None else -10**9),
-        ):
+        ordered = self.sort_thresholds(thresholds)
+        if not ordered:
+            return 1
+        for threshold in reversed(ordered):
             min_ok = threshold.min_points is None or points >= threshold.min_points
             max_ok = threshold.max_points is None or points <= threshold.max_points
             if min_ok and max_ok:
                 return threshold.rank
-        highest = max(thresholds, key=lambda item: item.rank, default=RankThreshold(rank=1))
-        return highest.rank
+        return ordered[0].rank
+
+    def sort_thresholds(self, thresholds: list[RankThreshold]) -> list[RankThreshold]:
+        return sorted(
+            thresholds,
+            key=lambda item: (
+                item.min_points if item.min_points is not None else -10**9,
+                item.rank,
+            ),
+        )
+
+    def configured_ranks(self, thresholds: list[RankThreshold]) -> list[int]:
+        return sorted({threshold.rank for threshold in thresholds}) or [1]
+
+    def is_configured_rank(self, rank: int, thresholds: list[RankThreshold]) -> bool:
+        return rank in set(self.configured_ranks(thresholds))
 
     async def sync_member_rank(
         self,
@@ -49,10 +63,15 @@ class RankService:
         if member.bot:
             return result
         nickname_result = await self.sync_member_nickname(member, profile, config)
+        result.nickname_attempted = nickname_result.nickname_attempted
         if nickname_result.nickname_updated:
             result.nickname_updated = True
+        if nickname_result.nickname_already_correct:
+            result.nickname_already_correct = True
         if nickname_result.nickname_failed:
             result.nickname_failed = True
+        if nickname_result.failure_category:
+            result.failure_category = nickname_result.failure_category
         if nickname_result.skipped_reason and result.skipped_reason is None:
             result.skipped_reason = nickname_result.skipped_reason
         return result

@@ -16,6 +16,7 @@
    - Use Application Commands
 5. `Manage Nicknames` is recommended for automatic `Rank X UserName` renames but setup now continues without it.
 6. Configure or keep the setup-created `apostado-play` and `highlight-play` text channels, because `!play` is blocked outside the configured play rooms.
+7. Default setup resources now use stylized Unicode names such as `𝗪𝗮𝗶𝘁𝗶𝗻𝗴-𝗩𝗼𝗶𝗰𝗲` and `𝗛𝗶𝗴𝗵𝗹𝗶𝗴𝗵𝘁-𝗟𝗼𝗴𝘀`. If Discord rejects a styled name for a specific resource type, setup falls back to the legacy ASCII name.
 
 ## Startup Behavior
 
@@ -30,6 +31,7 @@ On boot the bot now:
 - processes persisted queue, vote, and result cleanup deadlines immediately
 - removes stale team voice channels from already-closed matches
 - keeps `!play` restricted to the configured Apostado and Highlight play rooms after config is loaded
+- resolves ranks dynamically from the configured threshold ladder instead of assuming a fixed Rank 1 to Rank 5 cap
 
 ## systemd Deployment
 

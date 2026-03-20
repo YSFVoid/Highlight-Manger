@@ -9,6 +9,26 @@ from highlight_manager.models.common import BootstrapSummary, BootstrapThreshold
 from highlight_manager.models.enums import MatchMode, MatchType, ResultChannelBehavior
 
 
+class ResourceNameConfig(AppModel):
+    waiting_voice: str = "𝗪𝗮𝗶𝘁𝗶𝗻𝗴-𝗩𝗼𝗶𝗰𝗲"
+    temp_voice_category: str = "𝗛𝗶𝗴𝗵𝗹𝗶𝗴𝗵𝘁-𝗠𝗮𝘁𝗰𝗵-𝗩𝗼𝗶𝗰𝗲𝘀"
+    result_category: str = "𝗠𝗮𝘁𝗰𝗵-𝗥𝗲𝘀𝘂𝗹𝘁𝘀"
+    log_channel: str = "𝗛𝗶𝗴𝗵𝗹𝗶𝗴𝗵𝘁-𝗟𝗼𝗴𝘀"
+    apostado_play_channel: str = "𝗔𝗽𝗼𝘀𝘁𝗮𝗱𝗮-𝗣𝗹𝗮𝘆"
+    highlight_play_channel: str = "𝗛𝗶𝗴𝗵𝗹𝗶𝗴𝗵𝘁-𝗣𝗹𝗮𝘆"
+
+
+def fallback_resource_names() -> ResourceNameConfig:
+    return ResourceNameConfig(
+        waiting_voice="Waiting Voice",
+        temp_voice_category="Highlight Match Voices",
+        result_category="Match Results",
+        log_channel="highlight-logs",
+        apostado_play_channel="apostado-play",
+        highlight_play_channel="highlight-play",
+    )
+
+
 def default_point_rules() -> dict[str, dict[str, PointRule]]:
     return {
         MatchType.APOSTADO.value: {
@@ -50,19 +70,29 @@ def default_point_rules() -> dict[str, dict[str, PointRule]]:
 
 def default_rank_thresholds() -> list[RankThreshold]:
     return [
-        RankThreshold(rank=1, min_points=None, max_points=99),
-        RankThreshold(rank=2, min_points=100, max_points=249),
-        RankThreshold(rank=3, min_points=250, max_points=499),
-        RankThreshold(rank=4, min_points=500, max_points=799),
-        RankThreshold(rank=5, min_points=800, max_points=None),
+        RankThreshold(rank=1, min_points=0),
+        RankThreshold(rank=2, min_points=100),
+        RankThreshold(rank=3, min_points=200),
+        RankThreshold(rank=4, min_points=300),
+        RankThreshold(rank=5, min_points=400),
+        RankThreshold(rank=6, min_points=500),
+        RankThreshold(rank=7, min_points=650),
+        RankThreshold(rank=8, min_points=800),
+        RankThreshold(rank=9, min_points=1000),
+        RankThreshold(rank=10, min_points=1250),
     ]
 
 
 def default_bootstrap_thresholds() -> list[BootstrapThreshold]:
     return [
-        BootstrapThreshold(minimum_days=180, rank=5, starting_points=800),
-        BootstrapThreshold(minimum_days=120, rank=4, starting_points=500),
-        BootstrapThreshold(minimum_days=60, rank=3, starting_points=250),
+        BootstrapThreshold(minimum_days=365, rank=10, starting_points=1250),
+        BootstrapThreshold(minimum_days=300, rank=9, starting_points=1000),
+        BootstrapThreshold(minimum_days=240, rank=8, starting_points=800),
+        BootstrapThreshold(minimum_days=180, rank=7, starting_points=650),
+        BootstrapThreshold(minimum_days=150, rank=6, starting_points=500),
+        BootstrapThreshold(minimum_days=120, rank=5, starting_points=400),
+        BootstrapThreshold(minimum_days=90, rank=4, starting_points=300),
+        BootstrapThreshold(minimum_days=60, rank=3, starting_points=200),
         BootstrapThreshold(minimum_days=30, rank=2, starting_points=100),
         BootstrapThreshold(minimum_days=0, rank=1, starting_points=0),
     ]
@@ -82,6 +112,7 @@ class GuildFeatures(AppModel):
 class GuildConfig(AppModel):
     guild_id: int
     prefix: str = "!"
+    resource_names: ResourceNameConfig = Field(default_factory=ResourceNameConfig)
     apostado_play_channel_id: int | None = None
     highlight_play_channel_id: int | None = None
     waiting_voice_channel_id: int | None = None

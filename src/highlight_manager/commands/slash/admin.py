@@ -258,7 +258,7 @@ def register_admin_commands(bot: "HighlightBot") -> None:
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @rank.command(name="set", description="Manually set a player's rank")
-    async def rank_set(interaction: discord.Interaction, member: discord.Member, rank_number: app_commands.Range[int, 1, 5]) -> None:
+    async def rank_set(interaction: discord.Interaction, member: discord.Member, rank_number: app_commands.Range[int, 1, 999]) -> None:
         if not await ensure_staff(interaction):
             return
         config = await bot.config_service.get_or_create(interaction.guild.id)

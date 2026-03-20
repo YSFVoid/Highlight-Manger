@@ -40,7 +40,7 @@ async def test_bootstrap_preview_uses_server_age_thresholds() -> None:
     summary, preview = await service.preview(guild, GuildConfig(guild_id=1))
 
     assert summary.processed_members == 3
-    assert preview[0].rank == 5
+    assert preview[0].rank == 7
     assert preview[1].rank == 3
     assert preview[2].rank == 1
 

@@ -38,7 +38,7 @@ class ProfileRepository(BaseRepository[PlayerProfile]):
         cursor = self.collection.find({"guild_id": guild_id}).sort("current_points", -1).limit(limit)
         return self._to_models(await cursor.to_list(length=limit))
 
-    async def reset_for_new_season(self, guild_id: int, updated_at: datetime) -> None:
+    async def reset_for_new_season(self, guild_id: int, updated_at: datetime, *, lowest_rank: int) -> None:
         base_reset = {
             "current_points": 0,
             "season_stats": {
@@ -56,7 +56,7 @@ class ProfileRepository(BaseRepository[PlayerProfile]):
         )
         await self.collection.update_many(
             {"guild_id": guild_id, "rank0": False},
-            {"$set": {"current_rank": 1}},
+            {"$set": {"current_rank": lowest_rank}},
         )
         await self.collection.update_many(
             {"guild_id": guild_id, "rank0": True},

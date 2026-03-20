@@ -168,6 +168,18 @@ def build_config_embed(config: GuildConfig, guild: discord.Guild | None) -> disc
     )
     embed.add_field(name="Log Channel", value=_channel_label(guild, config.log_channel_id), inline=True)
     embed.add_field(
+        name="Default Resource Names",
+        value=(
+            f"Apostado Play: {config.resource_names.apostado_play_channel}\n"
+            f"Highlight Play: {config.resource_names.highlight_play_channel}\n"
+            f"Waiting Voice: {config.resource_names.waiting_voice}\n"
+            f"Temp Voices: {config.resource_names.temp_voice_category}\n"
+            f"Results: {config.resource_names.result_category}\n"
+            f"Logs: {config.resource_names.log_channel}"
+        )[:1024],
+        inline=False,
+    )
+    embed.add_field(
         name="Admins / Staff",
         value=(
             f"Admins: {_roles_label(guild, config.admin_role_ids)}\n"
@@ -176,10 +188,14 @@ def build_config_embed(config: GuildConfig, guild: discord.Guild | None) -> disc
         inline=False,
     )
     rank_lines = []
-    for threshold in config.rank_thresholds:
-        lower = threshold.min_points if threshold.min_points is not None else "-inf"
-        upper = threshold.max_points if threshold.max_points is not None else "+inf"
-        rank_lines.append(f"Rank {threshold.rank}: {lower} to {upper}")
+    for threshold in sorted(config.rank_thresholds, key=lambda item: item.rank):
+        if threshold.max_points is not None:
+            lower = threshold.min_points if threshold.min_points is not None else "-inf"
+            rank_lines.append(f"Rank {threshold.rank}: {lower} to {threshold.max_points}")
+        elif threshold.min_points is not None:
+            rank_lines.append(f"Rank {threshold.rank}: {threshold.min_points}+")
+        else:
+            rank_lines.append(f"Rank {threshold.rank}: all points")
     embed.add_field(name="Internal Rank Thresholds", value="\n".join(rank_lines) if rank_lines else "None", inline=False)
     reward_role_label = _role_label(guild, config.season_reward_role_id)
     embed.add_field(
