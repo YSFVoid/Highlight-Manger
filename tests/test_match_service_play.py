@@ -732,3 +732,76 @@ async def test_mvp_choices_auto_finalize_after_winner_is_locked() -> None:
     assert finalized_calls[0]["winner_team"] == 1
     assert finalized_calls[0]["winner_mvp_id"] == 11
     assert finalized_calls[0]["loser_mvp_id"] == 88
+
+
+@pytest.mark.asyncio
+async def test_one_v_one_winner_vote_opens_mvp_prompts_instead_of_auto_finalize() -> None:
+    config = GuildConfig(
+        guild_id=123,
+        apostado_play_channel_id=10,
+        highlight_play_channel_id=20,
+        waiting_voice_channel_id=30,
+        temp_voice_category_id=40,
+    )
+    service, guild, _, _, creator, repository, _ = build_service(config)
+    team2_captain = FakeMember(77, guild, voice_channel_id=31)
+    guild.add_member(team2_captain)
+    result_channel = FakeTextChannel(56, guild, "#apostado-001-result")
+    guild.add_channel(result_channel)
+
+    match = MatchRecord(
+        guild_id=123,
+        match_number=1,
+        creator_id=creator.id,
+        mode=MatchMode.ONE_V_ONE,
+        match_type=MatchType.APOSTADO,
+        status=MatchStatus.IN_PROGRESS,
+        team1_player_ids=[creator.id],
+        team2_player_ids=[77],
+        result_channel_id=result_channel.id,
+        created_at=utcnow(),
+    )
+    repository.storage[(123, 1)] = match
+
+    second_vote = None
+    await service.record_captain_winner_vote(guild, 1, creator, winner_team=1)
+    second_vote = await service.record_captain_winner_vote(guild, 1, team2_captain, winner_team=1)
+
+    assert second_vote is not None
+    assert "MVP selection is now open" in second_vote.message
+    titles = [payload["embed"].title for payload in result_channel.sent_payloads]
+    assert "Choose Winner MVP - Match #001" in titles
+    assert "Choose Loser MVP - Match #001" in titles
+
+
+@pytest.mark.asyncio
+async def test_close_result_channel_deletes_immediately_in_delete_mode() -> None:
+    config = GuildConfig(
+        guild_id=123,
+        apostado_play_channel_id=10,
+        highlight_play_channel_id=20,
+        waiting_voice_channel_id=30,
+        temp_voice_category_id=40,
+    )
+    service, guild, _, _, creator, repository, _ = build_service(config)
+    result_channel = FakeTextChannel(57, guild, "#apostado-001-result")
+    guild.add_channel(result_channel)
+
+    match = MatchRecord(
+        guild_id=123,
+        match_number=1,
+        creator_id=creator.id,
+        mode=MatchMode.ONE_V_ONE,
+        match_type=MatchType.APOSTADO,
+        status=MatchStatus.CANCELED,
+        team1_player_ids=[creator.id],
+        team2_player_ids=[77],
+        result_channel_id=result_channel.id,
+        created_at=utcnow(),
+    )
+
+    closed = await service._close_result_channel_on_match_close(guild, match, config)
+
+    assert service.result_channel_service.deleted == [result_channel.id]
+    assert closed.result_channel_id is None
+    assert closed.result_channel_cleanup_at is None

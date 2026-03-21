@@ -17,7 +17,7 @@ from highlight_manager.services.result_channel_service import ResultChannelServi
 from highlight_manager.services.season_service import SeasonService
 from highlight_manager.services.voice_service import VoiceService
 from highlight_manager.services.vote_service import VoteService
-from highlight_manager.utils.dates import minutes_from_now, seconds_from_now, utcnow
+from highlight_manager.utils.dates import minutes_from_now, utcnow
 from highlight_manager.utils.embeds import (
     build_captain_mvp_embed,
     build_captain_winner_embed,
@@ -424,10 +424,7 @@ class MatchService:
             await self.post_result_note(guild, match, f"Match #{match.display_id} was canceled.\nReason: {reason}")
             if waiting_voice_warnings:
                 await self.post_result_note(guild, match, "\n".join(waiting_voice_warnings))
-            if config.result_channel_behavior.value == "DELETE":
-                match.result_channel_cleanup_at = seconds_from_now(config.result_channel_delete_delay_seconds)
-            else:
-                await self.result_channel_service.finalize_channel_behavior(guild, match, config)
+            match = await self._close_result_channel_on_match_close(guild, match, config)
         match = await self.repository.replace(match)
         await self.refresh_match_message(guild, match)
         await self.audit_service.log(
@@ -591,14 +588,13 @@ class MatchService:
         match.team2_voice_channel_id = None
         match.penalties_applied = source == ResultSource.VOTE_TIMEOUT
         match.result_summary = summary
-        if match.result_channel_id and config.result_channel_behavior.value == "DELETE":
-            match.result_channel_cleanup_at = seconds_from_now(config.result_channel_delete_delay_seconds)
         match = await self.repository.replace(match)
-        await self.refresh_match_message(guild, match)
         await self.post_result_summary(guild, match)
         if waiting_voice_warnings and match.result_channel_id:
             await self.post_result_note(guild, match, "\n".join(waiting_voice_warnings))
-        await self.result_channel_service.finalize_channel_behavior(guild, match, config)
+        match = await self._close_result_channel_on_match_close(guild, match, config)
+        match = await self.repository.replace(match)
+        await self.refresh_match_message(guild, match)
         await self.audit_service.log(
             guild,
             AuditAction.MATCH_FINALIZED,
@@ -630,14 +626,13 @@ class MatchService:
         match.team2_voice_channel_id = None
         match.finalized_at = utcnow()
         match.result_summary = summary
-        if match.result_channel_id and config.result_channel_behavior.value == "DELETE":
-            match.result_channel_cleanup_at = seconds_from_now(config.result_channel_delete_delay_seconds)
         match = await self.repository.replace(match)
-        await self.refresh_match_message(guild, match)
         await self.post_result_summary(guild, match)
         if waiting_voice_warnings and match.result_channel_id:
             await self.post_result_note(guild, match, "\n".join(waiting_voice_warnings))
-        await self.result_channel_service.finalize_channel_behavior(guild, match, config)
+        match = await self._close_result_channel_on_match_close(guild, match, config)
+        match = await self.repository.replace(match)
+        await self.refresh_match_message(guild, match)
         await self.audit_service.log(
             guild,
             AuditAction.MATCH_EXPIRED,
@@ -977,23 +972,7 @@ class MatchService:
         workflow["winner_team"] = locked_winner_team
         workflow["loser_team"] = 2 if locked_winner_team == 1 else 1
         match = await self.repository.replace(match)
-        await self._ensure_captain_result_messages(guild, match)
-
-        if match.mode.team_size == 1:
-            finalized = await self.finalize_match(
-                guild,
-                match.match_number,
-                winner_team=locked_winner_team,
-                winner_mvp_id=None,
-                loser_mvp_id=None,
-                source=ResultSource.CONSENSUS,
-                actor_id=actor.id,
-                notes="Finalized from captain winner selection.",
-            )
-            return MatchActionResult(
-                match=finalized,
-                message=f"Winner locked and Match #{finalized.display_id} was finalized automatically.",
-            )
+        match = await self._ensure_captain_result_messages(guild, match)
 
         return MatchActionResult(
             match=match,
@@ -1052,7 +1031,7 @@ class MatchService:
             actor_id=actor.id,
             metadata={"match_number": match.match_number, "selection_kind": selection_kind, "player_id": player_id},
         )
-        await self._ensure_captain_result_messages(guild, match)
+        match = await self._ensure_captain_result_messages(guild, match)
         if workflow.get("winner_mvp_id") and workflow.get("loser_mvp_id"):
             finalized = await self.finalize_match(
                 guild,
@@ -1093,12 +1072,12 @@ class MatchService:
                 self.bot.add_view(self._build_captain_winner_view(match))
                 self._registered_captain_views.add(captain_key)
         if match.status in {MatchStatus.IN_PROGRESS, MatchStatus.VOTING} and workflow.get("winner_team") in {1, 2}:
-            if match.mode.team_size > 1 and workflow.get("winner_mvp_id") is None:
+            if workflow.get("winner_mvp_id") is None:
                 winner_key = (match.guild_id, match.match_number, "winner_mvp")
                 if winner_key not in self._registered_captain_views:
                     self.bot.add_view(self._build_captain_mvp_view(match, selection_kind="winner"))
                     self._registered_captain_views.add(winner_key)
-            if match.mode.team_size > 1 and workflow.get("loser_mvp_id") is None:
+            if workflow.get("loser_mvp_id") is None:
                 loser_key = (match.guild_id, match.match_number, "loser_mvp")
                 if loser_key not in self._registered_captain_views:
                     self.bot.add_view(self._build_captain_mvp_view(match, selection_kind="loser"))
@@ -1445,7 +1424,7 @@ class MatchService:
         )
         workflow["winner_prompt_message_id"] = winner_message_id
 
-        if workflow.get("winner_team") not in {1, 2} or match.mode.team_size == 1:
+        if workflow.get("winner_team") not in {1, 2}:
             return await self.repository.replace(match)
 
         winner_mvp_message_id = await self._upsert_result_embed_message(
@@ -1470,6 +1449,15 @@ class MatchService:
         )
         workflow["winner_mvp_prompt_message_id"] = winner_mvp_message_id
         workflow["loser_mvp_prompt_message_id"] = loser_mvp_message_id
+        self.logger.info(
+            "captain_mvp_prompts_ready",
+            guild_id=guild.id,
+            match_number=match.match_number,
+            winner_prompt_message_id=winner_mvp_message_id,
+            loser_prompt_message_id=loser_mvp_message_id,
+            winner_team=workflow.get("winner_team"),
+            loser_team=workflow.get("loser_team"),
+        )
         return await self.repository.replace(match)
 
     async def _upsert_result_embed_message(
@@ -1485,10 +1473,39 @@ class MatchService:
                 message = await channel.fetch_message(message_id)
                 await message.edit(embed=embed, view=view)
                 return message.id
-            except (discord.NotFound, discord.HTTPException):
-                pass
+            except discord.NotFound:
+                self.logger.warning(
+                    "result_prompt_message_missing",
+                    channel_id=channel.id,
+                    message_id=message_id,
+                    embed_title=embed.title,
+                )
+            except discord.HTTPException as exc:
+                self.logger.warning(
+                    "result_prompt_message_edit_failed",
+                    channel_id=channel.id,
+                    message_id=message_id,
+                    embed_title=embed.title,
+                    error=str(exc),
+                )
         message = await channel.send(embed=embed, view=view)
         return message.id
+
+    async def _close_result_channel_on_match_close(
+        self,
+        guild: discord.Guild,
+        match: MatchRecord,
+        config: GuildConfig,
+    ) -> MatchRecord:
+        if not match.result_channel_id:
+            return match
+        if config.result_channel_behavior.value == "DELETE":
+            await self.result_channel_service.delete_channel(guild, match.result_channel_id, match.match_number)
+            match.result_channel_id = None
+            match.result_channel_cleanup_at = None
+            return match
+        await self.result_channel_service.finalize_channel_behavior(guild, match, config)
+        return match
 
     async def _announce_match_ready_if_needed(
         self,

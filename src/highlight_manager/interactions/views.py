@@ -54,21 +54,23 @@ class MatchQueueView(discord.ui.View):
     async def leave_match(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not isinstance(interaction.user, discord.Member):
             return await interaction.response.send_message("This only works inside the server.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=False)
         try:
             result = await self.match_service.leave_open_match(interaction.user, self.match_number)
         except HighlightError as exc:
-            return await interaction.response.send_message(str(exc), ephemeral=True)
-        await interaction.response.send_message(result.message, ephemeral=True)
+            return await interaction.followup.send(str(exc), ephemeral=True)
+        await interaction.followup.send(result.message, ephemeral=True)
 
     @discord.ui.button(label="Cancel Game", style=discord.ButtonStyle.danger, custom_id="placeholder")
     async def cancel_match(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not isinstance(interaction.user, discord.Member):
             return await interaction.response.send_message("This only works inside the server.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=False)
         try:
             match = await self.match_service.require_match(interaction.guild_id or 0, self.match_number)
             is_staff = await self.match_service.config_service.is_staff(interaction.user)
             if interaction.user.id != match.creator_id and not is_staff:
-                return await interaction.response.send_message(
+                return await interaction.followup.send(
                     "Only the creator or staff can cancel this match.",
                     ephemeral=True,
                 )
@@ -80,17 +82,18 @@ class MatchQueueView(discord.ui.View):
                 reason="Canceled by user action.",
             )
         except HighlightError as exc:
-            return await interaction.response.send_message(str(exc), ephemeral=True)
-        await interaction.response.send_message(result.message, ephemeral=True)
+            return await interaction.followup.send(str(exc), ephemeral=True)
+        await interaction.followup.send(result.message, ephemeral=True)
 
     async def _handle_join(self, interaction: discord.Interaction, team_number: int) -> None:
         if not isinstance(interaction.user, discord.Member):
             return await interaction.response.send_message("This only works inside the server.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=False)
         try:
             result = await self.match_service.join_team(interaction.user, self.match_number, team_number)
         except HighlightError as exc:
-            return await interaction.response.send_message(str(exc), ephemeral=True)
-        await interaction.response.send_message(result.message, ephemeral=True)
+            return await interaction.followup.send(str(exc), ephemeral=True)
+        await interaction.followup.send(result.message, ephemeral=True)
 
 
 class RoomInfoEntryView(discord.ui.View):
@@ -208,6 +211,7 @@ class CaptainWinnerSelectionView(discord.ui.View):
     async def _submit(self, interaction: discord.Interaction, *, winner_team: int) -> None:
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
             return await interaction.response.send_message("This only works inside the server.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=False)
         try:
             result = await self.match_service.record_captain_winner_vote(
                 interaction.guild,
@@ -216,8 +220,8 @@ class CaptainWinnerSelectionView(discord.ui.View):
                 winner_team=winner_team,
             )
         except HighlightError as exc:
-            return await interaction.response.send_message(str(exc), ephemeral=True)
-        await interaction.response.send_message(result.message, ephemeral=True)
+            return await interaction.followup.send(str(exc), ephemeral=True)
+        await interaction.followup.send(result.message, ephemeral=True)
 
 
 class CaptainMVPPlayerSelect(discord.ui.Select):
@@ -254,6 +258,7 @@ class CaptainMVPPlayerSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
             return await interaction.response.send_message("This only works inside the server.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=False)
         try:
             result = await self.match_service.record_captain_mvp_choice(
                 interaction.guild,
@@ -263,8 +268,8 @@ class CaptainMVPPlayerSelect(discord.ui.Select):
                 player_id=int(self.values[0]),
             )
         except HighlightError as exc:
-            return await interaction.response.send_message(str(exc), ephemeral=True)
-        await interaction.response.send_message(result.message, ephemeral=True)
+            return await interaction.followup.send(str(exc), ephemeral=True)
+        await interaction.followup.send(result.message, ephemeral=True)
 
 
 class CaptainMVPSelectionView(discord.ui.View):

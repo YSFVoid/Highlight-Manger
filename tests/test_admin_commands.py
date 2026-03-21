@@ -117,7 +117,10 @@ def build_bot(interaction: FakeInteraction, *, staff_allowed: bool = True):
     bot.audit_service = FakeAuditService()
     bot.setup_service = SimpleNamespace()
     bot.bootstrap_service = SimpleNamespace()
-    bot.profile_service = SimpleNamespace()
+    bot.profile_service = SimpleNamespace(
+        adjust_points=None,
+        set_points=None,
+    )
     bot.match_service = SimpleNamespace()
     register_admin_commands(bot)
     return bot
@@ -129,7 +132,7 @@ def get_subcommand(bot: commands.Bot, group_name: str, command_name: str):
 
 
 def build_interaction() -> FakeInteraction:
-    guild = SimpleNamespace(id=123)
+    guild = SimpleNamespace(id=123, owner_id=99)
     member = object.__new__(FakeDiscordMember)
     member.id = 77
     member.guild = guild
@@ -193,3 +196,20 @@ async def test_season_end_failure_after_defer_returns_handled_error() -> None:
     assert interaction.response.defer_called is True
     assert interaction.followup.messages[0]["content"] == "I hit an internal error while processing that request."
     assert any(level == "exception" and event == "season_command_failed" for level, event, _ in bot.logger.calls)
+
+
+@pytest.mark.asyncio
+async def test_points_add_requires_server_owner() -> None:
+    interaction = build_interaction()
+    bot = build_bot(interaction)
+    command = get_subcommand(bot, "points", "add")
+    target = object.__new__(FakeDiscordMember)
+    target.id = 55
+    target.guild = interaction.guild
+    target.bot = False
+    target.guild_permissions = SimpleNamespace(administrator=False, manage_guild=False)
+
+    await command.callback(interaction, target, 10)
+
+    assert interaction.response.defer_called is True
+    assert interaction.followup.messages[0]["content"] == "Only the server owner can manage points."

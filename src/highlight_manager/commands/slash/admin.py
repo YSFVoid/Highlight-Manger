@@ -119,6 +119,20 @@ async def _defer_ephemeral_response(interaction: discord.Interaction) -> bool:
     return True
 
 
+async def _ensure_guild_owner(interaction: discord.Interaction) -> bool:
+    if not await _ensure_guild_member_context(interaction):
+        return False
+    assert interaction.guild is not None
+    if interaction.user.id == interaction.guild.owner_id:
+        return True
+    await _send_interaction_response(
+        interaction,
+        content="Only the server owner can manage points.",
+        ephemeral=True,
+    )
+    return False
+
+
 async def _run_deferred_admin_command(
     bot: "HighlightBot",
     interaction: discord.Interaction,
@@ -667,7 +681,7 @@ def register_admin_commands(bot: "HighlightBot") -> None:
             bot,
             interaction,
             command_name="/points add",
-            permission_check=lambda current: _ensure_staff(bot, current),
+            permission_check=_ensure_guild_owner,
             operation=points_add_operation,
         )
 
@@ -691,7 +705,7 @@ def register_admin_commands(bot: "HighlightBot") -> None:
             bot,
             interaction,
             command_name="/points remove",
-            permission_check=lambda current: _ensure_staff(bot, current),
+            permission_check=_ensure_guild_owner,
             operation=points_remove_operation,
         )
 
@@ -715,7 +729,7 @@ def register_admin_commands(bot: "HighlightBot") -> None:
             bot,
             interaction,
             command_name="/points set",
-            permission_check=lambda current: _ensure_staff(bot, current),
+            permission_check=_ensure_guild_owner,
             operation=points_set_operation,
         )
 

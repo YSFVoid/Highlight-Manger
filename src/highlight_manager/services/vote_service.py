@@ -89,8 +89,12 @@ class VoteService:
         winner_ids = set(match.team1_player_ids if winner_team == 1 else match.team2_player_ids)
         loser_ids = set(match.team2_player_ids if winner_team == 1 else match.team1_player_ids)
         if match.mode.team_size == 1:
-            if winner_mvp_id or loser_mvp_id:
-                raise UserFacingError("1v1 matches do not use MVP voting.")
+            if winner_mvp_id is not None and winner_mvp_id not in winner_ids:
+                raise UserFacingError("Winner MVP must belong to the winning team.")
+            if loser_mvp_id is not None and loser_mvp_id not in loser_ids:
+                raise UserFacingError("Loser MVP must belong to the losing team.")
+            if winner_mvp_id is not None and loser_mvp_id is not None and winner_mvp_id == loser_mvp_id:
+                raise UserFacingError("Winner MVP and Loser MVP cannot be the same player.")
             return
         if winner_mvp_id not in winner_ids:
             raise UserFacingError("Winner MVP must belong to the winning team.")
