@@ -219,14 +219,6 @@ On startup the bot:
 - restores persistent button views
 - restores room-info submission views for active matches
 
-## Validation Commands
-
-```bash
-ruff check src tests
-pytest -q
-python -m compileall src
-```
-
 ## Troubleshooting
 
 - If `!play` is rejected, use the configured Apostado or Highlight play room shown by `/setup status` or `/config`.
