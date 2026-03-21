@@ -21,6 +21,8 @@ class MatchQueueView(discord.ui.View):
         match_number: int,
         *,
         disabled: bool = False,
+        team1_full: bool = False,
+        team2_full: bool = False,
     ) -> None:
         super().__init__(timeout=None)
         self.match_service = match_service
@@ -32,6 +34,13 @@ class MatchQueueView(discord.ui.View):
         self.cancel_match.custom_id = f"match:{self.guild_id}:{self.match_number}:cancel"
         for child in self.children:
             child.disabled = disabled
+        if not disabled:
+            self.join_team_1.disabled = team1_full
+            self.join_team_2.disabled = team2_full
+            if team1_full:
+                self.join_team_1.label = "Team 1 Full"
+            if team2_full:
+                self.join_team_2.label = "Team 2 Full"
 
     @discord.ui.button(label="Join Team 1", style=discord.ButtonStyle.danger, custom_id="placeholder")
     async def join_team_1(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:

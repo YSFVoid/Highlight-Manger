@@ -1198,6 +1198,8 @@ class MatchService:
             match.guild_id,
             match.match_number,
             disabled=match.status != MatchStatus.OPEN or match.queue_opened_at is None,
+            team1_full=len(match.team1_player_ids) >= match.team_size,
+            team2_full=len(match.team2_player_ids) >= match.team_size,
         )
 
     def _build_result_view(self, match: MatchRecord):
