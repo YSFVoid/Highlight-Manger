@@ -170,6 +170,119 @@ class ResultEntryView(discord.ui.View):
         )
 
 
+class CaptainWinnerSelectionView(discord.ui.View):
+    def __init__(
+        self,
+        match_service: MatchService,
+        guild_id: int,
+        match_number: int,
+        *,
+        disabled: bool = False,
+    ) -> None:
+        super().__init__(timeout=None)
+        self.match_service = match_service
+        self.guild_id = guild_id
+        self.match_number = match_number
+        self.team_1_won.custom_id = f"captainresult:{self.guild_id}:{self.match_number}:winner:1"
+        self.team_2_won.custom_id = f"captainresult:{self.guild_id}:{self.match_number}:winner:2"
+        for child in self.children:
+            child.disabled = disabled
+
+    @discord.ui.button(label="Team 1 Won", style=discord.ButtonStyle.danger, custom_id="placeholder")
+    async def team_1_won(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._submit(interaction, winner_team=1)
+
+    @discord.ui.button(label="Team 2 Won", style=discord.ButtonStyle.success, custom_id="placeholder")
+    async def team_2_won(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._submit(interaction, winner_team=2)
+
+    async def _submit(self, interaction: discord.Interaction, *, winner_team: int) -> None:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            return await interaction.response.send_message("This only works inside the server.", ephemeral=True)
+        try:
+            result = await self.match_service.record_captain_winner_vote(
+                interaction.guild,
+                self.match_number,
+                interaction.user,
+                winner_team=winner_team,
+            )
+        except HighlightError as exc:
+            return await interaction.response.send_message(str(exc), ephemeral=True)
+        await interaction.response.send_message(result.message, ephemeral=True)
+
+
+class CaptainMVPPlayerSelect(discord.ui.Select):
+    def __init__(
+        self,
+        match_service: MatchService,
+        guild_id: int,
+        match_number: int,
+        *,
+        selection_kind: str,
+        player_ids: list[int],
+    ) -> None:
+        self.match_service = match_service
+        self.guild_id = guild_id
+        self.match_number = match_number
+        self.selection_kind = selection_kind
+        guild = match_service.bot.get_guild(guild_id)
+        options = [
+            discord.SelectOption(
+                label=(guild.get_member(user_id).display_name if guild and guild.get_member(user_id) else f"User {user_id}")[:100],
+                value=str(user_id),
+                description=f"ID: {user_id}",
+            )
+            for user_id in player_ids
+        ]
+        super().__init__(
+            placeholder="Choose MVP player",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id=f"captainresult:{guild_id}:{match_number}:{selection_kind}:mvp",
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            return await interaction.response.send_message("This only works inside the server.", ephemeral=True)
+        try:
+            result = await self.match_service.record_captain_mvp_choice(
+                interaction.guild,
+                self.match_number,
+                interaction.user,
+                selection_kind=self.selection_kind,
+                player_id=int(self.values[0]),
+            )
+        except HighlightError as exc:
+            return await interaction.response.send_message(str(exc), ephemeral=True)
+        await interaction.response.send_message(result.message, ephemeral=True)
+
+
+class CaptainMVPSelectionView(discord.ui.View):
+    def __init__(
+        self,
+        match_service: MatchService,
+        guild_id: int,
+        match_number: int,
+        *,
+        selection_kind: str,
+        player_ids: list[int],
+        disabled: bool = False,
+    ) -> None:
+        super().__init__(timeout=None)
+        self.add_item(
+            CaptainMVPPlayerSelect(
+                match_service,
+                guild_id,
+                match_number,
+                selection_kind=selection_kind,
+                player_ids=player_ids,
+            )
+        )
+        for child in self.children:
+            child.disabled = disabled
+
+
 class RoomInfoModal(discord.ui.Modal, title="Enter Room Information"):
     def __init__(self, match_service: MatchService, match: MatchRecord, actor: discord.Member) -> None:
         super().__init__(timeout=300)

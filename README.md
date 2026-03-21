@@ -108,6 +108,25 @@ Season reward role.
 - The private result room is created up front so room details always have a private delivery surface.
 - If the private result room is recreated later, the stored room info is reposted there automatically.
 
+## Match Result Flow
+
+- When a match goes live, the private result room posts a **Choose Winner Team** embed first.
+- Only two people can choose the winner team:
+  - the match creator
+  - the first player who entered Team 2
+- Once both captain votes match, the losing team is inferred automatically.
+- For team matches, the bot then posts two more private embeds:
+  - **Choose Winner MVP**
+  - **Choose Loser MVP**
+- The winning team captain selects winner MVP.
+- The losing team captain selects loser MVP.
+- As soon as both MVP selections are recorded, the bot finalizes the match automatically.
+- During auto-finalize, the bot:
+  - posts the result summary
+  - moves players back to Waiting Voice when possible
+  - deletes the temporary Team 1 and Team 2 voice channels
+  - schedules the private result room for cleanup using the configured delete behavior
+
 ## Leaderboard / Profile UI
 
 - `!rank` opens a focused rank overview embed.

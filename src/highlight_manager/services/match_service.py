@@ -19,6 +19,8 @@ from highlight_manager.services.voice_service import VoiceService
 from highlight_manager.services.vote_service import VoteService
 from highlight_manager.utils.dates import minutes_from_now, seconds_from_now, utcnow
 from highlight_manager.utils.embeds import (
+    build_captain_mvp_embed,
+    build_captain_winner_embed,
     build_match_embed,
     build_match_ready_embed,
     build_match_room_setup_embed,
@@ -96,6 +98,7 @@ class MatchService:
         self._registered_queue_views: set[tuple[int, int]] = set()
         self._registered_result_views: set[tuple[int, int]] = set()
         self._registered_room_info_views: set[tuple[int, int]] = set()
+        self._registered_captain_views: set[tuple[int, int, str]] = set()
 
     async def create_match(
         self,
@@ -409,6 +412,7 @@ class MatchService:
             raise StateTransitionError("This match can only be canceled by admins now.")
 
         config = await self.config_service.get_or_create(guild.id)
+        waiting_voice_warnings = await self.voice_service.move_players_to_waiting_voice(guild, match, config)
         await self.voice_service.cleanup_match_voices(guild, match)
         await self.vote_service.clear_votes(match)
         match.status = MatchStatus.CANCELED
@@ -418,6 +422,8 @@ class MatchService:
         match.team2_voice_channel_id = None
         if match.result_channel_id:
             await self.post_result_note(guild, match, f"Match #{match.display_id} was canceled.\nReason: {reason}")
+            if waiting_voice_warnings:
+                await self.post_result_note(guild, match, "\n".join(waiting_voice_warnings))
             if config.result_channel_behavior.value == "DELETE":
                 match.result_channel_cleanup_at = seconds_from_now(config.result_channel_delete_delay_seconds)
             else:
@@ -473,16 +479,17 @@ class MatchService:
             if created_result_channel:
                 await result_channel.send(
                     embed=build_result_room_embed(match, guild),
-                    view=self._build_result_view(match),
+                    view=None,
                 )
             elif resume:
                 await result_channel.send(
-                    "Bot restarted while this match was moving into play. Voting controls have been restored.",
-                    view=self._build_result_view(match),
+                    "Bot restarted while this match was moving into play. Result controls have been restored.",
+                    view=None,
                 )
             if warnings:
                 await result_channel.send("\n".join(warnings))
         match = await self._ensure_room_info_available_in_result_channel(guild, match)
+        match = await self._ensure_captain_result_messages(guild, match)
         match = await self._announce_match_ready_if_needed(guild, match, config)
         await self.audit_service.log(
             guild,
@@ -576,6 +583,7 @@ class MatchService:
             source=source,
             notes=notes,
         )
+        waiting_voice_warnings = await self.voice_service.move_players_to_waiting_voice(guild, match, config)
         await self.voice_service.cleanup_match_voices(guild, match)
         match.status = MatchStatus.FINALIZED
         match.finalized_at = utcnow()
@@ -588,6 +596,8 @@ class MatchService:
         match = await self.repository.replace(match)
         await self.refresh_match_message(guild, match)
         await self.post_result_summary(guild, match)
+        if waiting_voice_warnings and match.result_channel_id:
+            await self.post_result_note(guild, match, "\n".join(waiting_voice_warnings))
         await self.result_channel_service.finalize_channel_behavior(guild, match, config)
         await self.audit_service.log(
             guild,
@@ -612,6 +622,7 @@ class MatchService:
             config,
             notes="Voting timed out before a valid consensus or force result was recorded.",
         )
+        waiting_voice_warnings = await self.voice_service.move_players_to_waiting_voice(guild, match, config)
         await self.voice_service.cleanup_match_voices(guild, match)
         match.status = MatchStatus.EXPIRED
         match.penalties_applied = True
@@ -624,6 +635,8 @@ class MatchService:
         match = await self.repository.replace(match)
         await self.refresh_match_message(guild, match)
         await self.post_result_summary(guild, match)
+        if waiting_voice_warnings and match.result_channel_id:
+            await self.post_result_note(guild, match, "\n".join(waiting_voice_warnings))
         await self.result_channel_service.finalize_channel_behavior(guild, match, config)
         await self.audit_service.log(
             guild,
@@ -719,12 +732,10 @@ class MatchService:
                     )
             if match.status in {MatchStatus.IN_PROGRESS, MatchStatus.VOTING}:
                 match = await self._announce_match_ready_if_needed(guild, match, config)
+                match = await self._ensure_captain_result_messages(guild, match)
             match = await self._ensure_room_info_available_in_result_channel(guild, match)
             if result_channel is not None:
-                await result_channel.send(
-                    "Bot restarted. Voting controls have been restored.",
-                    view=self._build_result_view(match),
-                )
+                await result_channel.send("Bot restarted. Result selection controls have been restored.")
 
     async def cleanup_stale_resources(self) -> None:
         for match in await self.repository.list_closed_with_voice_channels():
@@ -863,6 +874,207 @@ class MatchService:
             raise UserFacingError(f"Match #{match_number:03d} was not found.")
         return match
 
+    def _captain_flow(self, match: MatchRecord) -> dict[str, Any]:
+        workflow = match.metadata.get("captain_result_flow")
+        if not isinstance(workflow, dict):
+            workflow = {
+                "team2_captain_id": match.team2_player_ids[0] if match.team2_player_ids else None,
+                "winner_votes": {},
+                "winner_team": None,
+                "loser_team": None,
+                "winner_mvp_id": None,
+                "loser_mvp_id": None,
+                "winner_prompt_message_id": None,
+                "winner_mvp_prompt_message_id": None,
+                "loser_mvp_prompt_message_id": None,
+            }
+            match.metadata["captain_result_flow"] = workflow
+        if workflow.get("team2_captain_id") is None and match.team2_player_ids:
+            workflow["team2_captain_id"] = match.team2_player_ids[0]
+        if not isinstance(workflow.get("winner_votes"), dict):
+            workflow["winner_votes"] = {}
+        return workflow
+
+    def _team2_captain_id(self, match: MatchRecord) -> int | None:
+        workflow = self._captain_flow(match)
+        return workflow.get("team2_captain_id")
+
+    def _winner_captain_id(self, match: MatchRecord) -> int | None:
+        workflow = self._captain_flow(match)
+        winner_team = workflow.get("winner_team")
+        if winner_team == 1:
+            return match.creator_id
+        if winner_team == 2:
+            return workflow.get("team2_captain_id")
+        return None
+
+    def _loser_captain_id(self, match: MatchRecord) -> int | None:
+        workflow = self._captain_flow(match)
+        loser_team = workflow.get("loser_team")
+        if loser_team == 1:
+            return match.creator_id
+        if loser_team == 2:
+            return workflow.get("team2_captain_id")
+        return None
+
+    def _eligible_winner_voter_ids(self, match: MatchRecord) -> list[int]:
+        voter_ids = [match.creator_id]
+        team2_captain_id = self._team2_captain_id(match)
+        if team2_captain_id and team2_captain_id not in voter_ids:
+            voter_ids.append(team2_captain_id)
+        return voter_ids
+
+    async def record_captain_winner_vote(
+        self,
+        guild: discord.Guild,
+        match_number: int,
+        actor: discord.Member,
+        *,
+        winner_team: int,
+    ) -> MatchActionResult:
+        match = await self.require_match(guild.id, match_number)
+        if match.status not in {MatchStatus.IN_PROGRESS, MatchStatus.VOTING, MatchStatus.FULL}:
+            raise StateTransitionError("Winner selection is not available for that match.")
+
+        workflow = self._captain_flow(match)
+        eligible_voter_ids = self._eligible_winner_voter_ids(match)
+        if actor.id not in eligible_voter_ids:
+            raise UserFacingError("Only the match creator and the first Team 2 player can choose the winner.")
+
+        workflow["winner_votes"][str(actor.id)] = winner_team
+        match.status = MatchStatus.VOTING
+        match = await self.repository.replace(match)
+        self.logger.info(
+            "captain_winner_vote_recorded",
+            guild_id=guild.id,
+            match_number=match.match_number,
+            actor_id=actor.id,
+            winner_team=winner_team,
+        )
+        await self.audit_service.log(
+            guild,
+            AuditAction.MATCH_NOTIFICATION,
+            f"{actor.mention} selected Team {winner_team} as the winner for Match #{match.display_id}.",
+            actor_id=actor.id,
+            metadata={"match_number": match.match_number, "winner_team": winner_team},
+        )
+
+        votes = {int(user_id): int(team) for user_id, team in workflow["winner_votes"].items()}
+        if len(votes) < len(eligible_voter_ids):
+            return MatchActionResult(
+                match=match,
+                message="Winner vote saved. Waiting for the other captain to choose the winner team.",
+            )
+
+        selected_teams = set(votes.values())
+        if len(selected_teams) != 1:
+            return MatchActionResult(
+                match=match,
+                message="Winner votes do not match yet. One of the captains needs to update the selection.",
+            )
+
+        locked_winner_team = selected_teams.pop()
+        workflow["winner_team"] = locked_winner_team
+        workflow["loser_team"] = 2 if locked_winner_team == 1 else 1
+        match = await self.repository.replace(match)
+        await self._ensure_captain_result_messages(guild, match)
+
+        if match.mode.team_size == 1:
+            finalized = await self.finalize_match(
+                guild,
+                match.match_number,
+                winner_team=locked_winner_team,
+                winner_mvp_id=None,
+                loser_mvp_id=None,
+                source=ResultSource.CONSENSUS,
+                actor_id=actor.id,
+                notes="Finalized from captain winner selection.",
+            )
+            return MatchActionResult(
+                match=finalized,
+                message=f"Winner locked and Match #{finalized.display_id} was finalized automatically.",
+            )
+
+        return MatchActionResult(
+            match=match,
+            message="Winner team locked. Winner MVP and loser MVP selection is now open.",
+        )
+
+    async def record_captain_mvp_choice(
+        self,
+        guild: discord.Guild,
+        match_number: int,
+        actor: discord.Member,
+        *,
+        selection_kind: str,
+        player_id: int,
+    ) -> MatchActionResult:
+        match = await self.require_match(guild.id, match_number)
+        if match.status not in {MatchStatus.IN_PROGRESS, MatchStatus.VOTING, MatchStatus.FULL}:
+            raise StateTransitionError("MVP selection is not available for that match.")
+
+        workflow = self._captain_flow(match)
+        winner_team = workflow.get("winner_team")
+        loser_team = workflow.get("loser_team")
+        if winner_team not in {1, 2} or loser_team not in {1, 2}:
+            raise UserFacingError("Choose the winner team first.")
+
+        if selection_kind == "winner":
+            authorized_actor_id = self._winner_captain_id(match)
+            valid_team_ids = set(match.team1_player_ids if winner_team == 1 else match.team2_player_ids)
+            if actor.id != authorized_actor_id:
+                raise UserFacingError("Only the winning team captain can choose winner MVP.")
+            if player_id not in valid_team_ids:
+                raise UserFacingError("Winner MVP must be selected from the winning team.")
+            workflow["winner_mvp_id"] = player_id
+        else:
+            authorized_actor_id = self._loser_captain_id(match)
+            valid_team_ids = set(match.team1_player_ids if loser_team == 1 else match.team2_player_ids)
+            if actor.id != authorized_actor_id:
+                raise UserFacingError("Only the losing team captain can choose loser MVP.")
+            if player_id not in valid_team_ids:
+                raise UserFacingError("Loser MVP must be selected from the losing team.")
+            workflow["loser_mvp_id"] = player_id
+
+        match = await self.repository.replace(match)
+        self.logger.info(
+            "captain_mvp_selection_recorded",
+            guild_id=guild.id,
+            match_number=match.match_number,
+            actor_id=actor.id,
+            selection_kind=selection_kind,
+            player_id=player_id,
+        )
+        await self.audit_service.log(
+            guild,
+            AuditAction.MATCH_NOTIFICATION,
+            f"{actor.mention} selected <@{player_id}> as the {selection_kind} MVP for Match #{match.display_id}.",
+            actor_id=actor.id,
+            metadata={"match_number": match.match_number, "selection_kind": selection_kind, "player_id": player_id},
+        )
+        await self._ensure_captain_result_messages(guild, match)
+        if workflow.get("winner_mvp_id") and workflow.get("loser_mvp_id"):
+            finalized = await self.finalize_match(
+                guild,
+                match.match_number,
+                winner_team=winner_team,
+                winner_mvp_id=workflow.get("winner_mvp_id"),
+                loser_mvp_id=workflow.get("loser_mvp_id"),
+                source=ResultSource.CONSENSUS,
+                actor_id=actor.id,
+                notes="Finalized from captain MVP selections.",
+            )
+            return MatchActionResult(
+                match=finalized,
+                message=f"MVPs locked and Match #{finalized.display_id} was finalized automatically.",
+            )
+
+        pending_label = "loser MVP" if selection_kind == "winner" else "winner MVP"
+        return MatchActionResult(
+            match=match,
+            message=f"{selection_kind.title()} MVP saved. Waiting for {pending_label} selection.",
+        )
+
     def register_views(self, match: MatchRecord) -> None:
         match_key = (match.guild_id, match.match_number)
         if match.queue_opened_at is not None and match_key not in self._registered_queue_views:
@@ -874,6 +1086,23 @@ class MatchService:
         if match.status in {MatchStatus.OPEN, MatchStatus.FULL, MatchStatus.IN_PROGRESS, MatchStatus.VOTING} and match_key not in self._registered_room_info_views:
             self.bot.add_view(self._build_room_info_view(match))
             self._registered_room_info_views.add(match_key)
+        workflow = self._captain_flow(match)
+        if match.status in {MatchStatus.FULL, MatchStatus.IN_PROGRESS, MatchStatus.VOTING} and workflow.get("winner_team") is None:
+            captain_key = (match.guild_id, match.match_number, "winner")
+            if captain_key not in self._registered_captain_views:
+                self.bot.add_view(self._build_captain_winner_view(match))
+                self._registered_captain_views.add(captain_key)
+        if match.status in {MatchStatus.IN_PROGRESS, MatchStatus.VOTING} and workflow.get("winner_team") in {1, 2}:
+            if match.mode.team_size > 1 and workflow.get("winner_mvp_id") is None:
+                winner_key = (match.guild_id, match.match_number, "winner_mvp")
+                if winner_key not in self._registered_captain_views:
+                    self.bot.add_view(self._build_captain_mvp_view(match, selection_kind="winner"))
+                    self._registered_captain_views.add(winner_key)
+            if match.mode.team_size > 1 and workflow.get("loser_mvp_id") is None:
+                loser_key = (match.guild_id, match.match_number, "loser_mvp")
+                if loser_key not in self._registered_captain_views:
+                    self.bot.add_view(self._build_captain_mvp_view(match, selection_kind="loser"))
+                    self._registered_captain_views.add(loser_key)
 
     async def refresh_match_message(self, guild: discord.Guild, match: MatchRecord) -> None:
         if not match.public_message_id or not match.source_channel_id:
@@ -989,6 +1218,34 @@ class MatchService:
             match.guild_id,
             match.match_number,
             disabled=match.status in {MatchStatus.FINALIZED, MatchStatus.CANCELED, MatchStatus.EXPIRED},
+        )
+
+    def _build_captain_winner_view(self, match: MatchRecord):
+        from highlight_manager.interactions.views import CaptainWinnerSelectionView
+
+        return CaptainWinnerSelectionView(
+            self,
+            match.guild_id,
+            match.match_number,
+            disabled=match.status not in {MatchStatus.FULL, MatchStatus.IN_PROGRESS, MatchStatus.VOTING},
+        )
+
+    def _build_captain_mvp_view(self, match: MatchRecord, *, selection_kind: str):
+        from highlight_manager.interactions.views import CaptainMVPSelectionView
+
+        workflow = self._captain_flow(match)
+        if selection_kind == "winner":
+            team_number = workflow.get("winner_team")
+        else:
+            team_number = workflow.get("loser_team")
+        player_ids = match.team1_player_ids if team_number == 1 else match.team2_player_ids
+        return CaptainMVPSelectionView(
+            self,
+            match.guild_id,
+            match.match_number,
+            selection_kind=selection_kind,
+            player_ids=player_ids,
+            disabled=match.status not in {MatchStatus.IN_PROGRESS, MatchStatus.VOTING},
         )
 
     async def _ensure_match_voice_channels(
@@ -1159,6 +1416,77 @@ class MatchService:
             return match
         match.metadata["room_info_posted_channel_id"] = match.result_channel_id
         return await self.repository.replace(match)
+
+    async def _ensure_captain_result_messages(
+        self,
+        guild: discord.Guild,
+        match: MatchRecord,
+    ) -> MatchRecord:
+        if not match.result_channel_id:
+            return match
+        channel = guild.get_channel(match.result_channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            return match
+
+        workflow = self._captain_flow(match)
+        self.register_views(match)
+
+        winner_message_id = await self._upsert_result_embed_message(
+            channel,
+            workflow.get("winner_prompt_message_id"),
+            embed=build_captain_winner_embed(match, guild),
+            view=(
+                self._build_captain_winner_view(match)
+                if workflow.get("winner_team") is None and match.status in {MatchStatus.FULL, MatchStatus.IN_PROGRESS, MatchStatus.VOTING}
+                else None
+            ),
+        )
+        workflow["winner_prompt_message_id"] = winner_message_id
+
+        if workflow.get("winner_team") not in {1, 2} or match.mode.team_size == 1:
+            return await self.repository.replace(match)
+
+        winner_mvp_message_id = await self._upsert_result_embed_message(
+            channel,
+            workflow.get("winner_mvp_prompt_message_id"),
+            embed=build_captain_mvp_embed(match, guild, selection_kind="winner"),
+            view=(
+                self._build_captain_mvp_view(match, selection_kind="winner")
+                if workflow.get("winner_mvp_id") is None
+                else None
+            ),
+        )
+        loser_mvp_message_id = await self._upsert_result_embed_message(
+            channel,
+            workflow.get("loser_mvp_prompt_message_id"),
+            embed=build_captain_mvp_embed(match, guild, selection_kind="loser"),
+            view=(
+                self._build_captain_mvp_view(match, selection_kind="loser")
+                if workflow.get("loser_mvp_id") is None
+                else None
+            ),
+        )
+        workflow["winner_mvp_prompt_message_id"] = winner_mvp_message_id
+        workflow["loser_mvp_prompt_message_id"] = loser_mvp_message_id
+        return await self.repository.replace(match)
+
+    async def _upsert_result_embed_message(
+        self,
+        channel: discord.TextChannel,
+        message_id: int | None,
+        *,
+        embed: discord.Embed,
+        view: discord.ui.View | None,
+    ) -> int:
+        if message_id:
+            try:
+                message = await channel.fetch_message(message_id)
+                await message.edit(embed=embed, view=view)
+                return message.id
+            except (discord.NotFound, discord.HTTPException):
+                pass
+        message = await channel.send(embed=embed, view=view)
+        return message.id
 
     async def _announce_match_ready_if_needed(
         self,

@@ -100,6 +100,45 @@ class VoiceService:
             )
         return warnings
 
+    async def move_players_to_waiting_voice(
+        self,
+        guild: discord.Guild,
+        match: MatchRecord,
+        config: GuildConfig,
+    ) -> list[str]:
+        warnings: list[str] = []
+        waiting_channel = guild.get_channel(config.waiting_voice_channel_id) if config.waiting_voice_channel_id else None
+        if not isinstance(waiting_channel, discord.VoiceChannel):
+            self.logger.warning(
+                "waiting_voice_return_missing",
+                guild_id=guild.id,
+                match_number=match.match_number,
+                waiting_voice_channel_id=config.waiting_voice_channel_id,
+            )
+            return warnings
+
+        for user_id in match.all_player_ids:
+            member = guild.get_member(user_id)
+            if member is None or member.voice is None or member.voice.channel is None:
+                continue
+            if member.voice.channel.id not in {match.team1_voice_channel_id, match.team2_voice_channel_id}:
+                continue
+            try:
+                await member.move_to(waiting_channel, reason=f"Returning Match #{match.display_id} players to Waiting Voice")
+            except discord.Forbidden:
+                warnings.append(f"Could not move {member.mention} back to Waiting Voice because bot lacks Move Members.")
+            except discord.HTTPException:
+                warnings.append(f"Could not move {member.mention} back to Waiting Voice.")
+
+        if warnings:
+            self.logger.warning(
+                "waiting_voice_return_partial",
+                guild_id=guild.id,
+                match_number=match.match_number,
+                warnings=warnings,
+            )
+        return warnings
+
     async def cleanup_match_voices(self, guild: discord.Guild, match: MatchRecord) -> None:
         for channel_id in [match.team1_voice_channel_id, match.team2_voice_channel_id]:
             if not channel_id:

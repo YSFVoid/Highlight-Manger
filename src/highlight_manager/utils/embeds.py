@@ -185,6 +185,13 @@ def _top_rank_badge(index: int) -> str:
     return badges.get(index, f"{index}th")
 
 
+def _captain_workflow(match: MatchRecord) -> dict:
+    workflow = match.metadata.get("captain_result_flow")
+    if isinstance(workflow, dict):
+        return workflow
+    return {}
+
+
 def build_help_embed(prefix: str) -> discord.Embed:
     embed = discord.Embed(
         title="Prefix Command Guide",
@@ -318,6 +325,8 @@ def build_match_ready_embed(match: MatchRecord, guild: discord.Guild | None) -> 
 
 
 def build_result_room_embed(match: MatchRecord, guild: discord.Guild | None) -> discord.Embed:
+    workflow = _captain_workflow(match)
+    team2_captain_id = workflow.get("team2_captain_id")
     embed = discord.Embed(
         title=f"Private Match Room #{match.display_id}",
         description=(
@@ -338,9 +347,17 @@ def build_result_room_embed(match: MatchRecord, guild: discord.Guild | None) -> 
         ),
         inline=False,
     )
+    eligible_voters = [_member_label(guild, match.creator_id)]
+    if team2_captain_id and team2_captain_id != match.creator_id:
+        eligible_voters.append(_member_label(guild, team2_captain_id))
+    embed.add_field(
+        name="Result Captains",
+        value="\n".join(eligible_voters),
+        inline=False,
+    )
     players = "\n".join(_member_label(guild, user_id) for user_id in match.all_player_ids) or "Only the host is here so far."
     embed.add_field(name="Players", value=players, inline=False)
-    embed.set_footer(text="Sensitive room details stay here and are removed automatically after the match closes.")
+    embed.set_footer(text="Winner, winner MVP, and loser MVP are chosen here. The room auto-cleans after the match closes.")
     return embed
 
 
@@ -374,6 +391,76 @@ def build_room_info_embed(match: MatchRecord, guild: discord.Guild | None) -> di
             inline=False,
         )
     embed.set_footer(text="Keep this information inside the private match room.")
+    return embed
+
+
+def build_captain_winner_embed(match: MatchRecord, guild: discord.Guild | None) -> discord.Embed:
+    workflow = _captain_workflow(match)
+    team2_captain_id = workflow.get("team2_captain_id")
+    winner_votes: dict[str, int] = workflow.get("winner_votes", {})
+    lines = [f"Team 1 Captain: {_member_label(guild, match.creator_id)}"]
+    if team2_captain_id:
+        lines.append(f"Team 2 Captain: {_member_label(guild, team2_captain_id)}")
+    voted_lines = []
+    for voter_id, team in winner_votes.items():
+        voted_lines.append(f"{_member_label(guild, int(voter_id))} selected Team {team}")
+    embed = discord.Embed(
+        title=f"Choose Winner Team - Match #{match.display_id}",
+        description=(
+            "Only the match creator and the first player who entered Team 2 can choose the winner.\n"
+            "Once both captains agree, the losing team is set automatically."
+        ),
+        colour=discord.Colour.orange(),
+    )
+    embed.add_field(name="Captains", value="\n".join(lines), inline=False)
+    embed.add_field(
+        name="Winner Votes",
+        value="\n".join(voted_lines) if voted_lines else "Waiting for captain votes.",
+        inline=False,
+    )
+    embed.set_footer(text="When both captain votes match, MVP selection opens automatically.")
+    return embed
+
+
+def build_captain_mvp_embed(
+    match: MatchRecord,
+    guild: discord.Guild | None,
+    *,
+    selection_kind: str,
+) -> discord.Embed:
+    workflow = _captain_workflow(match)
+    winner_team = workflow.get("winner_team")
+    loser_team = workflow.get("loser_team")
+    if selection_kind == "winner":
+        team_number = winner_team
+        title = f"Choose Winner MVP - Match #{match.display_id}"
+        selected_id = workflow.get("winner_mvp_id")
+        selector_id = match.creator_id if winner_team == 1 else workflow.get("team2_captain_id")
+    else:
+        team_number = loser_team
+        title = f"Choose Loser MVP - Match #{match.display_id}"
+        selected_id = workflow.get("loser_mvp_id")
+        selector_id = match.creator_id if loser_team == 1 else workflow.get("team2_captain_id")
+    team_ids = match.team1_player_ids if team_number == 1 else match.team2_player_ids
+    embed = discord.Embed(
+        title=title,
+        description=(
+            f"Only {_member_label(guild, selector_id) if selector_id else 'the assigned captain'} can submit this choice.\n"
+            f"Team {team_number} players are listed below."
+        ),
+        colour=discord.Colour.blurple() if selection_kind == "winner" else discord.Colour.red(),
+    )
+    embed.add_field(
+        name="Eligible Players",
+        value="\n".join(_member_label(guild, user_id) for user_id in team_ids),
+        inline=False,
+    )
+    embed.add_field(
+        name="Current Selection",
+        value=_member_label(guild, selected_id) if selected_id else "Waiting for selection.",
+        inline=False,
+    )
+    embed.set_footer(text="Once winner MVP and loser MVP are both selected, the match finalizes automatically.")
     return embed
 
 

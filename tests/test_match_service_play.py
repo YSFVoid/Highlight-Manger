@@ -126,9 +126,13 @@ class FakeVoiceService:
         if member.voice.channel.id != config.waiting_voice_channel_id:
             raise UserFacingError("You must be in the configured Waiting Voice channel to do that.")
 
+    async def move_players_to_waiting_voice(self, guild, match, config):
+        return []
+
 
 class FakeVoteService:
-    pass
+    async def clear_votes(self, match) -> None:
+        return None
 
 
 class FakeResultChannelService:
@@ -229,6 +233,9 @@ class FakeMember:
             self.voice = None
         else:
             self.voice = SimpleNamespace(channel=SimpleNamespace(id=voice_channel_id))
+
+    async def move_to(self, channel, *, reason=None):
+        self.voice = SimpleNamespace(channel=channel)
 
 
 class FakeDiscordMember(discord.Member):
@@ -580,3 +587,148 @@ async def test_room_info_is_posted_to_private_result_channel_once_per_channel() 
     assert len(result_channel.sent_payloads) == 1
     assert result_channel.sent_payloads[0]["embed"].title == "Room Access - Match #001"
     assert apostado_channel.sent_payloads == []
+
+
+@pytest.mark.asyncio
+async def test_live_match_posts_winner_team_prompt_to_result_channel() -> None:
+    config = GuildConfig(
+        guild_id=123,
+        apostado_play_channel_id=10,
+        highlight_play_channel_id=20,
+        waiting_voice_channel_id=30,
+        temp_voice_category_id=40,
+    )
+    service, guild, _, _, creator, repository, _ = build_service(config)
+    team2_captain = FakeMember(77, guild, voice_channel_id=31)
+    guild.add_member(team2_captain)
+    guild.add_member(FakeMember(11, guild, voice_channel_id=31))
+    guild.add_member(FakeMember(88, guild, voice_channel_id=31))
+    result_channel = FakeTextChannel(55, guild, "#apostado-001-result")
+    guild.add_channel(result_channel)
+
+    match = MatchRecord(
+        guild_id=123,
+        match_number=1,
+        creator_id=creator.id,
+        mode=MatchMode.TWO_V_TWO,
+        match_type=MatchType.APOSTADO,
+        status=MatchStatus.IN_PROGRESS,
+        team1_player_ids=[creator.id, 11],
+        team2_player_ids=[77, 88],
+        result_channel_id=result_channel.id,
+        created_at=utcnow(),
+        room_info=MatchRoomInfo(room_id="123456", submitted_by=creator.id),
+    )
+
+    updated = await service._ensure_captain_result_messages(guild, match)
+
+    workflow = updated.metadata["captain_result_flow"]
+    assert workflow["team2_captain_id"] == 77
+    assert len(result_channel.sent_payloads) == 1
+    assert result_channel.sent_payloads[0]["embed"].title == "Choose Winner Team - Match #001"
+
+
+@pytest.mark.asyncio
+async def test_captain_winner_votes_must_match_before_winner_is_locked() -> None:
+    config = GuildConfig(
+        guild_id=123,
+        apostado_play_channel_id=10,
+        highlight_play_channel_id=20,
+        waiting_voice_channel_id=30,
+        temp_voice_category_id=40,
+    )
+    service, guild, _, _, creator, repository, _ = build_service(config)
+    team2_captain = FakeMember(77, guild, voice_channel_id=31)
+    guild.add_member(team2_captain)
+    guild.add_member(FakeMember(11, guild, voice_channel_id=31))
+    guild.add_member(FakeMember(88, guild, voice_channel_id=31))
+    result_channel = FakeTextChannel(55, guild, "#apostado-001-result")
+    guild.add_channel(result_channel)
+
+    match = MatchRecord(
+        guild_id=123,
+        match_number=1,
+        creator_id=creator.id,
+        mode=MatchMode.TWO_V_TWO,
+        match_type=MatchType.APOSTADO,
+        status=MatchStatus.IN_PROGRESS,
+        team1_player_ids=[creator.id, 11],
+        team2_player_ids=[77, 88],
+        result_channel_id=result_channel.id,
+        created_at=utcnow(),
+    )
+    repository.storage[(123, 1)] = match
+
+    first_vote = await service.record_captain_winner_vote(guild, 1, creator, winner_team=1)
+    second_vote = await service.record_captain_winner_vote(guild, 1, team2_captain, winner_team=1)
+
+    assert "Waiting for the other captain" in first_vote.message
+    assert second_vote.match.metadata["captain_result_flow"]["winner_team"] == 1
+    assert second_vote.match.metadata["captain_result_flow"]["loser_team"] == 2
+    titles = [payload["embed"].title for payload in result_channel.sent_payloads]
+    assert "Choose Winner Team - Match #001" in titles
+    assert "Choose Winner MVP - Match #001" in titles
+    assert "Choose Loser MVP - Match #001" in titles
+
+
+@pytest.mark.asyncio
+async def test_mvp_choices_auto_finalize_after_winner_is_locked() -> None:
+    config = GuildConfig(
+        guild_id=123,
+        apostado_play_channel_id=10,
+        highlight_play_channel_id=20,
+        waiting_voice_channel_id=30,
+        temp_voice_category_id=40,
+    )
+    service, guild, _, _, creator, repository, _ = build_service(config)
+    team2_captain = FakeMember(77, guild, voice_channel_id=31)
+    guild.add_member(team2_captain)
+    guild.add_member(FakeMember(11, guild, voice_channel_id=31))
+    guild.add_member(FakeMember(88, guild, voice_channel_id=31))
+    result_channel = FakeTextChannel(55, guild, "#apostado-001-result")
+    guild.add_channel(result_channel)
+
+    match = MatchRecord(
+        guild_id=123,
+        match_number=1,
+        creator_id=creator.id,
+        mode=MatchMode.TWO_V_TWO,
+        match_type=MatchType.APOSTADO,
+        status=MatchStatus.VOTING,
+        team1_player_ids=[creator.id, 11],
+        team2_player_ids=[77, 88],
+        result_channel_id=result_channel.id,
+        created_at=utcnow(),
+    )
+    match.metadata["captain_result_flow"] = {
+        "team2_captain_id": 77,
+        "winner_votes": {"5": 1, "77": 1},
+        "winner_team": 1,
+        "loser_team": 2,
+        "winner_mvp_id": None,
+        "loser_mvp_id": None,
+        "winner_prompt_message_id": None,
+        "winner_mvp_prompt_message_id": None,
+        "loser_mvp_prompt_message_id": None,
+    }
+    repository.storage[(123, 1)] = match
+
+    finalized_calls: list[dict] = []
+
+    async def fake_finalize_match(*args, **kwargs):
+        finalized_calls.append(kwargs)
+        finalized_match = repository.storage[(123, 1)]
+        finalized_match.status = MatchStatus.FINALIZED
+        return finalized_match
+
+    service.finalize_match = fake_finalize_match  # type: ignore[method-assign]
+
+    first_pick = await service.record_captain_mvp_choice(guild, 1, creator, selection_kind="winner", player_id=11)
+    second_pick = await service.record_captain_mvp_choice(guild, 1, team2_captain, selection_kind="loser", player_id=88)
+
+    assert "Waiting for loser MVP selection." in first_pick.message
+    assert "finalized automatically" in second_pick.message
+    assert finalized_calls
+    assert finalized_calls[0]["winner_team"] == 1
+    assert finalized_calls[0]["winner_mvp_id"] == 11
+    assert finalized_calls[0]["loser_mvp_id"] == 88
