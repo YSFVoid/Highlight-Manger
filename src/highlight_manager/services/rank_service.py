@@ -21,7 +21,7 @@ class RankSyncResult:
 
 
 class RankService:
-    PREFIX_PATTERN = re.compile(r"^Rank\s+\d+\s+", flags=re.IGNORECASE)
+    PREFIX_PATTERN = re.compile(r"^Rank\s+\d+\s*(?:\|\s*)?", flags=re.IGNORECASE)
 
     def __init__(self) -> None:
         self.logger = get_logger(__name__)
@@ -129,7 +129,7 @@ class RankService:
         return cleaned or "Player"
 
     def build_rank_nickname(self, rank: int, base_name: str) -> str:
-        prefix = f"Rank {rank} "
+        prefix = f"RANK {rank} | "
         remaining = 32 - len(prefix)
         truncated_base = base_name[:remaining].strip() or "Player"
         return f"{prefix}{truncated_base}"

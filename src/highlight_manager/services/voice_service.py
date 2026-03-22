@@ -18,14 +18,15 @@ class VoiceService:
         self.logger = get_logger(__name__)
 
     def ensure_member_in_waiting_voice(self, member: discord.Member, config: GuildConfig) -> None:
-        if not config.waiting_voice_channel_id:
+        allowed_waiting_voice_ids = set(config.all_waiting_voice_channel_ids)
+        if not allowed_waiting_voice_ids:
             raise ConfigurationError("Waiting Voice channel is not configured.")
         if member.voice is None or member.voice.channel is None:
             raise UserFacingError("You must be in the configured Waiting Voice channel to do that.")
-        if member.voice.channel.id != config.waiting_voice_channel_id:
+        if member.voice.channel.id not in allowed_waiting_voice_ids:
             raise UserFacingError("You must be in the configured Waiting Voice channel to do that.")
 
-    async def _resolve_voice_channel(
+    async def resolve_voice_channel(
         self,
         guild: discord.Guild,
         channel_id: int | None,
@@ -152,7 +153,7 @@ class VoiceService:
         config: GuildConfig,
     ) -> list[str]:
         warnings: list[str] = []
-        waiting_channel = await self._resolve_voice_channel(
+        waiting_channel = await self.resolve_voice_channel(
             guild,
             config.waiting_voice_channel_id,
             match_number=match.match_number,
@@ -189,11 +190,18 @@ class VoiceService:
             )
         return warnings
 
-    async def cleanup_match_voices(self, guild: discord.Guild, match: MatchRecord) -> None:
+    async def cleanup_match_voices(
+        self,
+        guild: discord.Guild,
+        match: MatchRecord,
+        *,
+        config: GuildConfig | None = None,
+    ) -> None:
+        deleted_channel_ids: set[int] = set()
         for channel_id in [match.team1_voice_channel_id, match.team2_voice_channel_id]:
-            if not channel_id:
+            if not channel_id or channel_id in deleted_channel_ids:
                 continue
-            channel = await self._resolve_voice_channel(
+            channel = await self.resolve_voice_channel(
                 guild,
                 channel_id,
                 match_number=match.match_number,
@@ -202,6 +210,7 @@ class VoiceService:
             if isinstance(channel, discord.VoiceChannel):
                 try:
                     await channel.delete(reason=f"Cleaning up Match #{match.display_id}")
+                    deleted_channel_ids.add(channel.id)
                     self.logger.info(
                         "match_voice_channel_deleted",
                         guild_id=guild.id,
@@ -223,6 +232,48 @@ class VoiceService:
                         channel_id=channel_id,
                         error=str(exc),
                     )
+        if config is not None:
+            await self.delete_duplicate_match_voice_channels(
+                guild,
+                match,
+                config,
+                keep_channel_ids=set(),
+            )
+
+    async def delete_duplicate_match_voice_channels(
+        self,
+        guild: discord.Guild,
+        match: MatchRecord,
+        config: GuildConfig,
+        *,
+        keep_channel_ids: set[int],
+    ) -> None:
+        duplicate_channels = self._find_duplicate_match_voice_channels(guild, match, config, keep_channel_ids=keep_channel_ids)
+        for channel in duplicate_channels:
+            try:
+                await channel.delete(reason=f"Removing duplicate Match #{match.display_id} voice channel")
+                self.logger.info(
+                    "duplicate_match_voice_channel_deleted",
+                    guild_id=guild.id,
+                    match_number=match.match_number,
+                    channel_id=channel.id,
+                    channel_name=channel.name,
+                )
+            except discord.Forbidden:
+                self.logger.warning(
+                    "duplicate_match_voice_channel_delete_forbidden",
+                    guild_id=guild.id,
+                    match_number=match.match_number,
+                    channel_id=channel.id,
+                )
+            except discord.HTTPException as exc:
+                self.logger.warning(
+                    "duplicate_match_voice_channel_delete_failed",
+                    guild_id=guild.id,
+                    match_number=match.match_number,
+                    channel_id=channel.id,
+                    error=str(exc),
+                )
 
     async def _create_voice_channel_with_fallback(
         self,
@@ -257,3 +308,41 @@ class VoiceService:
                 user_limit=user_limit,
                 reason=reason,
             )
+
+    def _find_duplicate_match_voice_channels(
+        self,
+        guild: discord.Guild,
+        match: MatchRecord,
+        config: GuildConfig,
+        *,
+        keep_channel_ids: set[int],
+    ) -> list[discord.VoiceChannel]:
+        candidate_names = {
+            format_match_channel_name(config.team1_voice_name_template, match),
+            format_match_channel_name(config.team2_voice_name_template, match),
+            self.FALLBACK_TEAM1_TEMPLATE.format(match_id=match.display_id),
+            self.FALLBACK_TEAM2_TEMPLATE.format(match_id=match.display_id),
+        }
+        category = guild.get_channel(config.temp_voice_category_id) if config.temp_voice_category_id else None
+        if isinstance(category, discord.CategoryChannel):
+            channels = [channel for channel in category.channels if isinstance(channel, discord.VoiceChannel)]
+        else:
+            channels = [
+                channel
+                for channel in self._iter_guild_channels(guild)
+                if isinstance(channel, discord.VoiceChannel)
+            ]
+        return [
+            channel
+            for channel in channels
+            if channel.id not in keep_channel_ids and channel.name in candidate_names
+        ]
+
+    def _iter_guild_channels(self, guild: discord.Guild) -> list[discord.abc.GuildChannel]:
+        channels = getattr(guild, "channels", None)
+        if channels is not None:
+            return list(channels)
+        fake_channels = getattr(guild, "_channels", None)
+        if isinstance(fake_channels, dict):
+            return list(fake_channels.values())
+        return []

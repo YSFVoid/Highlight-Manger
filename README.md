@@ -1,8 +1,8 @@
 # Highlight Manager
 
-Highlight Manager is a Python Discord bot for one competitive Free Fire server. It manages Apostado and Highlight matches, waiting voice validation, private match result rooms, temporary team voice channels, private room-info sharing, player voting, seasonal points, live placement ranks, blacklist checks, and reward roles.
+Highlight Manager is a Python Discord bot for one competitive Free Fire server. It manages Apostado and Highlight matches, waiting voice validation, private match result rooms, temporary team voice channels, private room-info sharing, player voting, seasonal points, live placement ranks, blacklist checks, reward roles, and polished update announcements.
 
-Ranks are stored internally and synced to nicknames as `Rank X UserName`. Rank is live leaderboard placement, not a fixed tier and not a Discord role. A manual `Rank 0` override is also supported for staff use.
+Ranks are stored internally and synced to nicknames as `RANK X | UserName`. Rank is live leaderboard placement, not a fixed tier and not a Discord role. A manual `Rank 0` override is also supported for staff use.
 
 ## Stack
 
@@ -46,6 +46,10 @@ Supported type aliases:
 - `/bootstrap preview`
 - `/bootstrap rerun`
 - `/config`
+- `/waitingvoice add`
+- `/waitingvoice remove`
+- `/nickname sync-rank`
+- `/announce latest-update`
 - `/season start`
 - `/season end`
 - `/rank0 grant`
@@ -70,7 +74,7 @@ Supported type aliases:
   - higher seasonal winner-MVP count
   - older server join date
   - lower user ID as a stable fallback
-- Nicknames are always synced as `Rank X UserName`.
+- Nicknames are always synced as `RANK X | UserName`.
 
 ## Reward Roles
 
@@ -144,6 +148,7 @@ The bot auto-creates or reuses these resources during `/setup`:
 - Apostado play room
 - Highlight play room
 - Waiting Voice
+- Additional waiting voices when needed
 - Temporary match voice category
 - Match results category
 - Logs channel
@@ -168,7 +173,7 @@ On the first successful `/setup` only:
 1. All non-bot members are sorted by server join date, oldest first.
 2. Oldest member gets Rank 1, next gets Rank 2, and so on with no limit.
 3. Everyone starts with `0` season points.
-4. Everyone is renamed to `Rank X UserName` when permissions allow.
+4. Everyone is renamed to `RANK X | UserName` when permissions allow.
 5. Rename results are reported separately for:
    - renamed members
    - already-correct nicknames
@@ -227,7 +232,7 @@ On startup the bot:
 - If `@here` is too noisy or missing, review `ping_here_on_match_create` and `ping_here_on_match_ready` through `/config`.
 - If nickname sync fails, check `Manage Nicknames` and role hierarchy.
 - If Rank 0 was granted accidentally, use `/rank0 revoke`.
-- If waiting-voice enforcement fails, confirm the configured Waiting Voice still exists.
+- If waiting-voice enforcement fails, confirm the configured waiting-voice pool still exists and that the correct voice IDs are saved in config.
 - If the `Mvp` role is not being granted, check `Manage Roles`, bot hierarchy, and the configured MVP thresholds.
 - If the season reward role is not updating, check `Manage Roles` and that the bot role is above `Professional Highlight Player`.
 - If MongoDB Atlas rejects the connection, allow the VPS or panel node IP in the Atlas allowlist.

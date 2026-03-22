@@ -148,11 +148,12 @@ class HighlightBot(commands.Bot):
         if member.bot or self.config_service is None or self.match_service is None:
             return
         config = await self.config_service.get(member.guild.id)
-        if not config or not config.waiting_voice_channel_id:
+        if not config or not config.all_waiting_voice_channel_ids:
             return
         before_id = before.channel.id if before.channel else None
         after_id = after.channel.id if after.channel else None
-        if before_id == config.waiting_voice_channel_id and after_id != config.waiting_voice_channel_id:
+        waiting_voice_ids = set(config.all_waiting_voice_channel_ids)
+        if before_id in waiting_voice_ids and after_id not in waiting_voice_ids:
             await self.match_service.handle_waiting_voice_departure(member)
 
     async def on_command_error(self, context: commands.Context, exception: commands.CommandError) -> None:

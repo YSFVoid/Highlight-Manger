@@ -111,6 +111,19 @@ async def test_move_players_to_waiting_voice_fetches_uncached_waiting_channel() 
     assert waiting_channel.move_log == [5, 77]
 
 
+def test_ensure_member_in_waiting_voice_accepts_additional_waiting_voice_channels() -> None:
+    service = VoiceService()
+    guild = FakeGuild(123)
+    member = FakeMember(5, guild, voice_channel_id=31)
+    config = GuildConfig(
+        guild_id=123,
+        waiting_voice_channel_id=30,
+        additional_waiting_voice_channel_ids=[31, 32],
+    )
+
+    service.ensure_member_in_waiting_voice(member, config)
+
+
 @pytest.mark.asyncio
 async def test_cleanup_match_voices_fetches_uncached_temp_channels() -> None:
     service = VoiceService()

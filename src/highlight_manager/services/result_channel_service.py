@@ -54,7 +54,7 @@ class ResultChannelService:
                 )
         return overwrites
 
-    async def _resolve_text_channel(
+    async def resolve_text_channel(
         self,
         guild: discord.Guild,
         channel_id: int | None,
@@ -150,7 +150,7 @@ class ResultChannelService:
         match: MatchRecord,
         config: GuildConfig,
     ) -> None:
-        channel = await self._resolve_text_channel(
+        channel = await self.resolve_text_channel(
             guild,
             channel_id,
             match_number=match.match_number,
@@ -210,7 +210,7 @@ class ResultChannelService:
         config: GuildConfig,
         match: MatchRecord,
     ) -> None:
-        channel = await self._resolve_text_channel(
+        channel = await self.resolve_text_channel(
             guild,
             channel_id,
             match_number=match.match_number,
@@ -240,7 +240,7 @@ class ResultChannelService:
             )
 
     async def delete_channel(self, guild: discord.Guild, channel_id: int, match_number: int) -> None:
-        channel = await self._resolve_text_channel(
+        channel = await self.resolve_text_channel(
             guild,
             channel_id,
             match_number=match_number,
@@ -272,6 +272,46 @@ class ResultChannelService:
                 error=str(exc),
             )
 
+    async def delete_match_channels(
+        self,
+        guild: discord.Guild,
+        match: MatchRecord,
+        config: GuildConfig,
+        *,
+        keep_channel_ids: set[int],
+    ) -> None:
+        duplicate_channels = self._find_duplicate_match_channels(
+            guild,
+            match,
+            config,
+            keep_channel_ids=keep_channel_ids,
+        )
+        for channel in duplicate_channels:
+            try:
+                await channel.delete(reason=f"Removing duplicate Match #{match.display_id} result channel")
+                self.logger.info(
+                    "duplicate_result_channel_deleted",
+                    guild_id=guild.id,
+                    match_number=match.match_number,
+                    channel_id=channel.id,
+                    channel_name=channel.name,
+                )
+            except discord.Forbidden:
+                self.logger.warning(
+                    "duplicate_result_channel_delete_forbidden",
+                    guild_id=guild.id,
+                    match_number=match.match_number,
+                    channel_id=channel.id,
+                )
+            except discord.HTTPException as exc:
+                self.logger.warning(
+                    "duplicate_result_channel_delete_failed",
+                    guild_id=guild.id,
+                    match_number=match.match_number,
+                    channel_id=channel.id,
+                    error=str(exc),
+                )
+
     async def finalize_channel_behavior(
         self,
         guild: discord.Guild,
@@ -282,3 +322,39 @@ class ResultChannelService:
             return
         if config.result_channel_behavior == ResultChannelBehavior.ARCHIVE_LOCK:
             await self.archive_channel(guild, match.result_channel_id, config, match)
+
+    def _find_duplicate_match_channels(
+        self,
+        guild: discord.Guild,
+        match: MatchRecord,
+        config: GuildConfig,
+        *,
+        keep_channel_ids: set[int],
+    ) -> list[discord.TextChannel]:
+        candidate_names = {
+            format_match_channel_name(config.result_channel_name_template, match),
+            self.FALLBACK_RESULT_TEMPLATE.format(match_id=match.display_id),
+        }
+        category = guild.get_channel(config.result_category_id) if config.result_category_id else None
+        if isinstance(category, discord.CategoryChannel):
+            channels = [channel for channel in category.channels if isinstance(channel, discord.TextChannel)]
+        else:
+            channels = [
+                channel
+                for channel in self._iter_guild_channels(guild)
+                if isinstance(channel, discord.TextChannel)
+            ]
+        return [
+            channel
+            for channel in channels
+            if channel.id not in keep_channel_ids and channel.name in candidate_names
+        ]
+
+    def _iter_guild_channels(self, guild: discord.Guild) -> list[discord.abc.GuildChannel]:
+        channels = getattr(guild, "channels", None)
+        if channels is not None:
+            return list(channels)
+        fake_channels = getattr(guild, "_channels", None)
+        if isinstance(fake_channels, dict):
+            return list(fake_channels.values())
+        return []

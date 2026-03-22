@@ -41,8 +41,8 @@ def _format_team(guild: discord.Guild | None, user_ids: Sequence[int], team_size
 
 def _rank_label(profile: PlayerProfile) -> str:
     if profile.manual_rank_override is not None:
-        return f"Rank {profile.manual_rank_override} (manual)"
-    return f"Rank {profile.current_rank}"
+        return f"RANK {profile.manual_rank_override} (manual)"
+    return f"RANK {profile.current_rank}"
 
 
 def _match_colour(match: MatchRecord) -> discord.Colour:
@@ -152,6 +152,12 @@ def _channel_label(guild: discord.Guild | None, channel_id: int | None) -> str:
     return f"{channel.mention} (`{channel_id}`)" if isinstance(channel, discord.abc.GuildChannel) else f"`{channel_id}`"
 
 
+def _channel_labels(guild: discord.Guild | None, channel_ids: Sequence[int]) -> str:
+    if not channel_ids:
+        return "None"
+    return "\n".join(_channel_label(guild, channel_id) for channel_id in channel_ids)
+
+
 def _roles_label(guild: discord.Guild | None, role_ids: Sequence[int]) -> str:
     if not role_ids:
         return "Not configured"
@@ -225,6 +231,48 @@ def build_help_embed(prefix: str) -> discord.Embed:
         inline=False,
     )
     embed.set_footer(text="Type the command exactly as shown with your server prefix.")
+    return embed
+
+
+def build_latest_update_announcement_embed(*, version_label: str = "Latest Update") -> discord.Embed:
+    embed = discord.Embed(
+        title=f"{version_label} - Highlight Manager",
+        description=(
+            "A polished match-management update is live with stronger cleanup, faster flow, "
+            "better nickname sync, and more flexible waiting voice support."
+        ),
+        colour=discord.Colour.blurple(),
+    )
+    embed.add_field(
+        name="Fixes",
+        value=(
+            "• Duplicate temporary match voices are cleaned up more aggressively.\n"
+            "• Duplicate match result rooms are cleaned up more aggressively.\n"
+            "• Match close flow now protects admin-canceled matches from profile or point updates.\n"
+            "• Join and match-close paths were trimmed to reduce live delay."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="New Controls",
+        value=(
+            "• Extra Waiting Voice channels can be added without replacing the main one.\n"
+            "• Nicknames now sync in the format `RANK X | Name`.\n"
+            "• Staff can force a nickname resync without changing the player rank.\n"
+            "• Update announcements can be posted into a selected channel with a polished embed."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Match Flow",
+        value=(
+            "• Match room access stays private in result rooms.\n"
+            "• Captain winner and MVP flow stays in the result room.\n"
+            "• Finalized and canceled matches clean their managed rooms more reliably."
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="Highlight Manager release notes")
     return embed
 
 
@@ -644,7 +692,14 @@ def build_config_embed(config: GuildConfig, guild: discord.Guild | None) -> disc
             f"Prefix: **{config.prefix}**\n"
             f"Apostado Play: {_channel_label(guild, config.apostado_play_channel_id)}\n"
             f"Highlight Play: {_channel_label(guild, config.highlight_play_channel_id)}\n"
-            f"Waiting Voice: {_channel_label(guild, config.waiting_voice_channel_id)}"
+            f"Primary Waiting Voice: {_channel_label(guild, config.waiting_voice_channel_id)}"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Waiting Voice Pool",
+        value=(
+            f"All Waiting Voices:\n{_channel_labels(guild, config.all_waiting_voice_channel_ids)}"
         ),
         inline=False,
     )

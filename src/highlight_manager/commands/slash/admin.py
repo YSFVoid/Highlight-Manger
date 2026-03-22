@@ -8,7 +8,7 @@ from discord import app_commands
 
 from highlight_manager.config.logging import get_logger
 from highlight_manager.models.enums import AuditAction, ResultSource
-from highlight_manager.utils.embeds import build_config_embed
+from highlight_manager.utils.embeds import build_config_embed, build_latest_update_announcement_embed
 from highlight_manager.utils.exceptions import HighlightError
 if TYPE_CHECKING:
     from highlight_manager.bot import HighlightBot
@@ -391,6 +391,9 @@ def register_admin_commands(bot: "HighlightBot") -> None:
     bootstrap = app_commands.Group(name="bootstrap", description="Bootstrap preview and rerun")
     points = app_commands.Group(name="points", description="Point adjustments")
     rank0 = app_commands.Group(name="rank0", description="Manual Rank 0 override")
+    waitingvoice = app_commands.Group(name="waitingvoice", description="Manage additional waiting voices")
+    nickname = app_commands.Group(name="nickname", description="Nickname sync tools")
+    announce = app_commands.Group(name="announce", description="Post bot update announcements")
     match = app_commands.Group(name="match", description="Match moderation")
     blacklist = app_commands.Group(name="blacklist", description="Blacklist management")
 
@@ -818,6 +821,159 @@ def register_admin_commands(bot: "HighlightBot") -> None:
             operation=rank0_revoke_operation,
         )
 
+    @waitingvoice.command(name="add", description="Add another allowed waiting voice channel")
+    async def waitingvoice_add(interaction: discord.Interaction, channel: discord.VoiceChannel) -> None:
+        async def waitingvoice_add_operation() -> InteractionResponsePayload:
+            config = await bot.config_service.get_or_create(interaction.guild.id)
+            if channel.id == config.waiting_voice_channel_id or channel.id in config.additional_waiting_voice_channel_ids:
+                return InteractionResponsePayload(content=f"{channel.mention} is already in the Waiting Voice pool.")
+            updated_ids = [*config.additional_waiting_voice_channel_ids, channel.id]
+            updated_config = await bot.config_service.update(
+                interaction.guild.id,
+                {"additional_waiting_voice_channel_ids": updated_ids},
+            )
+            await bot.audit_service.log(
+                interaction.guild,
+                AuditAction.CONFIG_UPDATED,
+                f"Added {channel.mention} to the Waiting Voice pool.",
+                actor_id=interaction.user.id,
+                metadata={"additional_waiting_voice_channel_ids": updated_config.additional_waiting_voice_channel_ids},
+            )
+            embed = discord.Embed(
+                title="Waiting Voice Added",
+                description=f"{channel.mention} can now be used as an additional Waiting Voice.",
+                colour=discord.Colour.green(),
+            )
+            embed.add_field(
+                name="All Waiting Voices",
+                value="\n".join(
+                    [
+                        f"<#{voice_id}>"
+                        for voice_id in updated_config.all_waiting_voice_channel_ids
+                    ]
+                )[:1024],
+                inline=False,
+            )
+            return InteractionResponsePayload(embed=embed)
+
+        await _run_deferred_admin_command(
+            bot,
+            interaction,
+            command_name="/waitingvoice add",
+            permission_check=lambda current: _ensure_setup_admin(bot, current),
+            operation=waitingvoice_add_operation,
+        )
+
+    @waitingvoice.command(name="remove", description="Remove an additional waiting voice channel")
+    async def waitingvoice_remove(interaction: discord.Interaction, channel: discord.VoiceChannel) -> None:
+        async def waitingvoice_remove_operation() -> InteractionResponsePayload:
+            config = await bot.config_service.get_or_create(interaction.guild.id)
+            if channel.id == config.waiting_voice_channel_id:
+                raise HighlightError("Use /config if you want to replace the primary Waiting Voice channel.")
+            if channel.id not in config.additional_waiting_voice_channel_ids:
+                return InteractionResponsePayload(content=f"{channel.mention} is not in the additional Waiting Voice pool.")
+            updated_ids = [voice_id for voice_id in config.additional_waiting_voice_channel_ids if voice_id != channel.id]
+            updated_config = await bot.config_service.update(
+                interaction.guild.id,
+                {"additional_waiting_voice_channel_ids": updated_ids},
+            )
+            await bot.audit_service.log(
+                interaction.guild,
+                AuditAction.CONFIG_UPDATED,
+                f"Removed {channel.mention} from the Waiting Voice pool.",
+                actor_id=interaction.user.id,
+                metadata={"additional_waiting_voice_channel_ids": updated_config.additional_waiting_voice_channel_ids},
+            )
+            embed = discord.Embed(
+                title="Waiting Voice Removed",
+                description=f"{channel.mention} was removed from the additional Waiting Voice pool.",
+                colour=discord.Colour.orange(),
+            )
+            embed.add_field(
+                name="Remaining Waiting Voices",
+                value="\n".join(
+                    [
+                        f"<#{voice_id}>"
+                        for voice_id in updated_config.all_waiting_voice_channel_ids
+                    ]
+                )[:1024] or "None",
+                inline=False,
+            )
+            return InteractionResponsePayload(embed=embed)
+
+        await _run_deferred_admin_command(
+            bot,
+            interaction,
+            command_name="/waitingvoice remove",
+            permission_check=lambda current: _ensure_setup_admin(bot, current),
+            operation=waitingvoice_remove_operation,
+        )
+
+    @nickname.command(name="sync-rank", description="Rename a member using their current saved rank")
+    async def nickname_sync_rank(interaction: discord.Interaction, member: discord.Member) -> None:
+        async def nickname_sync_operation() -> InteractionResponsePayload:
+            config = await bot.config_service.get_or_create(interaction.guild.id)
+            profile = await bot.profile_service.ensure_profile(interaction.guild, member.id, config, sync_identity=False)
+            target_rank = bot.rank_service.display_rank_for_profile(profile)
+            base_name = bot.rank_service.strip_rank_prefix(member.nick or member.global_name or member.name)
+            target_nickname = bot.rank_service.build_rank_nickname(target_rank, base_name)
+            sync_result = await bot.rank_service.sync_member_rank(member, profile, config)
+            await bot.audit_service.log(
+                interaction.guild,
+                AuditAction.RANK_UPDATED,
+                f"Nickname sync was requested for {member.mention}.",
+                actor_id=interaction.user.id,
+                target_id=member.id,
+                metadata={"target_nickname": target_nickname},
+            )
+            embed = discord.Embed(
+                title="Nickname Sync",
+                description=f"Processed nickname sync for {member.mention}.",
+                colour=discord.Colour.blurple(),
+            )
+            embed.add_field(name="Current Rank", value=f"Rank {target_rank}", inline=True)
+            embed.add_field(name="Target Nickname", value=target_nickname, inline=False)
+            if sync_result.nickname_updated:
+                status = "Nickname updated successfully."
+            elif sync_result.nickname_already_correct:
+                status = "Nickname was already correct."
+            elif sync_result.nickname_failed:
+                status = sync_result.skipped_reason or "Nickname sync failed."
+            else:
+                status = "No nickname change was needed."
+            embed.add_field(name="Result", value=status, inline=False)
+            return InteractionResponsePayload(embed=embed)
+
+        await _run_deferred_admin_command(
+            bot,
+            interaction,
+            command_name="/nickname sync-rank",
+            permission_check=lambda current: _ensure_staff(bot, current),
+            operation=nickname_sync_operation,
+        )
+
+    @announce.command(name="latest-update", description="Post the latest Highlight Manager update in a channel")
+    async def announce_latest_update(interaction: discord.Interaction, channel: discord.TextChannel) -> None:
+        async def announce_operation() -> InteractionResponsePayload:
+            embed = build_latest_update_announcement_embed()
+            await channel.send(embed=embed)
+            await bot.audit_service.log(
+                interaction.guild,
+                AuditAction.MATCH_NOTIFICATION,
+                f"Posted the latest update announcement in {channel.mention}.",
+                actor_id=interaction.user.id,
+                metadata={"channel_id": channel.id},
+            )
+            return InteractionResponsePayload(content=f"Posted the latest update announcement in {channel.mention}.")
+
+        await _run_deferred_admin_command(
+            bot,
+            interaction,
+            command_name="/announce latest-update",
+            permission_check=lambda current: _ensure_staff(bot, current),
+            operation=announce_operation,
+        )
+
     @match.command(name="cancel", description="Cancel a match")
     async def match_cancel(interaction: discord.Interaction, match_number: int, reason: str | None = None) -> None:
         async def cancel_operation() -> InteractionResponsePayload:
@@ -936,5 +1092,5 @@ def register_admin_commands(bot: "HighlightBot") -> None:
             operation=blacklist_remove_operation,
         )
 
-    for group in [season, bootstrap, points, rank0, match, blacklist]:
+    for group in [season, bootstrap, points, rank0, waitingvoice, nickname, announce, match, blacklist]:
         bot.tree.add_command(group)

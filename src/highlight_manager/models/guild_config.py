@@ -85,6 +85,7 @@ class GuildConfig(AppModel):
     apostado_play_channel_id: int | None = None
     highlight_play_channel_id: int | None = None
     waiting_voice_channel_id: int | None = None
+    additional_waiting_voice_channel_ids: list[int] = Field(default_factory=list)
     temp_voice_category_id: int | None = None
     result_category_id: int | None = None
     log_channel_id: int | None = None
@@ -114,3 +115,13 @@ class GuildConfig(AppModel):
     bootstrap_completed_at: datetime | None = None
     bootstrap_last_summary: BootstrapSummary | None = None
     next_match_number: int = 1
+
+    @property
+    def all_waiting_voice_channel_ids(self) -> list[int]:
+        ordered_ids: list[int] = []
+        if self.waiting_voice_channel_id:
+            ordered_ids.append(self.waiting_voice_channel_id)
+        for channel_id in self.additional_waiting_voice_channel_ids:
+            if channel_id and channel_id not in ordered_ids:
+                ordered_ids.append(channel_id)
+        return ordered_ids

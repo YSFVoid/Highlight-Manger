@@ -169,18 +169,44 @@ class FakeSeasonService:
 
 
 class FakeVoiceService:
+    def __init__(self) -> None:
+        self.created_channels: list[tuple[FakeVoiceChannel, FakeVoiceChannel]] = []
+
     def ensure_member_in_waiting_voice(self, member, config: GuildConfig) -> None:
-        if not config.waiting_voice_channel_id:
+        waiting_voice_ids = set(config.all_waiting_voice_channel_ids)
+        if not waiting_voice_ids:
             raise ConfigurationError("Waiting Voice channel is not configured.")
         if member.voice is None or member.voice.channel is None:
             raise UserFacingError("You must be in the configured Waiting Voice channel to do that.")
-        if member.voice.channel.id != config.waiting_voice_channel_id:
+        if member.voice.channel.id not in waiting_voice_ids:
             raise UserFacingError("You must be in the configured Waiting Voice channel to do that.")
 
     async def move_players_to_waiting_voice(self, guild, match, config):
         return []
 
-    async def cleanup_match_voices(self, guild, match):
+    async def cleanup_match_voices(self, guild, match, *, config=None):
+        return None
+
+    async def resolve_voice_channel(self, guild, channel_id, *, match_number: int, purpose: str):
+        if channel_id is None:
+            return None
+        channel = guild.get_channel(channel_id)
+        if isinstance(channel, FakeVoiceChannel):
+            return channel
+        fetched = await guild.fetch_channel(channel_id)
+        if isinstance(fetched, FakeVoiceChannel):
+            return fetched
+        return None
+
+    async def create_match_voice_channels(self, guild, match, config):
+        team1 = FakeVoiceChannel(700 + len(self.created_channels) * 2, guild, f"TEAM1-{match.display_id}")
+        team2 = FakeVoiceChannel(701 + len(self.created_channels) * 2, guild, f"TEAM2-{match.display_id}")
+        guild.add_channel(team1)
+        guild.add_channel(team2)
+        self.created_channels.append((team1, team2))
+        return team1, team2
+
+    async def delete_duplicate_match_voice_channels(self, guild, match, config, *, keep_channel_ids: set[int]):
         return None
 
 
@@ -207,6 +233,20 @@ class FakeResultChannelService:
     async def delete_channel(self, guild, channel_id: int, match_number: int) -> None:
         self.deleted.append(channel_id)
 
+    async def resolve_text_channel(self, guild, channel_id, *, match_number: int, purpose: str):
+        if channel_id is None:
+            return None
+        channel = guild.get_channel(channel_id)
+        if isinstance(channel, FakeTextChannel):
+            return channel
+        fetched = await guild.fetch_channel(channel_id)
+        if isinstance(fetched, FakeTextChannel):
+            return fetched
+        return None
+
+    async def delete_match_channels(self, guild, match, config, *, keep_channel_ids: set[int]):
+        return None
+
 
 class FakeAuditService:
     async def log(self, *args, **kwargs) -> None:
@@ -216,7 +256,7 @@ class FakeAuditService:
 class FakeGuild:
     def __init__(self, guild_id: int) -> None:
         self.id = guild_id
-        self._channels: dict[int, FakeTextChannel | SimpleNamespace] = {}
+        self._channels: dict[int, FakeTextChannel | FakeVoiceChannel | SimpleNamespace] = {}
         self._members: dict[int, object] = {}
 
     def add_channel(self, channel) -> None:
@@ -264,6 +304,20 @@ class FakeTextChannel(discord.TextChannel):
 
     async def set_permissions(self, target, overwrite=None):
         self.permission_updates.append((target, overwrite))
+
+
+class FakeVoiceChannel(discord.VoiceChannel):
+    __slots__ = ("id", "guild", "mention", "name", "deleted")
+
+    def __init__(self, channel_id: int, guild: FakeGuild, name: str) -> None:
+        self.id = channel_id
+        self.guild = guild
+        self.mention = f"<#{channel_id}>"
+        self.name = name
+        self.deleted = False
+
+    async def delete(self, *, reason=None):
+        self.deleted = True
 
 
 class FakeMessage:
@@ -880,6 +934,96 @@ async def test_captain_winner_vote_fetches_uncached_result_channel_before_openin
     titles = [payload["embed"].title for payload in result_channel.sent_payloads]
     assert "Choose Winner MVP - Match #012" in titles
     assert "Choose Loser MVP - Match #012" in titles
+
+
+@pytest.mark.asyncio
+async def test_ensure_result_channel_fetches_uncached_existing_channel_without_creating_duplicate() -> None:
+    config = GuildConfig(
+        guild_id=123,
+        apostado_play_channel_id=10,
+        highlight_play_channel_id=20,
+        waiting_voice_channel_id=30,
+        temp_voice_category_id=40,
+        result_category_id=50,
+    )
+    service, guild, _, _, creator, repository, _ = build_service(config)
+    existing_result = FakeTextChannel(75, guild, "#apostado-015-result")
+    guild.add_channel(existing_result)
+
+    original_get_channel = guild.get_channel
+
+    def cache_miss(channel_id: int):
+        if channel_id == existing_result.id:
+            return None
+        return original_get_channel(channel_id)
+
+    guild.get_channel = cache_miss  # type: ignore[assignment]
+
+    match = MatchRecord(
+        guild_id=123,
+        match_number=15,
+        creator_id=creator.id,
+        mode=MatchMode.ONE_V_ONE,
+        match_type=MatchType.APOSTADO,
+        status=MatchStatus.IN_PROGRESS,
+        team1_player_ids=[creator.id],
+        team2_player_ids=[77],
+        result_channel_id=existing_result.id,
+        created_at=utcnow(),
+    )
+    repository.storage[(123, 15)] = match
+
+    channel, created = await service._ensure_result_channel(guild, match, config)
+
+    assert created is False
+    assert channel.id == existing_result.id
+    assert service.result_channel_service.created_channels == []
+
+
+@pytest.mark.asyncio
+async def test_ensure_match_voice_channels_fetches_uncached_existing_channels_without_creating_duplicate() -> None:
+    config = GuildConfig(
+        guild_id=123,
+        apostado_play_channel_id=10,
+        highlight_play_channel_id=20,
+        waiting_voice_channel_id=30,
+        temp_voice_category_id=40,
+    )
+    service, guild, _, _, creator, repository, _ = build_service(config)
+    existing_team1 = FakeVoiceChannel(81, guild, "TEAM1-016")
+    existing_team2 = FakeVoiceChannel(82, guild, "TEAM2-016")
+    guild.add_channel(existing_team1)
+    guild.add_channel(existing_team2)
+
+    original_get_channel = guild.get_channel
+
+    def cache_miss(channel_id: int):
+        if channel_id in {existing_team1.id, existing_team2.id}:
+            return None
+        return original_get_channel(channel_id)
+
+    guild.get_channel = cache_miss  # type: ignore[assignment]
+
+    match = MatchRecord(
+        guild_id=123,
+        match_number=16,
+        creator_id=creator.id,
+        mode=MatchMode.ONE_V_ONE,
+        match_type=MatchType.APOSTADO,
+        status=MatchStatus.FULL,
+        team1_player_ids=[creator.id],
+        team2_player_ids=[77],
+        team1_voice_channel_id=existing_team1.id,
+        team2_voice_channel_id=existing_team2.id,
+        created_at=utcnow(),
+    )
+    repository.storage[(123, 16)] = match
+
+    team1_channel, team2_channel = await service._ensure_match_voice_channels(guild, match, config)
+
+    assert team1_channel.id == existing_team1.id
+    assert team2_channel.id == existing_team2.id
+    assert service.voice_service.created_channels == []
 
 
 @pytest.mark.asyncio

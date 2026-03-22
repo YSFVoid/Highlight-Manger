@@ -26,4 +26,5 @@ def test_sort_profiles_for_ranking_uses_points_wins_mvp_joined_at_and_user_id() 
 def test_rank_prefix_is_replaced_cleanly() -> None:
     service = RankService()
     assert service.strip_rank_prefix("Rank 3 Shadow") == "Shadow"
-    assert service.build_rank_nickname(120, service.strip_rank_prefix("Rank 3 Shadow")) == "Rank 120 Shadow"
+    assert service.strip_rank_prefix("RANK 44 | Shadow") == "Shadow"
+    assert service.build_rank_nickname(120, service.strip_rank_prefix("Rank 3 Shadow")) == "RANK 120 | Shadow"

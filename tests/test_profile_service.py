@@ -411,7 +411,7 @@ async def test_recalculate_rank_positions_only_syncs_nicknames_for_members_whose
         member.guild = guild
         member.name = f"User{member.id}"
         member.global_name = None
-        member.nick = f"Rank {member.id // 10} User{member.id}"
+        member.nick = f"RANK {member.id // 10} | User{member.id}"
     await repository.upsert(PlayerProfile(guild_id=1, user_id=10, current_points=300, current_rank=1, joined_at=guild.get_member(10).joined_at))
     await repository.upsert(PlayerProfile(guild_id=1, user_id=20, current_points=200, current_rank=2, joined_at=guild.get_member(20).joined_at))
     await repository.upsert(PlayerProfile(guild_id=1, user_id=30, current_points=100, current_rank=3, joined_at=guild.get_member(30).joined_at))
