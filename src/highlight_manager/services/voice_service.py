@@ -25,6 +25,51 @@ class VoiceService:
         if member.voice.channel.id != config.waiting_voice_channel_id:
             raise UserFacingError("You must be in the configured Waiting Voice channel to do that.")
 
+    async def _resolve_voice_channel(
+        self,
+        guild: discord.Guild,
+        channel_id: int | None,
+        *,
+        match_number: int,
+        purpose: str,
+    ) -> discord.VoiceChannel | None:
+        if not channel_id:
+            return None
+        channel = guild.get_channel(channel_id)
+        if isinstance(channel, discord.VoiceChannel):
+            return channel
+        fetch_channel = getattr(guild, "fetch_channel", None)
+        if callable(fetch_channel):
+            try:
+                fetched = await fetch_channel(channel_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException, KeyError) as exc:
+                self.logger.warning(
+                    "voice_channel_fetch_failed",
+                    guild_id=guild.id,
+                    match_number=match_number,
+                    channel_id=channel_id,
+                    purpose=purpose,
+                    error=str(exc),
+                )
+                return None
+            if isinstance(fetched, discord.VoiceChannel):
+                self.logger.info(
+                    "voice_channel_fetched_from_api",
+                    guild_id=guild.id,
+                    match_number=match_number,
+                    channel_id=channel_id,
+                    purpose=purpose,
+                )
+                return fetched
+        self.logger.warning(
+            "voice_channel_unavailable",
+            guild_id=guild.id,
+            match_number=match_number,
+            channel_id=channel_id,
+            purpose=purpose,
+        )
+        return None
+
     async def create_match_voice_channels(
         self,
         guild: discord.Guild,
@@ -107,7 +152,12 @@ class VoiceService:
         config: GuildConfig,
     ) -> list[str]:
         warnings: list[str] = []
-        waiting_channel = guild.get_channel(config.waiting_voice_channel_id) if config.waiting_voice_channel_id else None
+        waiting_channel = await self._resolve_voice_channel(
+            guild,
+            config.waiting_voice_channel_id,
+            match_number=match.match_number,
+            purpose="move_players_to_waiting_voice",
+        )
         if not isinstance(waiting_channel, discord.VoiceChannel):
             self.logger.warning(
                 "waiting_voice_return_missing",
@@ -143,7 +193,12 @@ class VoiceService:
         for channel_id in [match.team1_voice_channel_id, match.team2_voice_channel_id]:
             if not channel_id:
                 continue
-            channel = guild.get_channel(channel_id)
+            channel = await self._resolve_voice_channel(
+                guild,
+                channel_id,
+                match_number=match.match_number,
+                purpose="cleanup_match_voices",
+            )
             if isinstance(channel, discord.VoiceChannel):
                 try:
                     await channel.delete(reason=f"Cleaning up Match #{match.display_id}")

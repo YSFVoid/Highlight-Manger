@@ -3,11 +3,12 @@ from types import SimpleNamespace
 import discord
 import pytest
 
-from highlight_manager.models.enums import MatchMode, MatchStatus, MatchType
+from highlight_manager.models.enums import MatchMode, MatchStatus, MatchType, ResultSource
 from highlight_manager.commands.prefix.gameplay import GameplayCog
 from highlight_manager.models.guild_config import GuildConfig
 from highlight_manager.models.match import MatchRecord, MatchRoomInfo
 from highlight_manager.services.match_service import MatchService
+from highlight_manager.models.common import MatchResultSummary
 from highlight_manager.utils.dates import minutes_from_now, utcnow
 from highlight_manager.utils.exceptions import ConfigurationError, UserFacingError
 
@@ -42,6 +43,7 @@ class FakeMatchRepository:
     def __init__(self) -> None:
         self.created: list = []
         self.replaced: list = []
+        self.set_fields_calls: list[tuple[int, int, dict]] = []
         self.deleted: list[tuple[int, int]] = []
         self.storage: dict[tuple[int, int], object] = {}
 
@@ -62,6 +64,21 @@ class FakeMatchRepository:
 
     async def get(self, guild_id: int, match_number: int):
         return self.storage.get((guild_id, match_number))
+
+    async def set_fields(self, guild_id: int, match_number: int, updates: dict):
+        self.set_fields_calls.append((guild_id, match_number, updates))
+        match = self.storage.get((guild_id, match_number))
+        if match is None:
+            return None
+        for key, value in updates.items():
+            if key == "status":
+                match.status = MatchStatus(value)
+            elif key == "metadata.captain_result_flow":
+                match.metadata["captain_result_flow"] = value
+            else:
+                setattr(match, key, value)
+        self.storage[(guild_id, match_number)] = match
+        return match
 
 
 class FakeConfigService:
@@ -105,11 +122,45 @@ class FakeConfigService:
 class FakeProfileService:
     def __init__(self, *, blacklisted: bool = False) -> None:
         self.blacklisted = blacklisted
+        self.apply_match_outcome_calls = 0
+        self.apply_vote_timeout_penalty_calls = 0
+        self.sync_rank_identities_calls = 0
 
     async def require_not_blacklisted(self, guild, user_id: int, config: GuildConfig):
         if self.blacklisted:
             raise UserFacingError("You are blacklisted from match participation.")
         return SimpleNamespace()
+
+    async def apply_match_outcome(self, *args, **kwargs):
+        self.apply_match_outcome_calls += 1
+        return MatchResultSummary(
+            winner_team=kwargs.get("winner_team"),
+            winner_player_ids=[],
+            loser_player_ids=[],
+            winner_mvp_id=kwargs.get("winner_mvp_id"),
+            loser_mvp_id=kwargs.get("loser_mvp_id"),
+            source=str(kwargs.get("source")),
+            point_deltas=[],
+            notes=kwargs.get("notes"),
+            finalized_at=utcnow(),
+        )
+
+    async def apply_vote_timeout_penalty(self, *args, **kwargs):
+        self.apply_vote_timeout_penalty_calls += 1
+        return MatchResultSummary(
+            winner_team=None,
+            winner_player_ids=[],
+            loser_player_ids=[],
+            winner_mvp_id=None,
+            loser_mvp_id=None,
+            source="timeout",
+            point_deltas=[],
+            notes=kwargs.get("notes"),
+            finalized_at=utcnow(),
+        )
+
+    async def sync_rank_identities_for_guild(self, guild, config):
+        self.sync_rank_identities_calls += 1
 
 
 class FakeSeasonService:
@@ -128,6 +179,9 @@ class FakeVoiceService:
 
     async def move_players_to_waiting_voice(self, guild, match, config):
         return []
+
+    async def cleanup_match_voices(self, guild, match):
+        return None
 
 
 class FakeVoteService:
@@ -671,6 +725,7 @@ async def test_captain_winner_votes_must_match_before_winner_is_locked() -> None
     assert "Waiting for the other captain" in first_vote.message
     assert second_vote.match.metadata["captain_result_flow"]["winner_team"] == 1
     assert second_vote.match.metadata["captain_result_flow"]["loser_team"] == 2
+    assert repository.set_fields_calls
     titles = [payload["embed"].title for payload in result_channel.sent_payloads]
     assert "Choose Winner Team - Match #001" in titles
     assert "Choose Winner MVP - Match #001" in titles
@@ -858,3 +913,138 @@ async def test_close_result_channel_deletes_immediately_in_delete_mode() -> None
     assert service.result_channel_service.deleted == [result_channel.id]
     assert closed.result_channel_id is None
     assert closed.result_channel_cleanup_at is None
+
+
+@pytest.mark.asyncio
+async def test_admin_cancel_match_does_not_apply_points_or_match_stats() -> None:
+    config = GuildConfig(
+        guild_id=123,
+        apostado_play_channel_id=10,
+        highlight_play_channel_id=20,
+        waiting_voice_channel_id=30,
+        temp_voice_category_id=40,
+    )
+    service, guild, _, _, creator, repository, _ = build_service(config)
+    team2_captain = FakeMember(77, guild, voice_channel_id=41)
+    guild.add_member(team2_captain)
+    result_channel = FakeTextChannel(61, guild, "#apostado-016-result")
+    guild.add_channel(result_channel)
+    match = MatchRecord(
+        guild_id=123,
+        match_number=16,
+        creator_id=creator.id,
+        mode=MatchMode.ONE_V_ONE,
+        match_type=MatchType.APOSTADO,
+        status=MatchStatus.VOTING,
+        team1_player_ids=[creator.id],
+        team2_player_ids=[team2_captain.id],
+        result_channel_id=result_channel.id,
+        team1_voice_channel_id=40,
+        team2_voice_channel_id=41,
+        vote_expires_at=minutes_from_now(30),
+        created_at=utcnow(),
+    )
+    repository.storage[(123, 16)] = match
+
+    result = await service.cancel_match(
+        guild,
+        16,
+        actor_id=999,
+        force=True,
+        reason="Canceled by staff.",
+    )
+
+    assert result.match.status == MatchStatus.CANCELED
+    assert result.match.result_summary is None
+    assert result.match.penalties_applied is False
+    assert result.match.metadata["stats_skipped_due_to_cancel"] is True
+    assert result.match.vote_expires_at is None
+    assert service.profile_service.apply_match_outcome_calls == 0
+    assert service.profile_service.apply_vote_timeout_penalty_calls == 0
+    assert service.profile_service.sync_rank_identities_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_finalize_match_rejects_when_close_was_requested() -> None:
+    config = GuildConfig(
+        guild_id=123,
+        apostado_play_channel_id=10,
+        highlight_play_channel_id=20,
+        waiting_voice_channel_id=30,
+        temp_voice_category_id=40,
+    )
+    service, guild, _, _, creator, repository, _ = build_service(config)
+    match = MatchRecord(
+        guild_id=123,
+        match_number=4,
+        creator_id=creator.id,
+        mode=MatchMode.ONE_V_ONE,
+        match_type=MatchType.APOSTADO,
+        status=MatchStatus.VOTING,
+        team1_player_ids=[creator.id],
+        team2_player_ids=[77],
+        created_at=utcnow(),
+    )
+    match.metadata["close_requested"] = True
+    repository.storage[(123, 4)] = match
+
+    with pytest.raises(UserFacingError, match="already being closed"):
+        await service.finalize_match(
+            guild,
+            4,
+            winner_team=1,
+            winner_mvp_id=creator.id,
+            loser_mvp_id=77,
+            source=ResultSource.CONSENSUS,
+        )
+
+
+@pytest.mark.asyncio
+async def test_captain_mvp_finalize_stops_when_close_was_requested() -> None:
+    config = GuildConfig(
+        guild_id=123,
+        apostado_play_channel_id=10,
+        highlight_play_channel_id=20,
+        waiting_voice_channel_id=30,
+        temp_voice_category_id=40,
+    )
+    service, guild, _, _, creator, repository, _ = build_service(config)
+    team2_captain = FakeMember(77, guild, voice_channel_id=31)
+    guild.add_member(team2_captain)
+    result_channel = FakeTextChannel(60, guild, "#apostado-004-result")
+    guild.add_channel(result_channel)
+
+    match = MatchRecord(
+        guild_id=123,
+        match_number=4,
+        creator_id=creator.id,
+        mode=MatchMode.TWO_V_TWO,
+        match_type=MatchType.APOSTADO,
+        status=MatchStatus.VOTING,
+        team1_player_ids=[creator.id, 11],
+        team2_player_ids=[77, 88],
+        result_channel_id=result_channel.id,
+        created_at=utcnow(),
+    )
+    match.metadata["close_requested"] = True
+    match.metadata["captain_result_flow"] = {
+        "team2_captain_id": 77,
+        "winner_votes": {"5": 1, "77": 1},
+        "winner_team": 1,
+        "loser_team": 2,
+        "winner_mvp_id": 11,
+        "loser_mvp_id": None,
+        "winner_prompt_message_id": None,
+        "winner_mvp_prompt_message_id": None,
+        "loser_mvp_prompt_message_id": None,
+    }
+    repository.storage[(123, 4)] = match
+
+    with pytest.raises(UserFacingError, match="already being closed"):
+        await service.record_captain_mvp_choice(
+            guild,
+            4,
+            team2_captain,
+            selection_kind="loser",
+            player_id=88,
+        )

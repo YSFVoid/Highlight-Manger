@@ -173,6 +173,8 @@ class ResultChannelService:
         }
         try:
             for target, overwrite in desired_overwrites.items():
+                if channel.overwrites_for(target) == overwrite:
+                    continue
                 await channel.set_permissions(target, overwrite=overwrite)
 
             stale_members = [

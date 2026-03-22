@@ -6,14 +6,14 @@ import discord
 
 from highlight_manager.config.logging import get_logger
 from highlight_manager.models.common import MatchResultSummary, PlayerPointDelta
-from highlight_manager.models.enums import ResultSource
+from highlight_manager.models.enums import MatchStatus, ResultSource
 from highlight_manager.models.guild_config import GuildConfig
 from highlight_manager.models.match import MatchRecord
 from highlight_manager.models.profile import PlayerProfile
 from highlight_manager.repositories.profile_repository import ProfileRepository
 from highlight_manager.services.rank_service import RankService
 from highlight_manager.utils.dates import utcnow
-from highlight_manager.utils.exceptions import UserFacingError
+from highlight_manager.utils.exceptions import StateTransitionError, UserFacingError
 
 
 @dataclass(slots=True)
@@ -217,6 +217,7 @@ class ProfileService:
         source: ResultSource,
         notes: str | None = None,
     ) -> MatchResultSummary:
+        self._ensure_match_updates_allowed(match)
         rule = config.point_rules[match.match_type.value][match.mode.value]
         if winner_team == 1:
             winner_ids = list(match.team1_player_ids)
@@ -265,7 +266,7 @@ class ProfileService:
                     rank_after=rank_before,
                 ),
             )
-        ranked_profiles = await self.recalculate_rank_positions(guild, config)
+        ranked_profiles = await self.recalculate_rank_positions(guild, config, sync_nicknames=False)
         ranked_by_user_id = {profile.user_id: profile for profile in ranked_profiles}
         for delta in deltas:
             ranked_profile = ranked_by_user_id.get(delta.user_id)
@@ -297,6 +298,7 @@ class ProfileService:
         *,
         notes: str | None = None,
     ) -> MatchResultSummary:
+        self._ensure_match_updates_allowed(match)
         timeout_rule = config.point_rules[match.match_type.value]["timeout_penalty"]
         deltas: list[PlayerPointDelta] = []
         for user_id in match.all_player_ids:
@@ -320,7 +322,7 @@ class ProfileService:
                     rank_after=rank_before,
                 ),
             )
-        ranked_profiles = await self.recalculate_rank_positions(guild, config)
+        ranked_profiles = await self.recalculate_rank_positions(guild, config, sync_nicknames=False)
         ranked_by_user_id = {profile.user_id: profile for profile in ranked_profiles}
         for delta in deltas:
             ranked_profile = ranked_by_user_id.get(delta.user_id)
@@ -410,3 +412,22 @@ class ProfileService:
                 if member is not None and (rank_changed or self.rank_service.needs_nickname_sync(member, saved)):
                     await self.rank_service.sync_member_rank(member, saved, config)
         return saved_profiles
+
+    async def sync_rank_identities_for_guild(
+        self,
+        guild: discord.Guild,
+        config: GuildConfig,
+    ) -> None:
+        profiles = await self.repository.list_for_ranking(guild.id)
+        for profile in profiles:
+            member = guild.get_member(profile.user_id)
+            if member is None:
+                continue
+            if self.rank_service.needs_nickname_sync(member, profile):
+                await self.rank_service.sync_member_rank(member, profile, config)
+
+    def _ensure_match_updates_allowed(self, match: MatchRecord) -> None:
+        if match.status == MatchStatus.CANCELED:
+            raise StateTransitionError("Canceled matches do not change points or profile stats.")
+        if match.metadata.get("close_requested") or match.metadata.get("stats_skipped_due_to_cancel"):
+            raise StateTransitionError("That match is closing and can no longer change profile stats.")

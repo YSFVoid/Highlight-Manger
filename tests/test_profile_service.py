@@ -9,6 +9,7 @@ from highlight_manager.models.profile import PlayerProfile
 from highlight_manager.services.profile_service import ProfileService
 from highlight_manager.services.rank_service import RankService, RankSyncResult
 from highlight_manager.utils.dates import minutes_from_now, utcnow
+from highlight_manager.utils.exceptions import UserFacingError
 
 
 class FakeProfileRepository:
@@ -127,6 +128,102 @@ async def test_apply_match_outcome_updates_points_and_recalculates_positions() -
     assert repository.storage[(1, 20)].current_points == -8
     assert repository.storage[(1, 10)].current_rank == 1
     assert repository.storage[(1, 20)].current_rank == 2
+
+
+@pytest.mark.asyncio
+async def test_apply_match_outcome_rejects_canceled_match_without_mutating_profiles() -> None:
+    repository = FakeProfileRepository()
+    service = ProfileService(repository, QuietRankService())
+    now = datetime.now(UTC)
+    guild = FakeGuild(
+        1,
+        members={
+            10: FakeMember(10, joined_at=now - timedelta(days=20)),
+            20: FakeMember(20, joined_at=now - timedelta(days=10)),
+        },
+    )
+    config = GuildConfig(guild_id=1)
+    for member in guild._members.values():
+        member.guild = guild
+    await repository.upsert(PlayerProfile(guild_id=1, user_id=10, joined_at=guild.get_member(10).joined_at))
+    await repository.upsert(PlayerProfile(guild_id=1, user_id=20, joined_at=guild.get_member(20).joined_at))
+
+    match = MatchRecord(
+        guild_id=1,
+        match_number=2,
+        creator_id=10,
+        mode=MatchMode.ONE_V_ONE,
+        match_type=MatchType.APOSTADO,
+        status=MatchStatus.CANCELED,
+        team1_player_ids=[10],
+        team2_player_ids=[20],
+        created_at=utcnow(),
+        queue_expires_at=minutes_from_now(5),
+        vote_expires_at=minutes_from_now(30),
+    )
+
+    with pytest.raises(UserFacingError, match="Canceled matches do not change points or profile stats"):
+        await service.apply_match_outcome(
+            guild,
+            match,
+            config,
+            winner_team=1,
+            winner_mvp_id=None,
+            loser_mvp_id=None,
+            source=ResultSource.CONSENSUS,
+        )
+
+    assert repository.storage[(1, 10)].current_points == 0
+    assert repository.storage[(1, 20)].current_points == 0
+    assert repository.storage[(1, 10)].season_stats.matches_played == 0
+    assert repository.storage[(1, 20)].season_stats.matches_played == 0
+
+
+@pytest.mark.asyncio
+async def test_apply_vote_timeout_penalty_rejects_closing_match_without_mutating_profiles() -> None:
+    repository = FakeProfileRepository()
+    service = ProfileService(repository, QuietRankService())
+    now = datetime.now(UTC)
+    guild = FakeGuild(
+        1,
+        members={
+            10: FakeMember(10, joined_at=now - timedelta(days=20)),
+            20: FakeMember(20, joined_at=now - timedelta(days=10)),
+        },
+    )
+    config = GuildConfig(guild_id=1)
+    for member in guild._members.values():
+        member.guild = guild
+    await repository.upsert(PlayerProfile(guild_id=1, user_id=10, joined_at=guild.get_member(10).joined_at))
+    await repository.upsert(PlayerProfile(guild_id=1, user_id=20, joined_at=guild.get_member(20).joined_at))
+
+    match = MatchRecord(
+        guild_id=1,
+        match_number=3,
+        creator_id=10,
+        mode=MatchMode.ONE_V_ONE,
+        match_type=MatchType.APOSTADO,
+        status=MatchStatus.VOTING,
+        team1_player_ids=[10],
+        team2_player_ids=[20],
+        created_at=utcnow(),
+        queue_expires_at=minutes_from_now(5),
+        vote_expires_at=minutes_from_now(30),
+    )
+    match.metadata["close_requested"] = True
+
+    with pytest.raises(UserFacingError, match="can no longer change profile stats"):
+        await service.apply_vote_timeout_penalty(
+            guild,
+            match,
+            config,
+            notes="Should not apply.",
+        )
+
+    assert repository.storage[(1, 10)].current_points == 0
+    assert repository.storage[(1, 20)].current_points == 0
+    assert repository.storage[(1, 10)].season_stats.matches_played == 0
+    assert repository.storage[(1, 20)].season_stats.matches_played == 0
 
 
 @pytest.mark.asyncio
