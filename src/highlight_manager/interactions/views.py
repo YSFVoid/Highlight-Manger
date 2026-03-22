@@ -221,6 +221,18 @@ class CaptainWinnerSelectionView(discord.ui.View):
             )
         except HighlightError as exc:
             return await interaction.followup.send(str(exc), ephemeral=True)
+        except Exception:
+            self.match_service.logger.exception(
+                "captain_winner_interaction_failed",
+                guild_id=interaction.guild.id,
+                match_number=self.match_number,
+                actor_id=interaction.user.id,
+                winner_team=winner_team,
+            )
+            return await interaction.followup.send(
+                "I hit an internal error while opening the MVP selection.",
+                ephemeral=True,
+            )
         await interaction.followup.send(result.message, ephemeral=True)
 
 
@@ -269,6 +281,19 @@ class CaptainMVPPlayerSelect(discord.ui.Select):
             )
         except HighlightError as exc:
             return await interaction.followup.send(str(exc), ephemeral=True)
+        except Exception:
+            self.match_service.logger.exception(
+                "captain_mvp_interaction_failed",
+                guild_id=interaction.guild.id,
+                match_number=self.match_number,
+                actor_id=interaction.user.id,
+                selection_kind=self.selection_kind,
+                player_id=int(self.values[0]),
+            )
+            return await interaction.followup.send(
+                "I hit an internal error while saving that MVP choice.",
+                ephemeral=True,
+            )
         await interaction.followup.send(result.message, ephemeral=True)
 
 

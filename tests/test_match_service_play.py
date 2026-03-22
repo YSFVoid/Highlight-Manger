@@ -174,6 +174,12 @@ class FakeGuild:
     def get_channel(self, channel_id: int):
         return self._channels.get(channel_id)
 
+    async def fetch_channel(self, channel_id: int):
+        channel = self._channels.get(channel_id)
+        if channel is None:
+            raise KeyError(channel_id)
+        return channel
+
     def get_member(self, user_id: int):
         return self._members.get(user_id)
 
@@ -772,6 +778,53 @@ async def test_one_v_one_winner_vote_opens_mvp_prompts_instead_of_auto_finalize(
     titles = [payload["embed"].title for payload in result_channel.sent_payloads]
     assert "Choose Winner MVP - Match #001" in titles
     assert "Choose Loser MVP - Match #001" in titles
+
+
+@pytest.mark.asyncio
+async def test_captain_winner_vote_fetches_uncached_result_channel_before_opening_mvp_prompts() -> None:
+    config = GuildConfig(
+        guild_id=123,
+        apostado_play_channel_id=10,
+        highlight_play_channel_id=20,
+        waiting_voice_channel_id=30,
+        temp_voice_category_id=40,
+    )
+    service, guild, _, _, creator, repository, _ = build_service(config)
+    team2_captain = FakeMember(77, guild, voice_channel_id=31)
+    guild.add_member(team2_captain)
+    result_channel = FakeTextChannel(58, guild, "#highlight-012-result")
+    guild.add_channel(result_channel)
+    original_get_channel = guild.get_channel
+    hidden_channel_id = result_channel.id
+
+    def cache_miss_once(channel_id: int):
+        if channel_id == hidden_channel_id:
+            return None
+        return original_get_channel(channel_id)
+
+    guild.get_channel = cache_miss_once  # type: ignore[assignment]
+
+    match = MatchRecord(
+        guild_id=123,
+        match_number=12,
+        creator_id=creator.id,
+        mode=MatchMode.ONE_V_ONE,
+        match_type=MatchType.HIGHLIGHT,
+        status=MatchStatus.IN_PROGRESS,
+        team1_player_ids=[creator.id],
+        team2_player_ids=[77],
+        result_channel_id=result_channel.id,
+        created_at=utcnow(),
+    )
+    repository.storage[(123, 12)] = match
+
+    await service.record_captain_winner_vote(guild, 12, creator, winner_team=1)
+    second_vote = await service.record_captain_winner_vote(guild, 12, team2_captain, winner_team=1)
+
+    assert "MVP selection is now open" in second_vote.message
+    titles = [payload["embed"].title for payload in result_channel.sent_payloads]
+    assert "Choose Winner MVP - Match #012" in titles
+    assert "Choose Loser MVP - Match #012" in titles
 
 
 @pytest.mark.asyncio

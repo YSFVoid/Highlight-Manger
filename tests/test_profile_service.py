@@ -57,6 +57,16 @@ class QuietRankService(RankService):
         return RankSyncResult(nickname_attempted=True)
 
 
+class TrackingRankService(RankService):
+    def __init__(self) -> None:
+        super().__init__()
+        self.synced_user_ids: list[int] = []
+
+    async def sync_member_rank(self, member, profile, config) -> RankSyncResult:
+        self.synced_user_ids.append(member.id)
+        return RankSyncResult(nickname_attempted=True, nickname_updated=True)
+
+
 class FakeGuild:
     def __init__(self, guild_id: int, members: dict[int, FakeMember] | None = None) -> None:
         self.id = guild_id
@@ -283,3 +293,32 @@ async def test_revoking_manual_rank_zero_returns_member_to_normal_placement() ->
     assert profile.manual_rank_override is None
     assert profile.current_rank == 1
     assert repository.storage[(1, 20)].current_rank == 2
+
+
+@pytest.mark.asyncio
+async def test_recalculate_rank_positions_only_syncs_nicknames_for_members_whose_rank_changes() -> None:
+    repository = FakeProfileRepository()
+    rank_service = TrackingRankService()
+    service = ProfileService(repository, rank_service)
+    now = datetime.now(UTC)
+    guild = FakeGuild(
+        1,
+        members={
+            10: FakeMember(10, joined_at=now - timedelta(days=30)),
+            20: FakeMember(20, joined_at=now - timedelta(days=20)),
+            30: FakeMember(30, joined_at=now - timedelta(days=10)),
+        },
+    )
+    config = GuildConfig(guild_id=1)
+    for member in guild._members.values():
+        member.guild = guild
+        member.name = f"User{member.id}"
+        member.global_name = None
+        member.nick = f"Rank {member.id // 10} User{member.id}"
+    await repository.upsert(PlayerProfile(guild_id=1, user_id=10, current_points=300, current_rank=1, joined_at=guild.get_member(10).joined_at))
+    await repository.upsert(PlayerProfile(guild_id=1, user_id=20, current_points=200, current_rank=2, joined_at=guild.get_member(20).joined_at))
+    await repository.upsert(PlayerProfile(guild_id=1, user_id=30, current_points=100, current_rank=3, joined_at=guild.get_member(30).joined_at))
+
+    await service.recalculate_rank_positions(guild, config)
+
+    assert rank_service.synced_user_ids == []

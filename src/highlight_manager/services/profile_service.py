@@ -381,23 +381,32 @@ class ProfileService:
 
         saved_profiles: list[PlayerProfile] = []
         for profile in manual_profiles:
-            profile.current_rank = profile.manual_rank_override or 0
-            profile.updated_at = utcnow()
-            saved = await self.repository.upsert(profile)
+            desired_rank = profile.manual_rank_override or 0
+            rank_changed = profile.current_rank != desired_rank
+            profile.current_rank = desired_rank
+            if rank_changed:
+                profile.updated_at = utcnow()
+                saved = await self.repository.upsert(profile)
+            else:
+                saved = profile
             saved_profiles.append(saved)
             if sync_nicknames:
                 member = guild.get_member(saved.user_id)
-                if member is not None:
+                if member is not None and (rank_changed or self.rank_service.needs_nickname_sync(member, saved)):
                     await self.rank_service.sync_member_rank(member, saved, config)
 
         ordered = self.rank_service.sort_profiles_for_ranking(ranked_profiles)
         for position, profile in enumerate(ordered, start=1):
+            rank_changed = profile.current_rank != position
             profile.current_rank = position
-            profile.updated_at = utcnow()
-            saved = await self.repository.upsert(profile)
+            if rank_changed:
+                profile.updated_at = utcnow()
+                saved = await self.repository.upsert(profile)
+            else:
+                saved = profile
             saved_profiles.append(saved)
             if sync_nicknames:
                 member = guild.get_member(saved.user_id)
-                if member is not None:
+                if member is not None and (rank_changed or self.rank_service.needs_nickname_sync(member, saved)):
                     await self.rank_service.sync_member_rank(member, saved, config)
         return saved_profiles

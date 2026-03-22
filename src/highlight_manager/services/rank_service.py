@@ -110,6 +110,20 @@ class RankService:
             self.logger.warning("rank_nickname_sync_failed", guild_id=member.guild.id, user_id=member.id, error=str(exc))
         return result
 
+    def needs_nickname_sync(
+        self,
+        member: discord.Member,
+        profile: PlayerProfile,
+    ) -> bool:
+        if member.bot:
+            return False
+        nickname = getattr(member, "nick", None)
+        global_name = getattr(member, "global_name", None)
+        username = getattr(member, "name", None) or f"User {member.id}"
+        base_name = self.strip_rank_prefix(nickname or global_name or username)
+        target_nickname = self.build_rank_nickname(self.display_rank_for_profile(profile), base_name)
+        return nickname != target_nickname
+
     def strip_rank_prefix(self, name: str) -> str:
         cleaned = self.PREFIX_PATTERN.sub("", name).strip()
         return cleaned or "Player"

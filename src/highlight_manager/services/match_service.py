@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 
@@ -919,6 +920,30 @@ class MatchService:
             voter_ids.append(team2_captain_id)
         return voter_ids
 
+    def _captain_mvp_prompts_created(self, match: MatchRecord) -> bool:
+        workflow = self._captain_flow(match)
+        return bool(
+            workflow.get("winner_mvp_prompt_message_id")
+            and workflow.get("loser_mvp_prompt_message_id")
+        )
+
+    def _schedule_background_task(
+        self,
+        coro,
+        *,
+        event_name: str,
+        **context: Any,
+    ) -> None:
+        task = asyncio.create_task(coro)
+
+        def _done(completed: asyncio.Task) -> None:
+            try:
+                completed.result()
+            except Exception as exc:
+                self.logger.warning(event_name, error=str(exc), **context)
+
+        task.add_done_callback(_done)
+
     async def record_captain_winner_vote(
         self,
         guild: discord.Guild,
@@ -946,12 +971,18 @@ class MatchService:
             actor_id=actor.id,
             winner_team=winner_team,
         )
-        await self.audit_service.log(
-            guild,
-            AuditAction.MATCH_NOTIFICATION,
-            f"{actor.mention} selected Team {winner_team} as the winner for Match #{match.display_id}.",
+        self._schedule_background_task(
+            self.audit_service.log(
+                guild,
+                AuditAction.MATCH_NOTIFICATION,
+                f"{actor.mention} selected Team {winner_team} as the winner for Match #{match.display_id}.",
+                actor_id=actor.id,
+                metadata={"match_number": match.match_number, "winner_team": winner_team},
+            ),
+            event_name="captain_winner_vote_audit_failed",
+            guild_id=guild.id,
+            match_number=match.match_number,
             actor_id=actor.id,
-            metadata={"match_number": match.match_number, "winner_team": winner_team},
         )
 
         votes = {int(user_id): int(team) for user_id, team in workflow["winner_votes"].items()}
@@ -973,6 +1004,17 @@ class MatchService:
         workflow["loser_team"] = 2 if locked_winner_team == 1 else 1
         match = await self.repository.replace(match)
         match = await self._ensure_captain_result_messages(guild, match)
+        if not self._captain_mvp_prompts_created(match):
+            self.logger.warning(
+                "captain_mvp_prompts_missing_after_winner_lock",
+                guild_id=guild.id,
+                match_number=match.match_number,
+                actor_id=actor.id,
+                workflow=match.metadata.get("captain_result_flow"),
+            )
+            raise UserFacingError(
+                "I could not open the MVP selection prompts right now. Please try the winner vote again or ask staff to reopen the result flow."
+            )
 
         return MatchActionResult(
             match=match,
@@ -1024,12 +1066,20 @@ class MatchService:
             selection_kind=selection_kind,
             player_id=player_id,
         )
-        await self.audit_service.log(
-            guild,
-            AuditAction.MATCH_NOTIFICATION,
-            f"{actor.mention} selected <@{player_id}> as the {selection_kind} MVP for Match #{match.display_id}.",
+        self._schedule_background_task(
+            self.audit_service.log(
+                guild,
+                AuditAction.MATCH_NOTIFICATION,
+                f"{actor.mention} selected <@{player_id}> as the {selection_kind} MVP for Match #{match.display_id}.",
+                actor_id=actor.id,
+                metadata={"match_number": match.match_number, "selection_kind": selection_kind, "player_id": player_id},
+            ),
+            event_name="captain_mvp_vote_audit_failed",
+            guild_id=guild.id,
+            match_number=match.match_number,
             actor_id=actor.id,
-            metadata={"match_number": match.match_number, "selection_kind": selection_kind, "player_id": player_id},
+            selection_kind=selection_kind,
+            player_id=player_id,
         )
         match = await self._ensure_captain_result_messages(guild, match)
         if workflow.get("winner_mvp_id") and workflow.get("loser_mvp_id"):
@@ -1111,21 +1161,36 @@ class MatchService:
     async def post_vote_status(self, guild: discord.Guild, match: MatchRecord, votes) -> None:
         if not match.result_channel_id:
             return
-        channel = guild.get_channel(match.result_channel_id)
+        channel = await self._resolve_text_channel(
+            guild,
+            match.result_channel_id,
+            purpose="post_vote_status",
+            match_number=match.match_number,
+        )
         if isinstance(channel, discord.TextChannel):
             await channel.send(embed=build_vote_status_embed(match, guild, votes), view=self._build_result_view(match))
 
     async def post_result_summary(self, guild: discord.Guild, match: MatchRecord) -> None:
         if not match.result_channel_id:
             return
-        channel = guild.get_channel(match.result_channel_id)
+        channel = await self._resolve_text_channel(
+            guild,
+            match.result_channel_id,
+            purpose="post_result_summary",
+            match_number=match.match_number,
+        )
         if isinstance(channel, discord.TextChannel):
             await channel.send(embed=build_result_summary_embed(match, guild))
 
     async def post_room_info_summary(self, guild: discord.Guild, match: MatchRecord) -> bool:
         if not match.result_channel_id or match.room_info is None:
             return False
-        channel = guild.get_channel(match.result_channel_id)
+        channel = await self._resolve_text_channel(
+            guild,
+            match.result_channel_id,
+            purpose="post_room_info_summary",
+            match_number=match.match_number,
+        )
         if not isinstance(channel, discord.TextChannel):
             self.logger.warning(
                 "room_info_result_channel_missing",
@@ -1158,14 +1223,24 @@ class MatchService:
     async def post_result_note(self, guild: discord.Guild, match: MatchRecord, message: str) -> None:
         if not match.result_channel_id:
             return
-        channel = guild.get_channel(match.result_channel_id)
+        channel = await self._resolve_text_channel(
+            guild,
+            match.result_channel_id,
+            purpose="post_result_note",
+            match_number=match.match_number,
+        )
         if isinstance(channel, discord.TextChannel):
             await channel.send(message)
 
     async def post_public_note(self, guild: discord.Guild, match: MatchRecord, message: str) -> None:
         if not match.source_channel_id:
             return
-        channel = guild.get_channel(match.source_channel_id)
+        channel = await self._resolve_text_channel(
+            guild,
+            match.source_channel_id,
+            purpose="post_public_note",
+            match_number=match.match_number,
+        )
         if isinstance(channel, (discord.TextChannel, discord.Thread)):
             await channel.send(message)
 
@@ -1405,8 +1480,19 @@ class MatchService:
     ) -> MatchRecord:
         if not match.result_channel_id:
             return match
-        channel = guild.get_channel(match.result_channel_id)
+        channel = await self._resolve_text_channel(
+            guild,
+            match.result_channel_id,
+            purpose="ensure_captain_result_messages",
+            match_number=match.match_number,
+        )
         if not isinstance(channel, discord.TextChannel):
+            self.logger.warning(
+                "captain_result_channel_unavailable",
+                guild_id=guild.id,
+                match_number=match.match_number,
+                channel_id=match.result_channel_id,
+            )
             return match
 
         workflow = self._captain_flow(match)
@@ -1459,6 +1545,59 @@ class MatchService:
             loser_team=workflow.get("loser_team"),
         )
         return await self.repository.replace(match)
+
+    async def _resolve_text_channel(
+        self,
+        guild: discord.Guild,
+        channel_id: int | None,
+        *,
+        purpose: str,
+        match_number: int,
+    ) -> discord.abc.GuildChannel | None:
+        if not channel_id:
+            return None
+        channel = guild.get_channel(channel_id)
+        if channel is not None:
+            self.logger.info(
+                "channel_resolved_from_cache",
+                guild_id=guild.id,
+                match_number=match_number,
+                channel_id=channel_id,
+                purpose=purpose,
+                channel_type=type(channel).__name__,
+            )
+            return channel
+        fetch_channel = getattr(guild, "fetch_channel", None)
+        if callable(fetch_channel):
+            try:
+                fetched = await fetch_channel(channel_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException, KeyError) as exc:
+                self.logger.warning(
+                    "channel_fetch_failed",
+                    guild_id=guild.id,
+                    match_number=match_number,
+                    channel_id=channel_id,
+                    purpose=purpose,
+                    error=str(exc),
+                )
+                return None
+            self.logger.info(
+                "channel_fetched_from_api",
+                guild_id=guild.id,
+                match_number=match_number,
+                channel_id=channel_id,
+                purpose=purpose,
+                channel_type=type(fetched).__name__,
+            )
+            return fetched
+        self.logger.warning(
+            "channel_missing_from_cache",
+            guild_id=guild.id,
+            match_number=match_number,
+            channel_id=channel_id,
+            purpose=purpose,
+        )
+        return None
 
     async def _upsert_result_embed_message(
         self,

@@ -54,6 +54,51 @@ class ResultChannelService:
                 )
         return overwrites
 
+    async def _resolve_text_channel(
+        self,
+        guild: discord.Guild,
+        channel_id: int | None,
+        *,
+        match_number: int,
+        purpose: str,
+    ) -> discord.TextChannel | None:
+        if not channel_id:
+            return None
+        channel = guild.get_channel(channel_id)
+        if isinstance(channel, discord.TextChannel):
+            return channel
+        fetch_channel = getattr(guild, "fetch_channel", None)
+        if callable(fetch_channel):
+            try:
+                fetched = await fetch_channel(channel_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException, KeyError) as exc:
+                self.logger.warning(
+                    "result_channel_fetch_failed",
+                    guild_id=guild.id,
+                    match_number=match_number,
+                    channel_id=channel_id,
+                    purpose=purpose,
+                    error=str(exc),
+                )
+                return None
+            if isinstance(fetched, discord.TextChannel):
+                self.logger.info(
+                    "result_channel_fetched_from_api",
+                    guild_id=guild.id,
+                    match_number=match_number,
+                    channel_id=channel_id,
+                    purpose=purpose,
+                )
+                return fetched
+        self.logger.warning(
+            "result_channel_missing_from_cache",
+            guild_id=guild.id,
+            match_number=match_number,
+            channel_id=channel_id,
+            purpose=purpose,
+        )
+        return None
+
     async def create_private_channel(
         self,
         guild: discord.Guild,
@@ -105,8 +150,13 @@ class ResultChannelService:
         match: MatchRecord,
         config: GuildConfig,
     ) -> None:
-        channel = guild.get_channel(channel_id)
-        if not isinstance(channel, discord.TextChannel):
+        channel = await self._resolve_text_channel(
+            guild,
+            channel_id,
+            match_number=match.match_number,
+            purpose="sync_access",
+        )
+        if channel is None:
             self.logger.warning(
                 "result_channel_permission_sync_missing",
                 guild_id=guild.id,
@@ -158,8 +208,13 @@ class ResultChannelService:
         config: GuildConfig,
         match: MatchRecord,
     ) -> None:
-        channel = guild.get_channel(channel_id)
-        if not isinstance(channel, discord.TextChannel):
+        channel = await self._resolve_text_channel(
+            guild,
+            channel_id,
+            match_number=match.match_number,
+            purpose="archive",
+        )
+        if channel is None:
             return
         try:
             for user_id in match.all_player_ids:
@@ -183,8 +238,13 @@ class ResultChannelService:
             )
 
     async def delete_channel(self, guild: discord.Guild, channel_id: int, match_number: int) -> None:
-        channel = guild.get_channel(channel_id)
-        if not isinstance(channel, discord.TextChannel):
+        channel = await self._resolve_text_channel(
+            guild,
+            channel_id,
+            match_number=match_number,
+            purpose="delete",
+        )
+        if channel is None:
             return
         try:
             await channel.delete(reason=f"Cleaning up Match #{match_number:03d} result channel")
