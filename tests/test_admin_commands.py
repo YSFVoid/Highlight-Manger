@@ -303,3 +303,20 @@ async def test_announce_latest_update_mentions_everyone() -> None:
     assert sent["content"] == "@everyone"
     assert sent["embed"].title == "Latest Update - Highlight Manager"
     assert sent["allowed_mentions"].everyone is True
+
+
+@pytest.mark.asyncio
+async def test_announce_latest_update_2_mentions_everyone() -> None:
+    interaction = build_interaction()
+    bot = build_bot(interaction)
+    command = get_subcommand(bot, "announce", "latest-update-2")
+    channel = FakeTextChannel()
+
+    await command.callback(interaction, channel)
+
+    assert interaction.response.defer_called is True
+    assert channel.sent_messages
+    sent = channel.sent_messages[0]
+    assert sent["content"] == "@everyone"
+    assert sent["embed"].title == "Latest Update 2 - Highlight Manager"
+    assert sent["allowed_mentions"].everyone is True

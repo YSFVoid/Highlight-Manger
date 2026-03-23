@@ -84,17 +84,16 @@ class MatchQueueView(discord.ui.View):
         await interaction.response.defer(ephemeral=True, thinking=False)
         try:
             match = await self.match_service.require_match(interaction.guild_id or 0, self.match_number)
-            is_staff = await self.match_service.config_service.is_staff(interaction.user)
-            if interaction.user.id != match.creator_id and not is_staff:
+            if interaction.user.id != match.creator_id:
                 return await interaction.followup.send(
-                    "Only the creator or staff can cancel this match.",
+                    "Only the match creator can cancel this match here. Staff must use /match cancel.",
                     ephemeral=True,
                 )
             result = await self.match_service.cancel_match(
                 interaction.guild,
                 self.match_number,
                 actor_id=interaction.user.id,
-                force=is_staff,
+                force=False,
                 reason="Canceled by user action.",
             )
         except HighlightError as exc:
@@ -211,10 +210,9 @@ class ResultEntryView(discord.ui.View):
         await interaction.response.defer(ephemeral=True, thinking=False)
         try:
             match = await self.match_service.require_match(interaction.guild.id, self.match_number)
-            is_staff = await self.match_service.config_service.is_staff(interaction.user)
-            if interaction.user.id != match.creator_id and not is_staff:
+            if interaction.user.id != match.creator_id:
                 return await interaction.followup.send(
-                    "Only the match creator or staff can cancel this match.",
+                    "Only the match creator can cancel this match here. Staff must use /match cancel.",
                     ephemeral=True,
                 )
             result = await self.match_service.cancel_match(

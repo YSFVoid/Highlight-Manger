@@ -320,6 +320,43 @@ def build_latest_update_announcement_embed(*, version_label: str = "Latest Updat
     return embed
 
 
+def build_latest_update_2_announcement_embed(*, version_label: str = "Latest Update 2") -> discord.Embed:
+    embed = discord.Embed(
+        title=f"{version_label} - Highlight Manager",
+        description=(
+            "A smaller control-and-safety update is live with cleaner cancel permissions for active matches."
+        ),
+        colour=discord.Colour.orange(),
+    )
+    embed.add_field(
+        name="Creator Controls",
+        value=(
+            "• Only the match creator can cancel from the public match card.\n"
+            "• Only the match creator can cancel from the private match result room."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Staff Moderation",
+        value=(
+            "• Staff and admins now use `/match cancel` for moderation cancels.\n"
+            "• Match-card cancel buttons no longer act as a staff shortcut."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Why This Changed",
+        value=(
+            "• Keeps live match controls clearer for players.\n"
+            "• Reduces accidental staff cancels from normal match UI.\n"
+            "• Leaves moderation power in the slash-command flow where it is easier to audit."
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="Highlight Manager control update")
+    return embed
+
+
 def build_match_room_setup_embed(match: MatchRecord, guild: discord.Guild | None) -> discord.Embed:
     embed = discord.Embed(
         title=_match_public_title(match),

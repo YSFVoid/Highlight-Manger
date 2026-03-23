@@ -8,7 +8,11 @@ from discord import app_commands
 
 from highlight_manager.config.logging import get_logger
 from highlight_manager.models.enums import AuditAction, ResultSource
-from highlight_manager.utils.embeds import build_config_embed, build_latest_update_announcement_embed
+from highlight_manager.utils.embeds import (
+    build_config_embed,
+    build_latest_update_2_announcement_embed,
+    build_latest_update_announcement_embed,
+)
 from highlight_manager.utils.exceptions import HighlightError
 from highlight_manager.utils.transitions import StatusMessageTransition, TransitionFrame
 if TYPE_CHECKING:
@@ -1216,6 +1220,32 @@ def register_admin_commands(bot: "HighlightBot") -> None:
             bot,
             interaction,
             command_name="/announce latest-update",
+            permission_check=lambda current: _ensure_staff(bot, current),
+            operation=announce_operation,
+        )
+
+    @announce.command(name="latest-update-2", description="Post the follow-up Highlight Manager update in a channel")
+    async def announce_latest_update_2(interaction: discord.Interaction, channel: discord.TextChannel) -> None:
+        async def announce_operation() -> InteractionResponsePayload:
+            embed = build_latest_update_2_announcement_embed()
+            await channel.send(
+                content="@everyone",
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions(everyone=True),
+            )
+            await bot.audit_service.log(
+                interaction.guild,
+                AuditAction.MATCH_NOTIFICATION,
+                f"Posted the latest update 2 announcement in {channel.mention}.",
+                actor_id=interaction.user.id,
+                metadata={"channel_id": channel.id},
+            )
+            return InteractionResponsePayload(content=f"Posted the latest update 2 announcement in {channel.mention}.")
+
+        await _run_deferred_admin_command(
+            bot,
+            interaction,
+            command_name="/announce latest-update-2",
             permission_check=lambda current: _ensure_staff(bot, current),
             operation=announce_operation,
         )
