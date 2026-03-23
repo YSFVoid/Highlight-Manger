@@ -459,6 +459,8 @@ class MatchService:
             match = await self.require_match(guild.id, match_number)
             if match.status in {MatchStatus.FINALIZED, MatchStatus.CANCELED, MatchStatus.EXPIRED}:
                 raise StateTransitionError("That match is already closed.")
+            if self._match_finalization_in_progress(match):
+                raise StateTransitionError("That match is already being finalized.")
             if match.status != MatchStatus.OPEN and not force:
                 raise StateTransitionError("This match can only be canceled by admins now.")
 
@@ -645,6 +647,8 @@ class MatchService:
                 raise StateTransitionError("That match is already closed.")
             if self._match_close_requested(match):
                 raise StateTransitionError("That match is already being closed.")
+            if self._match_finalization_in_progress(match):
+                raise StateTransitionError("That match is already being finalized.")
             self.vote_service.validate_result_selection(
                 match,
                 winner_team=winner_team,
@@ -652,31 +656,45 @@ class MatchService:
                 loser_mvp_id=loser_mvp_id,
             )
             config = await self.config_service.get_or_create(guild.id)
-            summary = await self.profile_service.apply_match_outcome(
-                guild,
-                match,
-                config,
-                winner_team=winner_team,
-                winner_mvp_id=winner_mvp_id,
-                loser_mvp_id=loser_mvp_id,
-                source=source,
-                notes=notes,
-            )
-            waiting_voice_warnings = await self.voice_service.move_players_to_waiting_voice(guild, match, config)
-            await self.voice_service.cleanup_match_voices(guild, match, config=config)
-            match.status = MatchStatus.FINALIZED
-            match.finalized_at = utcnow()
-            match.team1_voice_channel_id = None
-            match.team2_voice_channel_id = None
-            match.penalties_applied = source == ResultSource.VOTE_TIMEOUT
-            match.result_summary = summary
+            match.metadata["finalize_in_progress"] = True
+            match.metadata["finalize_requested_at"] = utcnow()
+            if actor_id is not None:
+                match.metadata["finalize_requested_by"] = actor_id
             match = await self.repository.replace(match)
-            await self.post_result_summary(guild, match)
-            if waiting_voice_warnings and match.result_channel_id:
-                await self.post_result_note(guild, match, "\n".join(waiting_voice_warnings))
-            match = await self._close_result_channel_on_match_close(guild, match, config)
-            match = await self.repository.replace(match)
-            await self.refresh_match_message(guild, match)
+            waiting_voice_warnings: list[str] = []
+            try:
+                waiting_voice_warnings = await self.voice_service.move_players_to_waiting_voice(guild, match, config)
+                await self.voice_service.cleanup_match_voices(guild, match, config=config)
+                match.team1_voice_channel_id = None
+                match.team2_voice_channel_id = None
+                match = await self.repository.replace(match)
+                summary = await self.profile_service.apply_match_outcome(
+                    guild,
+                    match,
+                    config,
+                    winner_team=winner_team,
+                    winner_mvp_id=winner_mvp_id,
+                    loser_mvp_id=loser_mvp_id,
+                    source=source,
+                    notes=notes,
+                )
+                match.status = MatchStatus.FINALIZED
+                match.finalized_at = utcnow()
+                match.penalties_applied = source == ResultSource.VOTE_TIMEOUT
+                match.result_summary = summary
+                match.metadata.pop("finalize_in_progress", None)
+                match.metadata.pop("finalize_requested_at", None)
+                match.metadata.pop("finalize_requested_by", None)
+                match = await self.repository.replace(match)
+                await self.post_result_summary(guild, match)
+                if waiting_voice_warnings and match.result_channel_id:
+                    await self.post_result_note(guild, match, "\n".join(waiting_voice_warnings))
+                match = await self._close_result_channel_on_match_close(guild, match, config)
+                match = await self.repository.replace(match)
+                await self.refresh_match_message(guild, match)
+            except Exception:
+                await self._clear_finalize_in_progress(match)
+                raise
             self._schedule_background_task(
                 self.audit_service.log(
                     guild,
@@ -711,29 +729,43 @@ class MatchService:
                 return latest_match
             if self._match_close_requested(latest_match):
                 raise StateTransitionError("That match is already being closed.")
+            if self._match_finalization_in_progress(latest_match):
+                raise StateTransitionError("That match is already being finalized.")
             match = latest_match
             config = await self.config_service.get_or_create(guild.id)
-            summary = await self.profile_service.apply_vote_timeout_penalty(
-                guild,
-                match,
-                config,
-                notes="Voting timed out before a valid consensus or force result was recorded.",
-            )
-            waiting_voice_warnings = await self.voice_service.move_players_to_waiting_voice(guild, match, config)
-            await self.voice_service.cleanup_match_voices(guild, match, config=config)
-            match.status = MatchStatus.EXPIRED
-            match.penalties_applied = True
-            match.team1_voice_channel_id = None
-            match.team2_voice_channel_id = None
-            match.finalized_at = utcnow()
-            match.result_summary = summary
+            match.metadata["finalize_in_progress"] = True
+            match.metadata["finalize_requested_at"] = utcnow()
             match = await self.repository.replace(match)
-            await self.post_result_summary(guild, match)
-            if waiting_voice_warnings and match.result_channel_id:
-                await self.post_result_note(guild, match, "\n".join(waiting_voice_warnings))
-            match = await self._close_result_channel_on_match_close(guild, match, config)
-            match = await self.repository.replace(match)
-            await self.refresh_match_message(guild, match)
+            waiting_voice_warnings: list[str] = []
+            try:
+                waiting_voice_warnings = await self.voice_service.move_players_to_waiting_voice(guild, match, config)
+                await self.voice_service.cleanup_match_voices(guild, match, config=config)
+                match.team1_voice_channel_id = None
+                match.team2_voice_channel_id = None
+                match = await self.repository.replace(match)
+                summary = await self.profile_service.apply_vote_timeout_penalty(
+                    guild,
+                    match,
+                    config,
+                    notes="Voting timed out before a valid consensus or force result was recorded.",
+                )
+                match.status = MatchStatus.EXPIRED
+                match.penalties_applied = True
+                match.finalized_at = utcnow()
+                match.result_summary = summary
+                match.metadata.pop("finalize_in_progress", None)
+                match.metadata.pop("finalize_requested_at", None)
+                match.metadata.pop("finalize_requested_by", None)
+                match = await self.repository.replace(match)
+                await self.post_result_summary(guild, match)
+                if waiting_voice_warnings and match.result_channel_id:
+                    await self.post_result_note(guild, match, "\n".join(waiting_voice_warnings))
+                match = await self._close_result_channel_on_match_close(guild, match, config)
+                match = await self.repository.replace(match)
+                await self.refresh_match_message(guild, match)
+            except Exception:
+                await self._clear_finalize_in_progress(match)
+                raise
             self._schedule_background_task(
                 self.audit_service.log(
                     guild,
@@ -1050,6 +1082,25 @@ class MatchService:
     def _match_close_requested(self, match: MatchRecord) -> bool:
         return bool(match.metadata.get("close_requested"))
 
+    def _match_finalization_in_progress(self, match: MatchRecord) -> bool:
+        return bool(match.metadata.get("finalize_in_progress"))
+
+    async def _clear_finalize_in_progress(self, match: MatchRecord) -> None:
+        if not self._match_finalization_in_progress(match):
+            return
+        match.metadata.pop("finalize_in_progress", None)
+        match.metadata.pop("finalize_requested_at", None)
+        match.metadata.pop("finalize_requested_by", None)
+        try:
+            await self.repository.replace(match)
+        except Exception as exc:
+            self.logger.warning(
+                "match_finalize_in_progress_clear_failed",
+                guild_id=match.guild_id,
+                match_number=match.match_number,
+                error=str(exc),
+            )
+
     def _validate_join_private_match_key(
         self,
         match: MatchRecord,
@@ -1157,6 +1208,8 @@ class MatchService:
             raise StateTransitionError("Winner selection is not available for that match.")
         if self._match_close_requested(match):
             raise StateTransitionError("That match is already being closed.")
+        if self._match_finalization_in_progress(match):
+            raise StateTransitionError("That match is already being finalized.")
 
         workflow = self._captain_flow(match)
         eligible_voter_ids = self._eligible_winner_voter_ids(match)
@@ -1243,6 +1296,8 @@ class MatchService:
             raise StateTransitionError("MVP selection is not available for that match.")
         if self._match_close_requested(match):
             raise StateTransitionError("That match is already being closed.")
+        if self._match_finalization_in_progress(match):
+            raise StateTransitionError("That match is already being finalized.")
 
         workflow = self._captain_flow(match)
         winner_team = workflow.get("winner_team")
@@ -1298,6 +1353,8 @@ class MatchService:
                 raise StateTransitionError("That match is already closed.")
             if self._match_close_requested(latest_match):
                 raise StateTransitionError("That match is already being closed.")
+            if self._match_finalization_in_progress(latest_match):
+                raise StateTransitionError("That match is already being finalized.")
             finalized = await self.finalize_match(
                 guild,
                 match.match_number,

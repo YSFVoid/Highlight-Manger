@@ -211,6 +211,9 @@ class FakeVoiceService:
 
 
 class FakeVoteService:
+    def validate_result_selection(self, match, *, winner_team: int, winner_mvp_id: int | None, loser_mvp_id: int | None) -> None:
+        return None
+
     async def clear_votes(self, match) -> None:
         return None
 
@@ -1218,6 +1221,104 @@ async def test_finalize_match_rejects_when_close_was_requested() -> None:
             winner_mvp_id=creator.id,
             loser_mvp_id=77,
             source=ResultSource.CONSENSUS,
+        )
+
+
+@pytest.mark.asyncio
+async def test_finalize_match_moves_players_before_applying_outcome() -> None:
+    config = GuildConfig(
+        guild_id=123,
+        apostado_play_channel_id=10,
+        highlight_play_channel_id=20,
+        waiting_voice_channel_id=30,
+        temp_voice_category_id=40,
+    )
+    service, guild, _, _, creator, repository, _ = build_service(config)
+    sequence: list[str] = []
+
+    class OrderingVoiceService(FakeVoiceService):
+        async def move_players_to_waiting_voice(self, guild, match, config):
+            sequence.append("move")
+            return []
+
+        async def cleanup_match_voices(self, guild, match, *, config=None):
+            sequence.append("cleanup")
+            return None
+
+    class OrderingProfileService(FakeProfileService):
+        async def apply_match_outcome(self, *args, **kwargs):
+            sequence.append("apply")
+            return await super().apply_match_outcome(*args, **kwargs)
+
+    async def noop(*args, **kwargs):
+        return None
+
+    service.voice_service = OrderingVoiceService()
+    service.profile_service = OrderingProfileService()
+    service.post_result_summary = noop  # type: ignore[method-assign]
+    service.refresh_match_message = noop  # type: ignore[method-assign]
+
+    match = MatchRecord(
+        guild_id=123,
+        match_number=4,
+        creator_id=creator.id,
+        mode=MatchMode.ONE_V_ONE,
+        match_type=MatchType.APOSTADO,
+        status=MatchStatus.VOTING,
+        team1_player_ids=[creator.id],
+        team2_player_ids=[77],
+        team1_voice_channel_id=40,
+        team2_voice_channel_id=41,
+        created_at=utcnow(),
+    )
+    repository.storage[(123, 4)] = match
+
+    finalized = await service.finalize_match(
+        guild,
+        4,
+        winner_team=1,
+        winner_mvp_id=creator.id,
+        loser_mvp_id=77,
+        source=ResultSource.CONSENSUS,
+    )
+
+    assert sequence[:3] == ["move", "cleanup", "apply"]
+    assert finalized.status == MatchStatus.FINALIZED
+    assert finalized.team1_voice_channel_id is None
+    assert finalized.team2_voice_channel_id is None
+
+
+@pytest.mark.asyncio
+async def test_cancel_match_rejects_when_finalization_is_in_progress() -> None:
+    config = GuildConfig(
+        guild_id=123,
+        apostado_play_channel_id=10,
+        highlight_play_channel_id=20,
+        waiting_voice_channel_id=30,
+        temp_voice_category_id=40,
+    )
+    service, guild, _, _, creator, repository, _ = build_service(config)
+    match = MatchRecord(
+        guild_id=123,
+        match_number=4,
+        creator_id=creator.id,
+        mode=MatchMode.ONE_V_ONE,
+        match_type=MatchType.APOSTADO,
+        status=MatchStatus.VOTING,
+        team1_player_ids=[creator.id],
+        team2_player_ids=[77],
+        created_at=utcnow(),
+    )
+    match.metadata["finalize_in_progress"] = True
+    repository.storage[(123, 4)] = match
+
+    with pytest.raises(UserFacingError, match="already being finalized"):
+        await service.cancel_match(
+            guild,
+            4,
+            actor_id=999,
+            force=True,
+            reason="Canceled by staff.",
         )
 
 
