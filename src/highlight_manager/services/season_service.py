@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 import discord
@@ -10,6 +11,7 @@ from highlight_manager.models.season import SeasonRecord
 from highlight_manager.repositories.season_repository import SeasonRepository
 from highlight_manager.services.config_service import ConfigService
 from highlight_manager.services.profile_service import ProfileService
+from highlight_manager.utils.transitions import TransitionFrame
 
 
 @dataclass(slots=True)
@@ -32,6 +34,15 @@ class SeasonService:
         self.profile_service = profile_service
         self.config_service = config_service
         self.logger = get_logger(__name__)
+
+    async def _emit_progress(
+        self,
+        progress_callback: Callable[[TransitionFrame], Awaitable[None]] | None,
+        frame: TransitionFrame,
+    ) -> None:
+        if progress_callback is None:
+            return
+        await progress_callback(frame)
 
     async def get_active(self, guild_id: int) -> SeasonRecord | None:
         return await self.repository.get_active(guild_id)
@@ -56,22 +67,69 @@ class SeasonService:
         config: GuildConfig,
         *,
         name: str | None = None,
+        progress_callback: Callable[[TransitionFrame], Awaitable[None]] | None = None,
     ) -> SeasonRecord:
+        await self._emit_progress(
+            progress_callback,
+            TransitionFrame(
+                title="Validating Season State",
+                detail="Checking the active season and preparing to archive any current leaderboard.",
+                tone="progress",
+                step_index=1,
+                step_total=4,
+            ),
+        )
         await self.finalize_active_season(guild, config)
         latest = await self.repository.get_latest(guild.id)
         next_number = (latest.season_number + 1) if latest else 1
+        await self._emit_progress(
+            progress_callback,
+            TransitionFrame(
+                title="Saving Season Data",
+                detail="Creating the next season record and locking in the new live season number.",
+                tone="progress",
+                step_index=2,
+                step_total=4,
+            ),
+        )
         season = SeasonRecord(
             guild_id=guild.id,
             season_number=next_number,
             name=name or f"Season {next_number}",
         )
         await self.repository.create(season)
+        await self._emit_progress(
+            progress_callback,
+            TransitionFrame(
+                title="Updating Rankings",
+                detail="Resetting seasonal stats so fresh placements can form from the new season results.",
+                tone="progress",
+                step_index=3,
+                step_total=4,
+            ),
+        )
         await self.profile_service.reset_for_new_season(guild, config)
         self.logger.info("season_started", guild_id=guild.id, season_number=season.season_number)
+        await self._emit_progress(
+            progress_callback,
+            TransitionFrame(
+                title="Season Ready",
+                detail=f"{season.name} is now active and ready for new competitive matches.",
+                tone="success",
+                step_index=4,
+                step_total=4,
+            ),
+        )
         return season
 
-    async def end_active(self, guild: discord.Guild, config: GuildConfig) -> SeasonRecord | None:
-        season = await self.finalize_active_season(guild, config)
+    async def end_active(
+        self,
+        guild: discord.Guild,
+        config: GuildConfig,
+        *,
+        progress_callback: Callable[[TransitionFrame], Awaitable[None]] | None = None,
+    ) -> SeasonRecord | None:
+        season = await self.finalize_active_season(guild, config, progress_callback=progress_callback)
         if season:
             self.logger.info("season_ended", guild_id=guild.id, season_number=season.season_number)
         return season
@@ -80,7 +138,19 @@ class SeasonService:
         self,
         guild: discord.Guild,
         config: GuildConfig,
+        *,
+        progress_callback: Callable[[TransitionFrame], Awaitable[None]] | None = None,
     ) -> SeasonRecord | None:
+        await self._emit_progress(
+            progress_callback,
+            TransitionFrame(
+                title="Validating Season State",
+                detail="Checking whether an active season exists before archiving the leaderboard.",
+                tone="progress",
+                step_index=1,
+                step_total=4,
+            ),
+        )
         active = await self.repository.get_active(guild.id)
         if active is None:
             return None
@@ -90,8 +160,28 @@ class SeasonService:
             season_number=active.season_number,
             reward_top_count=config.season_reward_top_count,
         )
+        await self._emit_progress(
+            progress_callback,
+            TransitionFrame(
+                title="Freezing Leaderboard",
+                detail="Capturing the top seasonal placements before the season is archived.",
+                tone="progress",
+                step_index=2,
+                step_total=4,
+            ),
+        )
         top_profiles = await self.profile_service.list_leaderboard(guild.id, limit=config.season_reward_top_count)
         top_player_ids = [profile.user_id for profile in top_profiles]
+        await self._emit_progress(
+            progress_callback,
+            TransitionFrame(
+                title="Applying Reward Role",
+                detail="Syncing the Professional Highlight Player reward to the final top placements.",
+                tone="progress",
+                step_index=3,
+                step_total=4,
+            ),
+        )
         reward_sync = await self._sync_season_reward_role(guild, config, top_player_ids)
         ended = await self.repository.end_active(
             guild.id,
@@ -108,6 +198,16 @@ class SeasonService:
             reward_assigned_count=reward_sync.assigned_count,
             reward_removed_count=reward_sync.removed_count,
             reward_failed_count=reward_sync.failed_count,
+        )
+        await self._emit_progress(
+            progress_callback,
+            TransitionFrame(
+                title="Season Completed",
+                detail=f"{active.name} was archived and the reward role sync is complete.",
+                tone="success",
+                step_index=4,
+                step_total=4,
+            ),
         )
         return ended
 

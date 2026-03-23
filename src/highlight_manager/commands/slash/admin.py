@@ -10,6 +10,7 @@ from highlight_manager.config.logging import get_logger
 from highlight_manager.models.enums import AuditAction, ResultSource
 from highlight_manager.utils.embeds import build_config_embed, build_latest_update_announcement_embed
 from highlight_manager.utils.exceptions import HighlightError
+from highlight_manager.utils.transitions import StatusMessageTransition, TransitionFrame
 if TYPE_CHECKING:
     from highlight_manager.bot import HighlightBot
 
@@ -117,6 +118,28 @@ async def _defer_ephemeral_response(interaction: discord.Interaction) -> bool:
         )
         return False
     return True
+
+
+async def _create_progress_followup(
+    interaction: discord.Interaction,
+    *,
+    heading: str,
+    initial: TransitionFrame,
+) -> StatusMessageTransition | None:
+    try:
+        return await StatusMessageTransition.create_followup(
+            interaction,
+            heading=heading,
+            initial=initial,
+            ephemeral=True,
+        )
+    except discord.NotFound:
+        LOGGER.warning(
+            "interaction_progress_message_expired",
+            guild_id=interaction.guild.id if interaction.guild else None,
+            user_id=interaction.user.id if interaction.user else None,
+        )
+        return None
 
 
 async def _ensure_guild_owner(interaction: discord.Interaction) -> bool:
@@ -248,8 +271,30 @@ def register_admin_commands(bot: "HighlightBot") -> None:
             return
 
         if selected_action == "repair":
-            async def repair_operation() -> InteractionResponsePayload:
-                result = await bot.setup_service.repair(interaction.guild)
+            command_name = "/setup repair"
+            if not await _ensure_guild_member_context(interaction):
+                return
+            deferred = False
+            transition: StatusMessageTransition | None = None
+            try:
+                deferred = await _defer_ephemeral_response(interaction)
+                if not await _ensure_setup_admin(bot, interaction):
+                    return
+                transition = await _create_progress_followup(
+                    interaction,
+                    heading="Repairing Setup",
+                    initial=TransitionFrame(
+                        title="Validating Permissions",
+                        detail="Checking setup permissions before repairing missing resources.",
+                        tone="progress",
+                        step_index=1,
+                        step_total=6,
+                    ),
+                )
+                result = await bot.setup_service.repair(
+                    interaction.guild,
+                    progress_callback=transition.step if transition else None,
+                )
                 await bot.audit_service.log(
                     interaction.guild,
                     AuditAction.SETUP,
@@ -257,19 +302,67 @@ def register_admin_commands(bot: "HighlightBot") -> None:
                     actor_id=interaction.user.id,
                     metadata={"created": result.created_resources, "reused": result.reused_resources},
                 )
-                return InteractionResponsePayload(embed=build_setup_embed(result, interaction.guild))
-
-            await _run_deferred_admin_command(
-                bot,
-                interaction,
-                command_name="/setup repair",
-                permission_check=lambda current: _ensure_setup_admin(bot, current),
-                operation=repair_operation,
-            )
+                if transition is not None:
+                    await transition.replace(embed=build_setup_embed(result, interaction.guild))
+                else:
+                    await _send_interaction_response(
+                        interaction,
+                        embed=build_setup_embed(result, interaction.guild),
+                        ephemeral=True,
+                    )
+            except HighlightError as exc:
+                bot.logger.warning(
+                    "slash_command_validation_failed",
+                    error=str(exc),
+                    **_interaction_log_context(interaction, command_name, deferred=deferred),
+                )
+                if transition is not None:
+                    await transition.fail(str(exc), title="Setup Repair Blocked")
+                else:
+                    await _send_interaction_response(interaction, content=str(exc), ephemeral=True)
+            except Exception:
+                bot.logger.exception(
+                    "slash_command_unexpected_failure",
+                    **_interaction_log_context(interaction, command_name, deferred=deferred),
+                )
+                if transition is not None:
+                    await transition.fail(
+                        "I hit an internal error while repairing the setup.",
+                        title="Setup Repair Failed",
+                    )
+                else:
+                    await _send_interaction_response(
+                        interaction,
+                        content="I hit an internal error while processing that request.",
+                        ephemeral=True,
+                    )
             return
 
-        async def setup_operation() -> InteractionResponsePayload:
-            result = await bot.setup_service.run(interaction.guild, prefix=prefix)
+        command_name = "/setup"
+        if not await _ensure_guild_member_context(interaction):
+            return
+        deferred = False
+        transition: StatusMessageTransition | None = None
+        try:
+            deferred = await _defer_ephemeral_response(interaction)
+            if not await _ensure_setup_admin(bot, interaction):
+                return
+            transition = await _create_progress_followup(
+                interaction,
+                heading="Running Setup",
+                initial=TransitionFrame(
+                    title="Validating Permissions",
+                    detail="Checking setup permissions before creating channels, roles, and config.",
+                    tone="progress",
+                    step_index=1,
+                    step_total=6,
+                ),
+            )
+            result = await bot.setup_service.run(
+                interaction.guild,
+                prefix=prefix,
+                progress_callback=transition.step if transition else None,
+            )
             await bot.audit_service.log(
                 interaction.guild,
                 AuditAction.SETUP,
@@ -281,15 +374,40 @@ def register_admin_commands(bot: "HighlightBot") -> None:
                     "bootstrap_ran": result.first_bootstrap_ran,
                 },
             )
-            return InteractionResponsePayload(embed=build_setup_embed(result, interaction.guild))
-
-        await _run_deferred_admin_command(
-            bot,
-            interaction,
-            command_name="/setup",
-            permission_check=lambda current: _ensure_setup_admin(bot, current),
-            operation=setup_operation,
-        )
+            if transition is not None:
+                await transition.replace(embed=build_setup_embed(result, interaction.guild))
+            else:
+                await _send_interaction_response(
+                    interaction,
+                    embed=build_setup_embed(result, interaction.guild),
+                    ephemeral=True,
+                )
+        except HighlightError as exc:
+            bot.logger.warning(
+                "slash_command_validation_failed",
+                error=str(exc),
+                **_interaction_log_context(interaction, command_name, deferred=deferred),
+            )
+            if transition is not None:
+                await transition.fail(str(exc), title="Setup Blocked")
+            else:
+                await _send_interaction_response(interaction, content=str(exc), ephemeral=True)
+        except Exception:
+            bot.logger.exception(
+                "slash_command_unexpected_failure",
+                **_interaction_log_context(interaction, command_name, deferred=deferred),
+            )
+            if transition is not None:
+                await transition.fail(
+                    "I hit an internal error while running setup.",
+                    title="Setup Failed",
+                )
+            else:
+                await _send_interaction_response(
+                    interaction,
+                    content="I hit an internal error while processing that request.",
+                    ephemeral=True,
+                )
 
     @bot.tree.command(name="config", description="View or update guild configuration")
     @app_commands.choices(
@@ -404,6 +522,7 @@ def register_admin_commands(bot: "HighlightBot") -> None:
             return
         deferred = False
         active_before = None
+        transition: StatusMessageTransition | None = None
         try:
             deferred = await _defer_ephemeral_response(interaction)
             if not await _ensure_staff(bot, interaction):
@@ -424,7 +543,23 @@ def register_admin_commands(bot: "HighlightBot") -> None:
                 ),
             )
             config = await bot.config_service.get_or_create(interaction.guild.id)
-            season_record = await bot.season_service.start_new_season(interaction.guild, config, name=name)
+            transition = await _create_progress_followup(
+                interaction,
+                heading="Season Start",
+                initial=TransitionFrame(
+                    title="Validating Season State",
+                    detail="Checking the current active season before a new one is created.",
+                    tone="progress",
+                    step_index=1,
+                    step_total=4,
+                ),
+            )
+            season_record = await bot.season_service.start_new_season(
+                interaction.guild,
+                config,
+                name=name,
+                progress_callback=transition.step if transition else None,
+            )
             await bot.audit_service.log(
                 interaction.guild,
                 AuditAction.SEASON_STARTED,
@@ -444,11 +579,21 @@ def register_admin_commands(bot: "HighlightBot") -> None:
                     started_season_number=season_record.season_number,
                 ),
             )
-            await _send_interaction_response(
-                interaction,
-                content=f"Started **{season_record.name}**.",
-                ephemeral=True,
-            )
+            if transition is not None:
+                embed = discord.Embed(
+                    title="Season Started",
+                    description=f"Started **{season_record.name}** and refreshed the live season ladder.",
+                    colour=discord.Colour.green(),
+                )
+                embed.add_field(name="Season", value=season_record.name, inline=True)
+                embed.add_field(name="Season Number", value=str(season_record.season_number), inline=True)
+                await transition.replace(embed=embed)
+            else:
+                await _send_interaction_response(
+                    interaction,
+                    content=f"Started **{season_record.name}**.",
+                    ephemeral=True,
+                )
         except HighlightError as exc:
             bot.logger.warning(
                 "season_command_validation_failed",
@@ -461,7 +606,10 @@ def register_admin_commands(bot: "HighlightBot") -> None:
                     active_season_number_before=active_before.season_number if active_before else None,
                 ),
             )
-            await _send_interaction_response(interaction, content=str(exc), ephemeral=True)
+            if transition is not None:
+                await transition.fail(str(exc), title="Season Start Blocked")
+            else:
+                await _send_interaction_response(interaction, content=str(exc), ephemeral=True)
         except Exception:
             bot.logger.exception(
                 "season_command_failed",
@@ -473,11 +621,17 @@ def register_admin_commands(bot: "HighlightBot") -> None:
                     active_season_number_before=active_before.season_number if active_before else None,
                 ),
             )
-            await _send_interaction_response(
-                interaction,
-                content="I hit an internal error while processing that request.",
-                ephemeral=True,
-            )
+            if transition is not None:
+                await transition.fail(
+                    "I hit an internal error while starting the new season.",
+                    title="Season Start Failed",
+                )
+            else:
+                await _send_interaction_response(
+                    interaction,
+                    content="I hit an internal error while processing that request.",
+                    ephemeral=True,
+                )
 
     @season.command(name="end", description="End the current season")
     async def season_end(interaction: discord.Interaction) -> None:
@@ -486,6 +640,7 @@ def register_admin_commands(bot: "HighlightBot") -> None:
             return
         deferred = False
         active_before = None
+        transition: StatusMessageTransition | None = None
         try:
             deferred = await _defer_ephemeral_response(interaction)
             if not await _ensure_staff(bot, interaction):
@@ -506,7 +661,22 @@ def register_admin_commands(bot: "HighlightBot") -> None:
                 ),
             )
             config = await bot.config_service.get_or_create(interaction.guild.id)
-            ended = await bot.season_service.end_active(interaction.guild, config)
+            transition = await _create_progress_followup(
+                interaction,
+                heading="Season End",
+                initial=TransitionFrame(
+                    title="Validating Season State",
+                    detail="Checking for an active season before archiving the leaderboard and rewards.",
+                    tone="progress",
+                    step_index=1,
+                    step_total=4,
+                ),
+            )
+            ended = await bot.season_service.end_active(
+                interaction.guild,
+                config,
+                progress_callback=transition.step if transition else None,
+            )
             if ended is None:
                 bot.logger.info(
                     "season_command_completed",
@@ -519,11 +689,14 @@ def register_admin_commands(bot: "HighlightBot") -> None:
                         db_result="no_active_season",
                     ),
                 )
-                await _send_interaction_response(
-                    interaction,
-                    content="There is no active season to end.",
-                    ephemeral=True,
-                )
+                if transition is not None:
+                    await transition.fail("There is no active season to end.", title="Season End Blocked")
+                else:
+                    await _send_interaction_response(
+                        interaction,
+                        content="There is no active season to end.",
+                        ephemeral=True,
+                    )
                 return
             await bot.audit_service.log(
                 interaction.guild,
@@ -548,14 +721,27 @@ def register_admin_commands(bot: "HighlightBot") -> None:
                     reward_count=reward_count,
                 ),
             )
-            await _send_interaction_response(
-                interaction,
-                content=(
-                    f"Ended **{ended.name}** and synced the Professional Highlight Player "
-                    f"reward for **{reward_count}** player(s)."
-                ),
-                ephemeral=True,
-            )
+            if transition is not None:
+                embed = discord.Embed(
+                    title="Season Ended",
+                    description=(
+                        f"Ended **{ended.name}** and synced the Professional Highlight Player reward "
+                        f"for **{reward_count}** player(s)."
+                    ),
+                    colour=discord.Colour.orange(),
+                )
+                embed.add_field(name="Season", value=ended.name, inline=True)
+                embed.add_field(name="Rewarded Players", value=str(reward_count), inline=True)
+                await transition.replace(embed=embed)
+            else:
+                await _send_interaction_response(
+                    interaction,
+                    content=(
+                        f"Ended **{ended.name}** and synced the Professional Highlight Player "
+                        f"reward for **{reward_count}** player(s)."
+                    ),
+                    ephemeral=True,
+                )
         except HighlightError as exc:
             bot.logger.warning(
                 "season_command_validation_failed",
@@ -568,7 +754,10 @@ def register_admin_commands(bot: "HighlightBot") -> None:
                     active_season_number_before=active_before.season_number if active_before else None,
                 ),
             )
-            await _send_interaction_response(interaction, content=str(exc), ephemeral=True)
+            if transition is not None:
+                await transition.fail(str(exc), title="Season End Blocked")
+            else:
+                await _send_interaction_response(interaction, content=str(exc), ephemeral=True)
         except Exception:
             bot.logger.exception(
                 "season_command_failed",
@@ -580,11 +769,17 @@ def register_admin_commands(bot: "HighlightBot") -> None:
                     active_season_number_before=active_before.season_number if active_before else None,
                 ),
             )
-            await _send_interaction_response(
-                interaction,
-                content="I hit an internal error while processing that request.",
-                ephemeral=True,
-            )
+            if transition is not None:
+                await transition.fail(
+                    "I hit an internal error while ending the active season.",
+                    title="Season End Failed",
+                )
+            else:
+                await _send_interaction_response(
+                    interaction,
+                    content="I hit an internal error while processing that request.",
+                    ephemeral=True,
+                )
 
     @bootstrap.command(name="preview", description="Preview server-age bootstrap assignments")
     async def bootstrap_preview(interaction: discord.Interaction) -> None:

@@ -9,6 +9,7 @@ from highlight_manager.config.logging import get_logger
 from highlight_manager.interactions.views import LeaderboardView
 from highlight_manager.utils.embeds import build_help_embed, build_profile_embed, build_rank_embed
 from highlight_manager.utils.exceptions import HighlightError
+from highlight_manager.utils.transitions import StatusMessageTransition, TransitionFrame
 
 if TYPE_CHECKING:
     from highlight_manager.bot import HighlightBot
@@ -42,7 +43,20 @@ class GameplayCog(commands.Cog):
     async def play(self, ctx: commands.Context, mode: str, match_type: str) -> None:
         if not ctx.guild or not isinstance(ctx.author, discord.Member):
             return await ctx.reply("This command can only be used inside the server.")
+        transition: StatusMessageTransition | None = None
         try:
+            transition = await StatusMessageTransition.create(
+                ctx.channel,
+                heading="Preparing Match",
+                initial=TransitionFrame(
+                    title="Validating Match Request",
+                    detail="Checking the requested mode, match type, and server rules before opening the queue.",
+                    tone="progress",
+                    step_index=1,
+                    step_total=4,
+                    footer="This message will update as the match is prepared.",
+                ),
+            )
             result = await self.bot.match_service.create_match(
                 ctx.channel,
                 ctx.guild,
@@ -50,8 +64,12 @@ class GameplayCog(commands.Cog):
                 mode,
                 match_type,
                 raw_command_content=ctx.message.content if ctx.message else None,
+                transition=transition,
             )
         except HighlightError as exc:
+            if transition is not None:
+                await transition.fail(str(exc), title="Match Request Blocked")
+                return
             return await ctx.reply(str(exc))
         except Exception:
             self.logger.exception(
@@ -63,6 +81,12 @@ class GameplayCog(commands.Cog):
                 raw_mode=mode,
                 raw_type=match_type,
             )
+            if transition is not None:
+                await transition.fail(
+                    "I hit an internal error while processing that request.",
+                    title="Match Request Failed",
+                )
+                return
             return await ctx.reply("I hit an internal error while processing that request.")
         if result.match.public_message_id:
             return

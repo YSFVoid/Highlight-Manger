@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 import discord
@@ -11,6 +12,7 @@ from highlight_manager.services.bootstrap_service import BootstrapService
 from highlight_manager.services.config_service import ConfigService
 from highlight_manager.utils.dates import utcnow
 from highlight_manager.utils.exceptions import UserFacingError
+from highlight_manager.utils.transitions import TransitionFrame
 
 
 @dataclass(slots=True)
@@ -47,6 +49,15 @@ class SetupService:
         self.bootstrap_service = bootstrap_service
         self.logger = get_logger(__name__)
 
+    async def _emit_progress(
+        self,
+        progress_callback: Callable[[TransitionFrame], Awaitable[None]] | None,
+        frame: TransitionFrame,
+    ) -> None:
+        if progress_callback is None:
+            return
+        await progress_callback(frame)
+
     def validate_permissions(self, guild: discord.Guild) -> None:
         me = guild.me
         if me is None:
@@ -56,13 +67,41 @@ class SetupService:
             pretty = ", ".join(permission.replace("_", " ") for permission in missing)
             raise UserFacingError(f"Setup cannot continue because the bot is missing: {pretty}.")
 
-    async def run(self, guild: discord.Guild, *, prefix: str | None, repair: bool = False) -> SetupRunResult:
+    async def run(
+        self,
+        guild: discord.Guild,
+        *,
+        prefix: str | None,
+        repair: bool = False,
+        progress_callback: Callable[[TransitionFrame], Awaitable[None]] | None = None,
+    ) -> SetupRunResult:
+        await self._emit_progress(
+            progress_callback,
+            TransitionFrame(
+                title="Validating Permissions",
+                detail="Checking required Discord permissions before setup touches channels, roles, and nicknames.",
+                tone="progress",
+                step_index=1,
+                step_total=6,
+            ),
+        )
         self.validate_permissions(guild)
         config = await self.config_service.get_or_create(guild.id)
         created_resources: list[str] = []
         reused_resources: list[str] = []
         setup_resource_ids = dict(config.setup_created_resources)
         fallback_names = fallback_resource_names()
+
+        await self._emit_progress(
+            progress_callback,
+            TransitionFrame(
+                title="Creating Play Rooms",
+                detail="Ensuring the Apostado room, Highlight room, and Waiting Voice pool are configured.",
+                tone="progress",
+                step_index=2,
+                step_total=6,
+            ),
+        )
 
         apostado_play_result = await self._ensure_text_channel(
             guild,
@@ -112,6 +151,17 @@ class SetupService:
         created_resources.append(label) if waiting_voice_result.created else reused_resources.append(label)
         setup_resource_ids["waiting_voice_channel_id"] = waiting_voice.id
 
+        await self._emit_progress(
+            progress_callback,
+            TransitionFrame(
+                title="Preparing Match Categories",
+                detail="Ensuring the temporary voice category, result room parent, and logs channel are ready.",
+                tone="progress",
+                step_index=3,
+                step_total=6,
+            ),
+        )
+
         temp_category_result = await self._ensure_category(
             guild,
             configured_id=config.temp_voice_category_id,
@@ -160,6 +210,17 @@ class SetupService:
         created_resources.append(label) if log_channel_result.created else reused_resources.append(label)
         setup_resource_ids["log_channel_id"] = log_channel.id
 
+        await self._emit_progress(
+            progress_callback,
+            TransitionFrame(
+                title="Creating Reward Roles",
+                detail="Checking the MVP reward role and the seasonal reward role before saving the guild config.",
+                tone="progress",
+                step_index=4,
+                step_total=6,
+            ),
+        )
+
         config, mvp_reward_role, created = await self.config_service.ensure_mvp_reward_role(
             guild,
             config,
@@ -180,6 +241,16 @@ class SetupService:
             label = f"Season Reward Role: {season_reward_role.mention}"
             created_resources.append(label) if created else reused_resources.append(label)
 
+        await self._emit_progress(
+            progress_callback,
+            TransitionFrame(
+                title="Saving Configuration",
+                detail="Persisting resource IDs, feature flags, and setup metadata for this guild.",
+                tone="progress",
+                step_index=5,
+                step_total=6,
+            ),
+        )
         updates = {
             "prefix": prefix or config.prefix,
             "apostado_play_channel_id": apostado_play_channel.id,
@@ -203,6 +274,16 @@ class SetupService:
         bootstrap_summary: BootstrapSummary | None = None
         first_bootstrap_ran = False
         if not repair and not config.bootstrap_completed and config.features.bootstrap_on_first_setup:
+            await self._emit_progress(
+                progress_callback,
+                TransitionFrame(
+                    title="Bootstrapping Members",
+                    detail="Assigning starting placements and syncing member nicknames for the first live season.",
+                    tone="progress",
+                    step_index=6,
+                    step_total=6,
+                ),
+            )
             bootstrap_summary = await self.bootstrap_service.run(guild, config)
             config = await self.config_service.update(
                 guild.id,
@@ -213,6 +294,16 @@ class SetupService:
                 },
             )
             first_bootstrap_ran = True
+        await self._emit_progress(
+            progress_callback,
+            TransitionFrame(
+                title="Setup Complete",
+                detail="Resources are configured and the guild is ready for live match flow.",
+                tone="success",
+                step_index=6,
+                step_total=6,
+            ),
+        )
         return SetupRunResult(
             config=config,
             created_resources=created_resources,
@@ -221,8 +312,13 @@ class SetupService:
             first_bootstrap_ran=first_bootstrap_ran,
         )
 
-    async def repair(self, guild: discord.Guild) -> SetupRunResult:
-        return await self.run(guild, prefix=None, repair=True)
+    async def repair(
+        self,
+        guild: discord.Guild,
+        *,
+        progress_callback: Callable[[TransitionFrame], Awaitable[None]] | None = None,
+    ) -> SetupRunResult:
+        return await self.run(guild, prefix=None, repair=True, progress_callback=progress_callback)
 
     async def _ensure_voice_channel(
         self,

@@ -44,8 +44,24 @@ class FakeFollowup:
     def __init__(self) -> None:
         self.messages: list[dict] = []
 
-    async def send(self, content=None, embed=None, ephemeral: bool = False):
-        self.messages.append({"content": content, "embed": embed, "ephemeral": ephemeral})
+    async def send(self, content=None, embed=None, ephemeral: bool = False, wait: bool = False):
+        payload = {"content": content, "embed": embed, "ephemeral": ephemeral}
+        self.messages.append(payload)
+        if wait:
+            return FakeFollowupMessage(payload)
+        return None
+
+
+class FakeFollowupMessage:
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
+
+    async def edit(self, *, content=None, embed=None, view=None):
+        if content is not None:
+            self.payload["content"] = content
+        if embed is not None:
+            self.payload["embed"] = embed
+        self.payload["view"] = view
 
 
 class FakeInteraction:
@@ -111,18 +127,22 @@ class FakeSeasonService:
     async def get_active(self, guild_id: int):
         return self.active_before
 
-    async def start_new_season(self, guild, config, *, name: str | None = None):
+    async def start_new_season(self, guild, config, *, name: str | None = None, progress_callback=None):
         assert self.interaction.response.defer_called is True
+        if progress_callback is not None:
+            await progress_callback(SimpleNamespace(title="Saving Season Data", detail="...", tone="progress", step_index=2, step_total=4, footer=None))
         return SeasonRecord(
             guild_id=guild.id,
             season_number=self.start_result.season_number,
             name=name or self.start_result.name,
         )
 
-    async def end_active(self, guild, config):
+    async def end_active(self, guild, config, *, progress_callback=None):
         assert self.interaction.response.defer_called is True
         if self.raise_on_end:
             raise RuntimeError("boom")
+        if progress_callback is not None:
+            await progress_callback(SimpleNamespace(title="Applying Reward Role", detail="...", tone="progress", step_index=3, step_total=4, footer=None))
         return self.end_result
 
 
@@ -168,7 +188,9 @@ async def test_season_start_defers_before_work_and_uses_followup_response() -> N
     await command.callback(interaction, None)
 
     assert interaction.response.defer_called is True
-    assert interaction.followup.messages[0]["content"] == "Started **Season 3**."
+    embed = interaction.followup.messages[0]["embed"]
+    assert embed.title == "Season Started"
+    assert "Season 3" in embed.description
     assert any(event == "season_command_requested" for _, event, _ in bot.logger.calls)
     assert any(event == "season_command_completed" for _, event, _ in bot.logger.calls)
 
@@ -182,7 +204,9 @@ async def test_season_end_defers_and_logs_reward_metadata() -> None:
     await command.callback(interaction)
 
     assert interaction.response.defer_called is True
-    assert "synced the Professional Highlight Player reward for **5** player(s)." in interaction.followup.messages[0]["content"]
+    embed = interaction.followup.messages[0]["embed"]
+    assert embed.title == "Season Ended"
+    assert "synced the Professional Highlight Player reward for **5** player(s)." in embed.description
     assert any(
         event == "season_command_completed" and kwargs.get("reward_count") == 5
         for _, event, kwargs in bot.logger.calls
@@ -212,7 +236,10 @@ async def test_season_end_failure_after_defer_returns_handled_error() -> None:
     await command.callback(interaction)
 
     assert interaction.response.defer_called is True
-    assert interaction.followup.messages[0]["content"] == "I hit an internal error while processing that request."
+    embed = interaction.followup.messages[0]["embed"]
+    assert embed.title == "Season End"
+    assert "season end failed" in embed.description.lower()
+    assert "internal error" in embed.description.lower()
     assert any(level == "exception" and event == "season_command_failed" for level, event, _ in bot.logger.calls)
 
 

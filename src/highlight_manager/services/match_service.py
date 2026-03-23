@@ -31,6 +31,7 @@ from highlight_manager.utils.embeds import (
     build_vote_status_embed,
 )
 from highlight_manager.utils.exceptions import HighlightError, StateTransitionError, UserFacingError
+from highlight_manager.utils.transitions import StatusMessageTransition, TransitionFrame
 
 
 @dataclass(slots=True)
@@ -111,6 +112,7 @@ class MatchService:
         type_input: str,
         *,
         raw_command_content: str | None = None,
+        transition: StatusMessageTransition | None = None,
     ) -> MatchActionResult:
         context = PlayRequestLogContext(
             raw_command_content=raw_command_content,
@@ -152,6 +154,16 @@ class MatchService:
                 user_id=creator.id,
                 **context.as_log_kwargs(validation_result="passed"),
             )
+            await self._update_transition(
+                transition,
+                TransitionFrame(
+                    title="Checking Room Permissions",
+                    detail="Confirming the configured play room, Waiting Voice, and current match rules.",
+                    tone="progress",
+                    step_index=2,
+                    step_total=4,
+                ),
+            )
 
             context.validation_stage = "validate_play_channel"
             if not isinstance(channel, discord.abc.GuildChannel):
@@ -192,6 +204,16 @@ class MatchService:
                 user_id=creator.id,
                 **context.as_log_kwargs(validation_result="passed"),
             )
+            await self._update_transition(
+                transition,
+                TransitionFrame(
+                    title="Preparing Match",
+                    detail="Reserving the match slot, securing the private result room, and saving the live match state.",
+                    tone="progress",
+                    step_index=3,
+                    step_total=4,
+                ),
+            )
 
             context.validation_stage = "reserve_match_number"
             match_number = await self.config_service.reserve_next_match_number(guild.id)
@@ -227,12 +249,24 @@ class MatchService:
                         view=self._build_room_info_view(match),
                     )
             except discord.Forbidden as exc:
-                await self._cleanup_failed_match_creation(guild, match, public_message, context.validation_stage)
+                await self._cleanup_failed_match_creation(
+                    guild,
+                    match,
+                    public_message,
+                    context.validation_stage,
+                    preserve_public_message=transition is not None,
+                )
                 raise UserFacingError(
                     "I could not create the private match room. Check my channel and permission settings."
                 ) from exc
             except discord.HTTPException as exc:
-                await self._cleanup_failed_match_creation(guild, match, public_message, context.validation_stage)
+                await self._cleanup_failed_match_creation(
+                    guild,
+                    match,
+                    public_message,
+                    context.validation_stage,
+                    preserve_public_message=transition is not None,
+                )
                 raise UserFacingError(
                     "I could not prepare the private match room right now. Please try again."
                 ) from exc
@@ -252,17 +286,45 @@ class MatchService:
 
             context.validation_stage = "post_room_setup_message"
             try:
-                public_message = await channel.send(
-                    embed=build_match_room_setup_embed(match, guild),
-                    view=self._build_room_info_view(match),
-                )
+                if transition is not None:
+                    public_message = transition.message
+                    await self._update_transition(
+                        transition,
+                        TransitionFrame(
+                            title="Match Created",
+                            detail="The private room is secured and the queue setup card is ready for room info submission.",
+                            tone="success",
+                            step_index=4,
+                            step_total=4,
+                            footer="The creator can now unlock the queue from this card.",
+                        ),
+                        embed=build_match_room_setup_embed(match, guild),
+                        view=self._build_room_info_view(match),
+                    )
+                else:
+                    public_message = await channel.send(
+                        embed=build_match_room_setup_embed(match, guild),
+                        view=self._build_room_info_view(match),
+                    )
             except discord.Forbidden as exc:
-                await self._cleanup_failed_match_creation(guild, match, public_message, context.validation_stage)
+                await self._cleanup_failed_match_creation(
+                    guild,
+                    match,
+                    public_message,
+                    context.validation_stage,
+                    preserve_public_message=transition is not None,
+                )
                 raise UserFacingError(
                     "I could not post the room setup card in this room. Check my Send Messages and Embed Links permissions."
                 ) from exc
             except discord.HTTPException as exc:
-                await self._cleanup_failed_match_creation(guild, match, public_message, context.validation_stage)
+                await self._cleanup_failed_match_creation(
+                    guild,
+                    match,
+                    public_message,
+                    context.validation_stage,
+                    preserve_public_message=transition is not None,
+                )
                 raise UserFacingError(
                     "I could not publish the room setup card in this room right now. Please try again."
                 ) from exc
@@ -317,7 +379,13 @@ class MatchService:
                 "post_room_setup_message",
                 "persist_room_setup_message",
             }:
-                await self._cleanup_failed_match_creation(guild, match, public_message, context.validation_stage)
+                await self._cleanup_failed_match_creation(
+                    guild,
+                    match,
+                    public_message,
+                    context.validation_stage,
+                    preserve_public_message=transition is not None,
+                )
             self.logger.exception(
                 "play_command_unexpected_failure",
                 guild_id=guild.id,
@@ -523,7 +591,35 @@ class MatchService:
         warnings: list[str] = []
         result_channel: discord.TextChannel | None = None
         created_result_channel = False
+        transition: StatusMessageTransition | None = None
+        public_message = await self._resolve_public_message(guild, match)
+        if public_message is not None:
+            transition = StatusMessageTransition.attach(
+                public_message,
+                heading=f"Match #{match.display_id} Live Status",
+                default_footer="Highlight Manager is moving the match into live play.",
+            )
+            await self._update_transition(
+                transition,
+                TransitionFrame(
+                    title="Match Ready",
+                    detail="Teams are locked. Preparing team voice channels and live match access.",
+                    tone="success",
+                    step_index=1,
+                    step_total=3,
+                ),
+            )
         try:
+            await self._update_transition(
+                transition,
+                TransitionFrame(
+                    title="Preparing Team Voice Channels",
+                    detail="Creating the team rooms and locking the roster before moving players.",
+                    tone="progress",
+                    step_index=2,
+                    step_total=3,
+                ),
+            )
             team1_channel, team2_channel = await self._ensure_match_voice_channels(guild, match, config)
             match.team1_voice_channel_id = team1_channel.id
             match.team2_voice_channel_id = team2_channel.id
@@ -535,6 +631,16 @@ class MatchService:
             self.logger.warning("full_match_voice_setup_failed", guild_id=guild.id, match_number=match.match_number, error=str(exc))
 
         try:
+            await self._update_transition(
+                transition,
+                TransitionFrame(
+                    title="Moving Players Into Match Flow",
+                    detail="Opening the private result room, syncing access, and preparing the live match controls.",
+                    tone="progress",
+                    step_index=3,
+                    step_total=3,
+                ),
+            )
             result_channel, created_result_channel = await self._ensure_result_channel(guild, match, config)
             match.result_channel_id = result_channel.id
             await self.result_channel_service.sync_channel_access(guild, result_channel.id, match, config)
@@ -546,7 +652,10 @@ class MatchService:
         match.vote_expires_at = match.vote_expires_at or minutes_from_now(config.vote_timeout_minutes)
         match = await self.repository.replace(match)
         self.register_views(match)
-        await self.refresh_match_message(guild, match)
+        if transition is not None:
+            await transition.replace(embed=build_match_embed(match, guild), view=None)
+        else:
+            await self.refresh_match_message(guild, match)
 
         if result_channel is not None:
             if created_result_channel:
@@ -599,9 +708,28 @@ class MatchService:
             loser_mvp_id=loser_mvp_id,
         )
         if match.status == MatchStatus.IN_PROGRESS:
+            transition: StatusMessageTransition | None = None
+            public_message = await self._resolve_public_message(guild, match)
+            if public_message is not None:
+                transition = StatusMessageTransition.attach(
+                    public_message,
+                    heading=f"Match #{match.display_id} Result Flow",
+                    default_footer="Highlight Manager is opening the vote session.",
+                )
+                await self._update_transition(
+                    transition,
+                    TransitionFrame(
+                        title="Opening Vote Session",
+                        detail="The match is complete. Private vote controls are opening for the result flow now.",
+                        tone="progress",
+                    ),
+                )
             match.status = MatchStatus.VOTING
             match = await self.repository.replace(match)
-            await self.refresh_match_message(guild, match)
+            if transition is not None:
+                await transition.replace(embed=build_match_embed(match, guild), view=None)
+            else:
+                await self.refresh_match_message(guild, match)
 
         votes = await self.vote_service.get_votes(match)
         await self.post_vote_status(guild, match, votes)
@@ -964,6 +1092,25 @@ class MatchService:
                 )
                 raise UserFacingError("Private Match Key is required before this room info can be saved.")
 
+            transition: StatusMessageTransition | None = None
+            public_message = await self._resolve_public_message(guild, match)
+            if public_message is not None:
+                transition = StatusMessageTransition.attach(
+                    public_message,
+                    heading=f"Match #{match.display_id} Room Access",
+                    default_footer="Highlight Manager is securing room access before the queue opens.",
+                )
+                await self._update_transition(
+                    transition,
+                    TransitionFrame(
+                        title="Room Info Received",
+                        detail="Validating the submitted room access so it can be shared safely with players.",
+                        tone="progress",
+                        step_index=1,
+                        step_total=3,
+                    ),
+                )
+
             was_edit = match.room_info is not None
             if was_edit and match.room_info is not None:
                 room_info = match.room_info.model_copy(
@@ -988,18 +1135,34 @@ class MatchService:
                 match.result_channel_id = result_channel.id
             await self._sync_result_channel_access(guild, match, config)
             match = await self.repository.replace(match)
+            await self._update_transition(
+                transition,
+                TransitionFrame(
+                    title="Sharing With Players",
+                    detail="Posting the private room details inside the match room and syncing participant access.",
+                    tone="info",
+                    step_index=2,
+                    step_total=3,
+                ),
+            )
             match = await self._ensure_room_info_available_in_result_channel(guild, match, force_post=True)
             queue_opened_now = False
             if match.queue_opened_at is None:
-                match = await self._open_public_queue_after_room_info(guild, match, config)
+                match = await self._open_public_queue_after_room_info(guild, match, config, transition=transition)
                 queue_opened_now = True
             else:
-                self._schedule_background_task(
-                    self.refresh_match_message(guild, match),
-                    event_name="room_info_refresh_failed",
-                    guild_id=guild.id,
-                    match_number=match.match_number,
-                    actor_id=actor.id,
+                await self._update_transition(
+                    transition,
+                    TransitionFrame(
+                        title="Room Ready",
+                        detail="The queue stays live while the updated room access remains private to match players.",
+                        tone="success",
+                        step_index=3,
+                        step_total=3,
+                        footer="Room access updates stay private inside the match room.",
+                    ),
+                    embed=build_match_embed(match, guild),
+                    view=self._build_queue_view(match) if match.status == MatchStatus.OPEN else None,
                 )
                 self._schedule_background_task(
                     self.post_public_note(
@@ -1173,6 +1336,23 @@ class MatchService:
                 self.logger.warning(event_name, error=str(exc), **context)
 
         task.add_done_callback(_done)
+
+    async def _update_transition(
+        self,
+        transition: StatusMessageTransition | None,
+        frame: TransitionFrame,
+        *,
+        embed: discord.Embed | None = None,
+        view: discord.ui.View | None = None,
+        content: str | None = None,
+    ) -> None:
+        if transition is None:
+            return
+        if embed is None:
+            await transition.step(frame, content=content, view=view)
+            return
+        await transition.step(frame, content=content, view=view)
+        await transition.replace(embed=embed, content=content, view=view)
 
     async def _persist_captain_flow(
         self,
@@ -1406,13 +1586,10 @@ class MatchService:
                     self._registered_captain_views.add(loser_key)
 
     async def refresh_match_message(self, guild: discord.Guild, match: MatchRecord) -> None:
-        if not match.public_message_id or not match.source_channel_id:
-            return
-        channel = guild.get_channel(match.source_channel_id)
-        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+        message = await self._resolve_public_message(guild, match)
+        if message is None:
             return
         try:
-            message = await channel.fetch_message(match.public_message_id)
             if match.status == MatchStatus.OPEN and match.queue_opened_at is None:
                 await message.edit(
                     embed=build_match_room_setup_embed(match, guild),
@@ -1429,6 +1606,23 @@ class MatchService:
             self.logger.warning("match_public_message_missing", guild_id=guild.id, match_number=match.match_number, message_id=match.public_message_id)
         except discord.HTTPException as exc:
             self.logger.warning("match_public_message_refresh_failed", guild_id=guild.id, match_number=match.match_number, error=str(exc))
+
+    async def _resolve_public_message(self, guild: discord.Guild, match: MatchRecord) -> discord.Message | None:
+        if not match.public_message_id or not match.source_channel_id:
+            return None
+        channel = guild.get_channel(match.source_channel_id)
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            return None
+        try:
+            return await channel.fetch_message(match.public_message_id)
+        except discord.NotFound:
+            self.logger.warning(
+                "match_public_message_missing",
+                guild_id=guild.id,
+                match_number=match.match_number,
+                message_id=match.public_message_id,
+            )
+            return None
 
     async def post_vote_status(self, guild: discord.Guild, match: MatchRecord, votes) -> None:
         if not match.result_channel_id:
@@ -1659,6 +1853,8 @@ class MatchService:
         guild: discord.Guild,
         match: MatchRecord,
         config: GuildConfig,
+        *,
+        transition: StatusMessageTransition | None = None,
     ) -> MatchRecord:
         if match.queue_opened_at is not None:
             return match
@@ -1678,7 +1874,22 @@ class MatchService:
         if match.public_message_id:
             try:
                 queue_message = await channel.fetch_message(match.public_message_id)
-                await queue_message.edit(
+                if transition is None:
+                    transition = StatusMessageTransition.attach(
+                        queue_message,
+                        heading=f"Match #{match.display_id} Queue",
+                        default_footer="Highlight Manager is opening the public queue.",
+                    )
+                await self._update_transition(
+                    transition,
+                    TransitionFrame(
+                        title="Room Ready",
+                        detail="Unlocking the public queue and applying the live match controls for players.",
+                        tone="success",
+                        step_index=3,
+                        step_total=3,
+                        footer="Room access was shared privately before the queue opened.",
+                    ),
                     embed=build_match_embed(match, guild),
                     view=self._build_queue_view(match),
                 )
@@ -1700,10 +1911,17 @@ class MatchService:
                 )
 
         if match.public_message_id is None:
-            queue_message = await channel.send(
-                embed=build_match_embed(match, guild),
-                view=self._build_queue_view(match),
-            )
+            if transition is not None:
+                queue_message = transition.message
+                await transition.replace(
+                    embed=build_match_embed(match, guild),
+                    view=self._build_queue_view(match),
+                )
+            else:
+                queue_message = await channel.send(
+                    embed=build_match_embed(match, guild),
+                    view=self._build_queue_view(match),
+                )
             match.public_message_id = queue_message.id
 
         if config.ping_here_on_match_create and not match.create_here_ping_sent:
@@ -1745,8 +1963,10 @@ class MatchService:
         match: MatchRecord,
         public_message: discord.Message | None,
         validation_stage: str,
+        *,
+        preserve_public_message: bool = False,
     ) -> None:
-        if public_message is not None:
+        if public_message is not None and not preserve_public_message:
             try:
                 await public_message.delete()
             except discord.HTTPException as exc:
@@ -1771,6 +1991,7 @@ class MatchService:
             validation_stage=validation_stage,
             deleted_from_repository=deleted,
             had_public_message=public_message is not None,
+            preserved_public_message=preserve_public_message,
         )
 
     async def _ensure_room_info_available_in_result_channel(
@@ -1990,6 +2211,8 @@ class MatchService:
         config: GuildConfig,
     ) -> MatchRecord:
         if match.ready_announcement_sent or not match.source_channel_id:
+            return match
+        if match.public_message_id and not config.ping_here_on_match_ready:
             return match
         channel = guild.get_channel(match.source_channel_id)
         if not isinstance(channel, (discord.TextChannel, discord.Thread)):

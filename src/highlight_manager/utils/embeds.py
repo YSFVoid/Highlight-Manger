@@ -9,7 +9,7 @@ from highlight_manager.models.guild_config import GuildConfig
 from highlight_manager.models.match import MatchRecord
 from highlight_manager.models.profile import PlayerProfile
 from highlight_manager.models.vote import MatchVote
-from highlight_manager.utils.dates import format_dt, format_relative
+from highlight_manager.utils.dates import format_dt, format_relative, utcnow
 
 
 def _member_label(guild: discord.Guild | None, user_id: int) -> str:
@@ -187,8 +187,51 @@ def _apply_member_art(embed: discord.Embed, guild: discord.Guild | None, user_id
 
 
 def _top_rank_badge(index: int) -> str:
-    badges = {1: "1st", 2: "2nd", 3: "3rd"}
+    badges = {1: "🥇", 2: "🥈", 3: "🥉"}
     return badges.get(index, f"{index}th")
+
+
+def _transition_colour(tone: str) -> discord.Colour:
+    return {
+        "progress": discord.Colour.blurple(),
+        "success": discord.Colour.green(),
+        "warning": discord.Colour.orange(),
+        "error": discord.Colour.red(),
+        "info": discord.Colour.teal(),
+    }.get(tone, discord.Colour.blurple())
+
+
+def _transition_status_label(tone: str) -> str:
+    return {
+        "progress": "In Progress",
+        "success": "Ready",
+        "warning": "Attention",
+        "error": "Action Needed",
+        "info": "Live",
+    }.get(tone, "In Progress")
+
+
+def build_transition_embed(
+    heading: str,
+    status_title: str,
+    detail: str,
+    *,
+    tone: str = "progress",
+    step_index: int | None = None,
+    step_total: int | None = None,
+    footer: str | None = None,
+) -> discord.Embed:
+    embed = discord.Embed(
+        title=heading,
+        description=f"**{status_title}**\n{detail}",
+        colour=_transition_colour(tone),
+        timestamp=utcnow(),
+    )
+    if step_index is not None and step_total is not None:
+        embed.add_field(name="Progress", value=f"Step {step_index}/{step_total}", inline=True)
+    embed.add_field(name="Status", value=_transition_status_label(tone), inline=True)
+    embed.set_footer(text=footer or "Highlight Manager is updating this message.")
+    return embed
 
 
 def _captain_workflow(match: MatchRecord) -> dict:
@@ -560,10 +603,11 @@ def build_profile_embed(
 ) -> discord.Embed:
     display_name = _member_name(guild, profile.user_id)
     embed = discord.Embed(
-        title=f"{display_name} - Profile",
+        title="Player Profile",
         description=(
+            f"**{display_name}**\n"
             f"{_member_label(guild, profile.user_id)}\n"
-            f"Rank: **{_rank_label(profile)}**\n"
+            f"Placement: **{_rank_label(profile)}**\n"
             f"Season: **{season_name or 'Active Season'}**"
         ),
         colour=discord.Colour.green(),
@@ -580,7 +624,7 @@ def build_profile_embed(
         inline=False,
     )
     embed.add_field(
-        name="Lifetime",
+        name="Lifetime Snapshot",
         value=(
             f"Points: **{profile.lifetime_points}**\n"
             f"Record: **{profile.lifetime_stats.wins}W / {profile.lifetime_stats.losses}L**\n"
@@ -609,8 +653,9 @@ def build_rank_embed(
 ) -> discord.Embed:
     display_name = _member_name(guild, profile.user_id)
     embed = discord.Embed(
-        title=f"{display_name} - Rank Card",
+        title="Rank Overview",
         description=(
+            f"**{display_name}**\n"
             f"{_member_label(guild, profile.user_id)}\n"
             f"Placement: **{_rank_label(profile)}**\n"
             f"Season: **{season_name or 'Active Season'}**"
@@ -627,7 +672,7 @@ def build_rank_embed(
         inline=False,
     )
     embed.add_field(
-        name="MVP Snapshot",
+        name="MVP Impact",
         value=(
             f"Winner MVP: **{profile.mvp_winner_count}**\n"
             f"Loser MVP: **{profile.mvp_loser_count}**\n"
@@ -662,7 +707,8 @@ def build_leaderboard_embed(
         title=title,
         description=(
             f"Season: **{season_name or 'Active Season'}**\n"
-            f"View: **{_metric_label(metric)}**"
+            f"View: **{_metric_label(metric)}**\n"
+            "Live placements update from current season performance."
         ),
         colour=discord.Colour.gold(),
     )
@@ -677,12 +723,12 @@ def build_leaderboard_embed(
             "\n".join(
                 [
                     f"**{_top_rank_badge(index)}** {_member_label(guild, profile.user_id)}",
-                    f"{_metric_value(profile, metric)} - {profile.season_stats.wins}W/{profile.season_stats.losses}L - {_rank_label(profile)}",
+                    f"{_metric_value(profile, metric)} · {profile.season_stats.wins}W/{profile.season_stats.losses}L · {_rank_label(profile)}",
                 ]
             )
         )
     embed.add_field(name="Top Players", value="\n\n".join(lines)[:1024], inline=False)
-    embed.set_footer(text=f"Page {page}/{total_pages} - Use the controls below to switch page or metric.")
+    embed.set_footer(text=f"Page {page}/{total_pages} • Use the controls below to switch page or metric.")
     return embed
 
 
