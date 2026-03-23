@@ -238,18 +238,19 @@ def build_latest_update_announcement_embed(*, version_label: str = "Latest Updat
     embed = discord.Embed(
         title=f"{version_label} - Highlight Manager",
         description=(
-            "A polished match-management update is live with stronger cleanup, faster flow, "
-            "better nickname sync, and more flexible waiting voice support."
+            "A new live stability update is out with faster match actions, safer room access, "
+            "and stronger control for creators."
         ),
         colour=discord.Colour.blurple(),
     )
     embed.add_field(
         name="Fixes",
         value=(
-            "• Duplicate temporary match voices are cleaned up more aggressively.\n"
-            "• Duplicate match result rooms are cleaned up more aggressively.\n"
-            "• Match close flow now protects admin-canceled matches from profile or point updates.\n"
-            "• Join and match-close paths were trimmed to reduce live delay."
+            "• Match team voice permissions were tightened so players can leave and rejoin their own team room.\n"
+            "• Private match keys are now checked before a player can join a keyed match.\n"
+            "• Room info editing is restricted to the match creator.\n"
+            "• Creator cancel from the private result room is now supported after the match starts.\n"
+            "• Join, leave, room-info update, and cancel flows were trimmed to reduce live delay."
         ),
         inline=False,
     )
@@ -258,7 +259,7 @@ def build_latest_update_announcement_embed(*, version_label: str = "Latest Updat
         value=(
             "• Extra Waiting Voice channels can be added without replacing the main one.\n"
             "• Nicknames now sync in the format `RANK X | Name`.\n"
-            "• Staff can force a nickname resync without changing the player rank.\n"
+            "• Staff can force a nickname resync for one member or the full server without changing ranks.\n"
             "• Update announcements can be posted into a selected channel with a polished embed."
         ),
         inline=False,
@@ -290,7 +291,7 @@ def build_match_room_setup_embed(match: MatchRecord, guild: discord.Guild | None
     )
     embed.add_field(
         name="Queue Status",
-        value="Waiting for the creator or staff to submit room info.",
+        value="Waiting for the match creator to submit room info.",
         inline=False,
     )
     embed.add_field(
@@ -301,7 +302,7 @@ def build_match_room_setup_embed(match: MatchRecord, guild: discord.Guild | None
         )[:1024],
         inline=False,
     )
-    embed.set_footer(text="Press Enter Room Info to unlock the public queue.")
+    embed.set_footer(text="Only the match creator can unlock the queue with room info.")
     _apply_member_art(embed, guild, match.creator_id)
     return embed
 
@@ -401,6 +402,11 @@ def build_result_room_embed(match: MatchRecord, guild: discord.Guild | None) -> 
     embed.add_field(
         name="Result Captains",
         value="\n".join(eligible_voters),
+        inline=False,
+    )
+    embed.add_field(
+        name="Room Control",
+        value="Only the match creator can update room ID, password, and match key.",
         inline=False,
     )
     players = "\n".join(_member_label(guild, user_id) for user_id in match.all_player_ids) or "Only the host is here so far."

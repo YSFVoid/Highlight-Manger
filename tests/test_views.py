@@ -53,7 +53,7 @@ async def test_result_entry_view_custom_ids_include_guild_and_match_number() -> 
 
     assert view.submit_vote.custom_id == "result:321:7:submit"
     assert view.refresh_status.custom_id == "result:321:7:status"
-    assert view.enter_room_info.custom_id == "result:321:7:roominfo"
+    assert view.cancel_match.custom_id == "result:321:7:cancel"
 
 
 @pytest.mark.asyncio

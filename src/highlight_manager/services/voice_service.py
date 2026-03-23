@@ -95,6 +95,11 @@ class VoiceService:
             preferred_name=format_match_channel_name(config.team1_voice_name_template, match),
             fallback_name=self.FALLBACK_TEAM1_TEMPLATE.format(match_id=match.display_id),
             category=category,
+            overwrites=self._build_match_voice_overwrites(
+                guild,
+                match.team1_player_ids,
+                config,
+            ),
             user_limit=match.team_size,
             reason=f"Match #{match.display_id} Team 1",
         )
@@ -103,6 +108,11 @@ class VoiceService:
             preferred_name=format_match_channel_name(config.team2_voice_name_template, match),
             fallback_name=self.FALLBACK_TEAM2_TEMPLATE.format(match_id=match.display_id),
             category=category,
+            overwrites=self._build_match_voice_overwrites(
+                guild,
+                match.team2_player_ids,
+                config,
+            ),
             user_limit=match.team_size,
             reason=f"Match #{match.display_id} Team 2",
         )
@@ -282,6 +292,7 @@ class VoiceService:
         preferred_name: str,
         fallback_name: str,
         category: discord.CategoryChannel,
+        overwrites: dict[discord.Role | discord.Member, discord.PermissionOverwrite],
         user_limit: int,
         reason: str,
     ) -> discord.VoiceChannel:
@@ -289,6 +300,7 @@ class VoiceService:
             return await guild.create_voice_channel(
                 preferred_name,
                 category=category,
+                overwrites=overwrites,
                 user_limit=user_limit,
                 reason=reason,
             )
@@ -305,9 +317,54 @@ class VoiceService:
             return await guild.create_voice_channel(
                 fallback_name,
                 category=category,
+                overwrites=overwrites,
                 user_limit=user_limit,
                 reason=reason,
             )
+
+    def _build_match_voice_overwrites(
+        self,
+        guild: discord.Guild,
+        player_ids: list[int],
+        config: GuildConfig,
+    ) -> dict[discord.Role | discord.Member, discord.PermissionOverwrite]:
+        overwrites: dict[discord.Role | discord.Member, discord.PermissionOverwrite] = {
+            guild.default_role: discord.PermissionOverwrite(
+                view_channel=False,
+                connect=False,
+            ),
+        }
+        me = guild.me
+        if me:
+            overwrites[me] = discord.PermissionOverwrite(
+                view_channel=True,
+                connect=True,
+                manage_channels=True,
+                move_members=True,
+                mute_members=True,
+                deafen_members=True,
+            )
+        for role_id in {*(config.admin_role_ids or []), *(config.staff_role_ids or [])}:
+            role = guild.get_role(role_id)
+            if role is None:
+                continue
+            overwrites[role] = discord.PermissionOverwrite(
+                view_channel=True,
+                connect=True,
+                move_members=True,
+                mute_members=True,
+                deafen_members=True,
+            )
+        for user_id in player_ids:
+            member = guild.get_member(user_id)
+            if member is None:
+                continue
+            overwrites[member] = discord.PermissionOverwrite(
+                view_channel=True,
+                connect=True,
+                speak=True,
+            )
+        return overwrites
 
     def _find_duplicate_match_voice_channels(
         self,

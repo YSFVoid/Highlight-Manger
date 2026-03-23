@@ -419,3 +419,34 @@ async def test_recalculate_rank_positions_only_syncs_nicknames_for_members_whose
     await service.recalculate_rank_positions(guild, config)
 
     assert rank_service.synced_user_ids == []
+
+
+@pytest.mark.asyncio
+async def test_sync_rank_identities_for_guild_returns_summary_counts() -> None:
+    repository = FakeProfileRepository()
+    rank_service = TrackingRankService()
+    service = ProfileService(repository, rank_service)
+    now = datetime.now(UTC)
+    guild = FakeGuild(
+        1,
+        members={
+            10: FakeMember(10, joined_at=now - timedelta(days=30)),
+            20: FakeMember(20, joined_at=now - timedelta(days=20)),
+        },
+    )
+    config = GuildConfig(guild_id=1)
+    for member in guild._members.values():
+        member.guild = guild
+        member.name = f"User{member.id}"
+        member.global_name = None
+    guild.get_member(10).nick = "RANK 1 | User10"
+    guild.get_member(20).nick = "User20"
+    await repository.upsert(PlayerProfile(guild_id=1, user_id=10, current_rank=1, joined_at=guild.get_member(10).joined_at))
+    await repository.upsert(PlayerProfile(guild_id=1, user_id=20, current_rank=2, joined_at=guild.get_member(20).joined_at))
+
+    summary = await service.sync_rank_identities_for_guild(guild, config)
+
+    assert summary.processed_members == 2
+    assert summary.synced_members == 1
+    assert summary.already_correct == 1
+    assert rank_service.synced_user_ids == [20]

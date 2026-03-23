@@ -26,6 +26,17 @@ class PointsUpdateResult:
     rank_after: int
 
 
+@dataclass(slots=True)
+class IdentitySyncSummary:
+    processed_members: int = 0
+    synced_members: int = 0
+    already_correct: int = 0
+    failed_members: int = 0
+    skipped_due_to_hierarchy: int = 0
+    skipped_due_to_missing_permission: int = 0
+    skipped_other: int = 0
+
+
 class ProfileService:
     def __init__(self, repository: ProfileRepository, rank_service: RankService, reward_service=None) -> None:
         self.repository = repository
@@ -417,14 +428,32 @@ class ProfileService:
         self,
         guild: discord.Guild,
         config: GuildConfig,
-    ) -> None:
-        profiles = await self.repository.list_for_ranking(guild.id)
-        for profile in profiles:
-            member = guild.get_member(profile.user_id)
-            if member is None:
+    ) -> IdentitySyncSummary:
+        summary = IdentitySyncSummary()
+        for member in guild.members:
+            if member.bot:
                 continue
-            if self.rank_service.needs_nickname_sync(member, profile):
-                await self.rank_service.sync_member_rank(member, profile, config)
+            profile = await self.ensure_profile(guild, member.id, config, sync_identity=False)
+            summary.processed_members += 1
+            if not self.rank_service.needs_nickname_sync(member, profile):
+                summary.already_correct += 1
+                continue
+            result = await self.rank_service.sync_member_rank(member, profile, config)
+            if result.nickname_updated:
+                summary.synced_members += 1
+                continue
+            if result.nickname_already_correct:
+                summary.already_correct += 1
+                continue
+            if result.nickname_failed:
+                summary.failed_members += 1
+                if result.failure_category == "hierarchy":
+                    summary.skipped_due_to_hierarchy += 1
+                elif result.failure_category == "missing_permission":
+                    summary.skipped_due_to_missing_permission += 1
+                else:
+                    summary.skipped_other += 1
+        return summary
 
     def _ensure_match_updates_allowed(self, match: MatchRecord) -> None:
         if match.status == MatchStatus.CANCELED:

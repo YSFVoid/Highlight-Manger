@@ -104,6 +104,19 @@ class MatchQueueView(discord.ui.View):
     async def _handle_join(self, interaction: discord.Interaction, team_number: int) -> None:
         if not isinstance(interaction.user, discord.Member):
             return await interaction.response.send_message("This only works inside the server.", ephemeral=True)
+        try:
+            match = await self.match_service.require_match(interaction.guild_id or 0, self.match_number)
+        except HighlightError as exc:
+            return await interaction.response.send_message(str(exc), ephemeral=True)
+        if match.room_info and match.room_info.private_match_key:
+            return await interaction.response.send_modal(
+                MatchJoinKeyModal(
+                    self.match_service,
+                    match_number=self.match_number,
+                    team_number=team_number,
+                    actor=interaction.user,
+                )
+            )
         await interaction.response.defer(ephemeral=True, thinking=False)
         try:
             result = await self.match_service.join_team(interaction.user, self.match_number, team_number)
@@ -135,10 +148,9 @@ class RoomInfoEntryView(discord.ui.View):
             return await interaction.response.send_message("This only works inside the server.", ephemeral=True)
         try:
             match = await self.match_service.require_match(interaction.guild.id, self.match_number)
-            is_staff = await self.match_service.config_service.is_staff(interaction.user)
-            if interaction.user.id != match.creator_id and not is_staff:
+            if interaction.user.id != match.creator_id:
                 return await interaction.response.send_message(
-                    "Only the match creator or staff can submit room info.",
+                    "Only the match creator can submit room info.",
                     ephemeral=True,
                 )
         except HighlightError as exc:
@@ -161,7 +173,7 @@ class ResultEntryView(discord.ui.View):
         self.match_number = match_number
         self.submit_vote.custom_id = f"result:{self.guild_id}:{self.match_number}:submit"
         self.refresh_status.custom_id = f"result:{self.guild_id}:{self.match_number}:status"
-        self.enter_room_info.custom_id = f"result:{self.guild_id}:{self.match_number}:roominfo"
+        self.cancel_match.custom_id = f"result:{self.guild_id}:{self.match_number}:cancel"
         for child in self.children:
             child.disabled = disabled
 
@@ -178,11 +190,6 @@ class ResultEntryView(discord.ui.View):
             return await interaction.response.send_message(str(exc), ephemeral=True)
         await interaction.response.send_message("Submit your vote below.", view=view, ephemeral=True)
 
-    @discord.ui.button(label="Enter Room Info", style=discord.ButtonStyle.primary, custom_id="placeholder")
-    async def enter_room_info(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        room_info_view = RoomInfoEntryView(self.match_service, self.guild_id, self.match_number)
-        await room_info_view.enter_room_info(interaction, _)  # type: ignore[arg-type]
-
     @discord.ui.button(label="Refresh Status", style=discord.ButtonStyle.secondary, custom_id="placeholder")
     async def refresh_status(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if interaction.guild is None:
@@ -196,6 +203,30 @@ class ResultEntryView(discord.ui.View):
             embed=build_vote_status_embed(match, interaction.guild, votes),
             ephemeral=True,
         )
+
+    @discord.ui.button(label="Cancel Match", style=discord.ButtonStyle.danger, custom_id="placeholder")
+    async def cancel_match(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            return await interaction.response.send_message("This only works inside the server.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=False)
+        try:
+            match = await self.match_service.require_match(interaction.guild.id, self.match_number)
+            is_staff = await self.match_service.config_service.is_staff(interaction.user)
+            if interaction.user.id != match.creator_id and not is_staff:
+                return await interaction.followup.send(
+                    "Only the match creator or staff can cancel this match.",
+                    ephemeral=True,
+                )
+            result = await self.match_service.cancel_match(
+                interaction.guild,
+                self.match_number,
+                actor_id=interaction.user.id,
+                force=True,
+                reason="Canceled from the private match room.",
+            )
+        except HighlightError as exc:
+            return await interaction.followup.send(str(exc), ephemeral=True)
+        await interaction.followup.send(result.message, ephemeral=True)
 
 
 class CaptainWinnerSelectionView(discord.ui.View):
@@ -399,6 +430,54 @@ class RoomInfoModal(discord.ui.Modal, title="Enter Room Information"):
             )
             return await interaction.followup.send(
                 "I hit an internal error while saving that room info.",
+                ephemeral=True,
+            )
+        await interaction.followup.send(result.message, ephemeral=True)
+
+
+class MatchJoinKeyModal(discord.ui.Modal, title="Enter Match Key"):
+    def __init__(
+        self,
+        match_service: MatchService,
+        *,
+        match_number: int,
+        team_number: int,
+        actor: discord.Member,
+    ) -> None:
+        super().__init__(timeout=180)
+        self.match_service = match_service
+        self.match_number = match_number
+        self.team_number = team_number
+        self.actor = actor
+        self.private_match_key = discord.ui.TextInput(
+            label="Private Match Key",
+            placeholder="Enter the key provided by the match creator",
+            max_length=64,
+        )
+        self.add_item(self.private_match_key)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=False)
+        actor = interaction.user if isinstance(interaction.user, discord.Member) else self.actor
+        try:
+            result = await self.match_service.join_team_with_key(
+                actor,
+                self.match_number,
+                self.team_number,
+                private_match_key=str(self.private_match_key.value),
+            )
+        except HighlightError as exc:
+            return await interaction.followup.send(str(exc), ephemeral=True)
+        except Exception:
+            self.match_service.logger.exception(
+                "match_join_key_modal_failed",
+                guild_id=interaction.guild.id if interaction.guild else None,
+                match_number=self.match_number,
+                actor_id=actor.id,
+                team_number=self.team_number,
+            )
+            return await interaction.followup.send(
+                "I hit an internal error while checking that match key.",
                 ephemeral=True,
             )
         await interaction.followup.send(result.message, ephemeral=True)

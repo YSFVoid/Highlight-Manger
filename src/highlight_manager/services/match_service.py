@@ -328,6 +328,16 @@ class MatchService:
             raise
 
     async def join_team(self, member: discord.Member, match_number: int, team_number: int) -> MatchActionResult:
+        return await self.join_team_with_key(member, match_number, team_number, private_match_key=None)
+
+    async def join_team_with_key(
+        self,
+        member: discord.Member,
+        match_number: int,
+        team_number: int,
+        *,
+        private_match_key: str | None,
+    ) -> MatchActionResult:
         async with self._match_state_lock(member.guild.id, match_number):
             config = await self.config_service.ensure_match_resources(
                 member.guild,
@@ -341,6 +351,7 @@ class MatchService:
                 raise StateTransitionError("That match is no longer open for joining.")
             if match.queue_opened_at is None:
                 raise StateTransitionError("This match is still waiting for room info before players can join.")
+            self._validate_join_private_match_key(match, private_match_key)
             if member.id in match.all_player_ids:
                 raise UserFacingError("You are already in this match.")
 
@@ -350,7 +361,13 @@ class MatchService:
 
             target_team.append(member.id)
             match = await self.repository.replace(match)
-            await self._sync_result_channel_access(member.guild, match, config)
+            self._schedule_background_task(
+                self._sync_result_channel_access(member.guild, match, config),
+                event_name="match_join_result_access_sync_failed",
+                guild_id=member.guild.id,
+                match_number=match.match_number,
+                actor_id=member.id,
+            )
             self._schedule_background_task(
                 self.audit_service.log(
                     member.guild,
@@ -368,11 +385,16 @@ class MatchService:
                 match.status = MatchStatus.FULL
                 match.vote_expires_at = minutes_from_now(config.vote_timeout_minutes)
                 match = await self.repository.replace(match)
-                await self.refresh_match_message(member.guild, match)
                 match = await self.start_full_match(member.guild, match, config)
                 return MatchActionResult(match=match, message=f"Match #{match.display_id} is now full.")
 
-            await self.refresh_match_message(member.guild, match)
+            self._schedule_background_task(
+                self.refresh_match_message(member.guild, match),
+                event_name="match_join_refresh_failed",
+                guild_id=member.guild.id,
+                match_number=match.match_number,
+                actor_id=member.id,
+            )
             return MatchActionResult(match=match, message=f"Joined Team {team_number} in Match #{match.display_id}.")
 
     async def leave_open_match(
@@ -394,8 +416,20 @@ class MatchService:
                 match.team2_player_ids.remove(member.id)
             match = await self.repository.replace(match)
             config = await self.config_service.get_or_create(member.guild.id)
-            await self._sync_result_channel_access(member.guild, match, config)
-            await self.refresh_match_message(member.guild, match)
+            self._schedule_background_task(
+                self._sync_result_channel_access(member.guild, match, config),
+                event_name="match_leave_result_access_sync_failed",
+                guild_id=member.guild.id,
+                match_number=match.match_number,
+                actor_id=member.id,
+            )
+            self._schedule_background_task(
+                self.refresh_match_message(member.guild, match),
+                event_name="match_leave_refresh_failed",
+                guild_id=member.guild.id,
+                match_number=match.match_number,
+                actor_id=member.id,
+            )
             if not triggered_by_voice:
                 self._schedule_background_task(
                     self.audit_service.log(
@@ -448,12 +482,19 @@ class MatchService:
             match.vote_expires_at = None
             match.queue_expires_at = None
             if match.result_channel_id:
-                await self.post_result_note(guild, match, f"Match #{match.display_id} was canceled.\nReason: {reason}")
-                if waiting_voice_warnings:
-                    await self.post_result_note(guild, match, "\n".join(waiting_voice_warnings))
+                if config.result_channel_behavior.value != "DELETE":
+                    await self.post_result_note(guild, match, f"Match #{match.display_id} was canceled.\nReason: {reason}")
+                    if waiting_voice_warnings:
+                        await self.post_result_note(guild, match, "\n".join(waiting_voice_warnings))
                 match = await self._close_result_channel_on_match_close(guild, match, config)
             match = await self.repository.replace(match)
-            await self.refresh_match_message(guild, match)
+            self._schedule_background_task(
+                self.refresh_match_message(guild, match),
+                event_name="match_cancel_refresh_failed",
+                guild_id=guild.id,
+                match_number=match.match_number,
+                actor_id=actor_id,
+            )
             self._schedule_background_task(
                 self.audit_service.log(
                     guild,
@@ -865,8 +906,8 @@ class MatchService:
             match = await self.require_match(guild.id, match_number)
             if match.status not in {MatchStatus.OPEN, MatchStatus.FULL, MatchStatus.IN_PROGRESS, MatchStatus.VOTING}:
                 raise StateTransitionError("Room info can only be submitted for an active match.")
-            if actor.id != match.creator_id and not await self.config_service.is_staff(actor):
-                raise UserFacingError("Only the match creator or staff can submit room info.")
+            if actor.id != match.creator_id:
+                raise UserFacingError("Only the match creator can submit room info.")
 
             config = await self.config_service.get_or_create(guild.id)
             normalized_room_id = room_id.strip()
@@ -921,11 +962,23 @@ class MatchService:
                 match = await self._open_public_queue_after_room_info(guild, match, config)
                 queue_opened_now = True
             else:
-                await self.refresh_match_message(guild, match)
-                await self.post_public_note(
-                    guild,
-                    match,
-                    f"Room details for Match #{match.display_id} were updated and shared privately.",
+                self._schedule_background_task(
+                    self.refresh_match_message(guild, match),
+                    event_name="room_info_refresh_failed",
+                    guild_id=guild.id,
+                    match_number=match.match_number,
+                    actor_id=actor.id,
+                )
+                self._schedule_background_task(
+                    self.post_public_note(
+                        guild,
+                        match,
+                        f"Room details for Match #{match.display_id} were updated and shared privately.",
+                    ),
+                    event_name="room_info_public_note_failed",
+                    guild_id=guild.id,
+                    match_number=match.match_number,
+                    actor_id=actor.id,
                 )
             self.logger.info(
                 "room_info_saved",
@@ -996,6 +1049,18 @@ class MatchService:
 
     def _match_close_requested(self, match: MatchRecord) -> bool:
         return bool(match.metadata.get("close_requested"))
+
+    def _validate_join_private_match_key(
+        self,
+        match: MatchRecord,
+        private_match_key: str | None,
+    ) -> None:
+        expected_key = match.room_info.private_match_key if match.room_info else None
+        if not expected_key:
+            return
+        normalized_key = private_match_key.strip() if private_match_key else None
+        if normalized_key != expected_key:
+            raise UserFacingError("You must enter the correct private match key to join this match.")
 
     def _match_state_lock(self, guild_id: int, match_number: int) -> asyncio.Lock:
         key = (guild_id, match_number)

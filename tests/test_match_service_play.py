@@ -625,6 +625,84 @@ async def test_submit_room_info_opens_queue_and_posts_privately() -> None:
 
 
 @pytest.mark.asyncio
+async def test_submit_room_info_rejects_non_creator() -> None:
+    config = GuildConfig(
+        guild_id=123,
+        apostado_play_channel_id=10,
+        highlight_play_channel_id=20,
+        waiting_voice_channel_id=30,
+        temp_voice_category_id=40,
+        ping_here_on_match_create=False,
+    )
+    service, guild, apostado_channel, _, creator, _, _ = build_service(config)
+    other_member = FakeMember(77, guild, voice_channel_id=30)
+    guild.add_member(other_member)
+
+    created = await service.create_match(
+        apostado_channel,
+        guild,
+        creator,
+        "2v2",
+        "apos",
+        raw_command_content="!play 2v2 apos",
+    )
+
+    with pytest.raises(UserFacingError, match="Only the match creator can submit room info."):
+        await service.submit_room_info(
+            guild,
+            created.match.match_number,
+            other_member,
+            room_id="123456",
+            password="pw",
+            private_match_key="ABCD",
+        )
+
+
+@pytest.mark.asyncio
+async def test_join_team_requires_matching_private_match_key() -> None:
+    config = GuildConfig(
+        guild_id=123,
+        apostado_play_channel_id=10,
+        highlight_play_channel_id=20,
+        waiting_voice_channel_id=30,
+        temp_voice_category_id=40,
+    )
+    service, guild, _, _, creator, repository, _ = build_service(config)
+    joiner = FakeMember(77, guild, voice_channel_id=30)
+    guild.add_member(joiner)
+    result_channel = FakeTextChannel(55, guild, "#apostado-001-result")
+    guild.add_channel(result_channel)
+    match = MatchRecord(
+        guild_id=123,
+        match_number=1,
+        creator_id=creator.id,
+        mode=MatchMode.TWO_V_TWO,
+        match_type=MatchType.APOSTADO,
+        status=MatchStatus.OPEN,
+        team1_player_ids=[creator.id],
+        team2_player_ids=[],
+        source_channel_id=10,
+        result_channel_id=result_channel.id,
+        created_at=utcnow(),
+        queue_opened_at=utcnow(),
+        queue_expires_at=minutes_from_now(5),
+        room_info=MatchRoomInfo(
+            room_id="123456",
+            private_match_key="ABCD",
+            submitted_by=creator.id,
+        ),
+    )
+    repository.storage[(123, 1)] = match
+
+    with pytest.raises(UserFacingError, match="correct private match key"):
+        await service.join_team(joiner, 1, 2)
+
+    result = await service.join_team_with_key(joiner, 1, 2, private_match_key="ABCD")
+
+    assert result.match.team2_player_ids == [77]
+
+
+@pytest.mark.asyncio
 async def test_play_command_replies_with_clean_internal_error_on_unexpected_failure() -> None:
     bot = SimpleNamespace(
         match_service=SimpleNamespace(),

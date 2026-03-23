@@ -49,6 +49,7 @@ Supported type aliases:
 - `/waitingvoice add`
 - `/waitingvoice remove`
 - `/nickname sync-rank`
+- `/nickname sync-all`
 - `/announce latest-update`
 - `/season start`
 - `/season end`

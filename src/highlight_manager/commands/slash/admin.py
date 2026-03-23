@@ -952,11 +952,62 @@ def register_admin_commands(bot: "HighlightBot") -> None:
             operation=nickname_sync_operation,
         )
 
+    @nickname.command(name="sync-all", description="Rename all members using their current saved ranks")
+    async def nickname_sync_all(interaction: discord.Interaction) -> None:
+        async def nickname_sync_all_operation() -> InteractionResponsePayload:
+            config = await bot.config_service.get_or_create(interaction.guild.id)
+            summary = await bot.profile_service.sync_rank_identities_for_guild(interaction.guild, config)
+            await bot.audit_service.log(
+                interaction.guild,
+                AuditAction.RANK_UPDATED,
+                "Bulk nickname sync was requested for the full server.",
+                actor_id=interaction.user.id,
+                metadata={
+                    "processed_members": summary.processed_members,
+                    "synced_members": summary.synced_members,
+                    "already_correct": summary.already_correct,
+                    "failed_members": summary.failed_members,
+                    "skipped_due_to_hierarchy": summary.skipped_due_to_hierarchy,
+                    "skipped_due_to_missing_permission": summary.skipped_due_to_missing_permission,
+                    "skipped_other": summary.skipped_other,
+                },
+            )
+            embed = discord.Embed(
+                title="Bulk Nickname Sync",
+                description="Processed nickname sync for all non-bot members in this server.",
+                colour=discord.Colour.blurple(),
+            )
+            embed.add_field(name="Processed", value=str(summary.processed_members), inline=True)
+            embed.add_field(name="Updated", value=str(summary.synced_members), inline=True)
+            embed.add_field(name="Already Correct", value=str(summary.already_correct), inline=True)
+            embed.add_field(name="Failures", value=str(summary.failed_members), inline=True)
+            embed.add_field(name="Hierarchy Skips", value=str(summary.skipped_due_to_hierarchy), inline=True)
+            embed.add_field(
+                name="Missing Permission Skips",
+                value=str(summary.skipped_due_to_missing_permission),
+                inline=True,
+            )
+            if summary.skipped_other:
+                embed.add_field(name="Other Skips", value=str(summary.skipped_other), inline=True)
+            return InteractionResponsePayload(embed=embed)
+
+        await _run_deferred_admin_command(
+            bot,
+            interaction,
+            command_name="/nickname sync-all",
+            permission_check=lambda current: _ensure_staff(bot, current),
+            operation=nickname_sync_all_operation,
+        )
+
     @announce.command(name="latest-update", description="Post the latest Highlight Manager update in a channel")
     async def announce_latest_update(interaction: discord.Interaction, channel: discord.TextChannel) -> None:
         async def announce_operation() -> InteractionResponsePayload:
             embed = build_latest_update_announcement_embed()
-            await channel.send(embed=embed)
+            await channel.send(
+                content="@everyone",
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions(everyone=True),
+            )
             await bot.audit_service.log(
                 interaction.guild,
                 AuditAction.MATCH_NOTIFICATION,

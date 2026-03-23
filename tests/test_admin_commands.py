@@ -7,6 +7,7 @@ from discord.ext import commands
 from highlight_manager.commands.slash.admin import register_admin_commands
 from highlight_manager.models.guild_config import GuildConfig
 from highlight_manager.models.season import SeasonRecord
+from highlight_manager.services.profile_service import IdentitySyncSummary
 
 
 class FakeLogger:
@@ -83,6 +84,22 @@ class FakeAuditService:
         self.calls.append({"guild_id": guild.id, "action": action.value, "message": message, **kwargs})
 
 
+class FakeTextChannel:
+    def __init__(self) -> None:
+        self.id = 555
+        self.mention = "#updates"
+        self.sent_messages: list[dict] = []
+
+    async def send(self, content=None, embed=None, allowed_mentions=None):
+        self.sent_messages.append(
+            {
+                "content": content,
+                "embed": embed,
+                "allowed_mentions": allowed_mentions,
+            }
+        )
+
+
 class FakeSeasonService:
     def __init__(self, interaction: FakeInteraction) -> None:
         self.interaction = interaction
@@ -120,6 +137,7 @@ def build_bot(interaction: FakeInteraction, *, staff_allowed: bool = True):
     bot.profile_service = SimpleNamespace(
         adjust_points=None,
         set_points=None,
+        sync_rank_identities_for_guild=None,
     )
     bot.match_service = SimpleNamespace()
     register_admin_commands(bot)
@@ -213,3 +231,48 @@ async def test_points_add_requires_server_owner() -> None:
 
     assert interaction.response.defer_called is True
     assert interaction.followup.messages[0]["content"] == "Only the server owner can manage points."
+
+
+@pytest.mark.asyncio
+async def test_nickname_sync_all_returns_summary_embed() -> None:
+    interaction = build_interaction()
+    bot = build_bot(interaction)
+
+    async def sync_rank_identities_for_guild(guild, config):
+        return IdentitySyncSummary(
+            processed_members=12,
+            synced_members=8,
+            already_correct=3,
+            failed_members=1,
+            skipped_due_to_hierarchy=1,
+        )
+
+    bot.profile_service.sync_rank_identities_for_guild = sync_rank_identities_for_guild
+    command = get_subcommand(bot, "nickname", "sync-all")
+
+    await command.callback(interaction)
+
+    assert interaction.response.defer_called is True
+    embed = interaction.followup.messages[0]["embed"]
+    assert embed.title == "Bulk Nickname Sync"
+    fields = {field.name: field.value for field in embed.fields}
+    assert fields["Processed"] == "12"
+    assert fields["Updated"] == "8"
+    assert fields["Already Correct"] == "3"
+
+
+@pytest.mark.asyncio
+async def test_announce_latest_update_mentions_everyone() -> None:
+    interaction = build_interaction()
+    bot = build_bot(interaction)
+    command = get_subcommand(bot, "announce", "latest-update")
+    channel = FakeTextChannel()
+
+    await command.callback(interaction, channel)
+
+    assert interaction.response.defer_called is True
+    assert channel.sent_messages
+    sent = channel.sent_messages[0]
+    assert sent["content"] == "@everyone"
+    assert sent["embed"].title == "Latest Update - Highlight Manager"
+    assert sent["allowed_mentions"].everyone is True
