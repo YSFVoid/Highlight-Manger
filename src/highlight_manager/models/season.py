@@ -13,6 +13,5 @@ class SeasonRecord(AppModel):
     season_number: int
     name: str
     is_active: bool = True
-    top_player_ids: list[int] = Field(default_factory=list)
     started_at: datetime = Field(default_factory=utcnow)
     ended_at: datetime | None = None

@@ -1,75 +1,30 @@
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
-from typing import Any
 
 import discord
 
 from highlight_manager.config.logging import get_logger
 from highlight_manager.models.enums import AuditAction, MatchMode, MatchStatus, MatchType, ResultSource
-from highlight_manager.models.guild_config import GuildConfig
-from highlight_manager.models.match import MatchRecord, MatchRoomInfo
+from highlight_manager.models.match import MatchRecord
 from highlight_manager.repositories.match_repository import MatchRepository
 from highlight_manager.services.audit_service import AuditService
+from highlight_manager.services.coins_service import CoinsService
 from highlight_manager.services.config_service import ConfigService
 from highlight_manager.services.profile_service import ProfileService
 from highlight_manager.services.result_channel_service import ResultChannelService
 from highlight_manager.services.season_service import SeasonService
 from highlight_manager.services.voice_service import VoiceService
 from highlight_manager.services.vote_service import VoteService
-from highlight_manager.utils.dates import minutes_from_now, utcnow
-from highlight_manager.utils.embeds import (
-    build_captain_mvp_embed,
-    build_captain_winner_embed,
-    build_match_embed,
-    build_match_ready_embed,
-    build_match_room_setup_embed,
-    build_result_room_embed,
-    build_result_summary_embed,
-    build_room_info_embed,
-    build_vote_status_embed,
-)
-from highlight_manager.utils.exceptions import HighlightError, StateTransitionError, UserFacingError
-from highlight_manager.utils.transitions import StatusMessageTransition, TransitionFrame
+from highlight_manager.utils.dates import minutes_from_now, seconds_from_now, utcnow
+from highlight_manager.utils.embeds import build_match_embed, build_result_summary_embed, build_vote_status_embed
+from highlight_manager.utils.exceptions import StateTransitionError, UserFacingError
 
 
 @dataclass(slots=True)
 class MatchActionResult:
     match: MatchRecord
     message: str
-
-
-@dataclass(slots=True)
-class PlayRequestLogContext:
-    raw_command_content: str | None
-    raw_mode: str
-    raw_type: str
-    parsed_mode: str | None = None
-    normalized_type: str | None = None
-    current_channel_id: int | None = None
-    allowed_apostado_channel_id: int | None = None
-    allowed_highlight_channel_id: int | None = None
-    waiting_voice_id: int | None = None
-    member_current_voice_id: int | None = None
-    validation_stage: str = "parse_command"
-
-    def as_log_kwargs(self, **extra: Any) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "raw_command_content": self.raw_command_content,
-            "raw_mode": self.raw_mode,
-            "raw_type": self.raw_type,
-            "parsed_mode": self.parsed_mode,
-            "normalized_type": self.normalized_type,
-            "current_channel_id": self.current_channel_id,
-            "allowed_apostado_channel_id": self.allowed_apostado_channel_id,
-            "allowed_highlight_channel_id": self.allowed_highlight_channel_id,
-            "waiting_voice_id": self.waiting_voice_id,
-            "member_current_voice_id": self.member_current_voice_id,
-            "validation_stage": self.validation_stage,
-        }
-        payload.update(extra)
-        return payload
 
 
 class MatchService:
@@ -86,6 +41,7 @@ class MatchService:
         voice_service: VoiceService,
         result_channel_service: ResultChannelService,
         audit_service: AuditService,
+        coins_service: CoinsService | None = None,
     ) -> None:
         self.bot = bot
         self.repository = repository
@@ -96,12 +52,8 @@ class MatchService:
         self.voice_service = voice_service
         self.result_channel_service = result_channel_service
         self.audit_service = audit_service
+        self.coins_service = coins_service
         self.logger = get_logger(__name__)
-        self._registered_queue_views: set[tuple[int, int]] = set()
-        self._registered_result_views: set[tuple[int, int]] = set()
-        self._registered_room_info_views: set[tuple[int, int]] = set()
-        self._registered_captain_views: set[tuple[int, int, str]] = set()
-        self._match_locks: dict[tuple[int, int], asyncio.Lock] = {}
 
     async def create_match(
         self,
@@ -110,360 +62,83 @@ class MatchService:
         creator: discord.Member,
         mode_input: str,
         type_input: str,
-        *,
-        raw_command_content: str | None = None,
-        transition: StatusMessageTransition | None = None,
     ) -> MatchActionResult:
-        context = PlayRequestLogContext(
-            raw_command_content=raw_command_content,
-            raw_mode=mode_input,
-            raw_type=type_input,
-            current_channel_id=getattr(channel, "id", None),
-            member_current_voice_id=(
-                creator.voice.channel.id
-                if creator.voice is not None and creator.voice.channel is not None
-                else None
-            ),
-        )
-        self.logger.info(
-            "play_command_received",
+        mode = MatchMode.from_input(mode_input)
+        match_type = MatchType.from_input(type_input)
+        config = await self.config_service.ensure_match_resources(guild, await self.config_service.get_or_create(guild.id))
+        config = await self.config_service.backfill_play_channels(guild, config)
+        config = await self.config_service.validate_ready_for_matches(guild.id)
+        self._validate_play_channel(channel, config, match_type)
+        await self.profile_service.require_not_blacklisted(guild, creator.id, config)
+        self.voice_service.ensure_member_in_waiting_voice(creator, config)
+
+        match_number = await self.config_service.reserve_next_match_number(guild.id)
+        season = await self.season_service.ensure_active(guild.id)
+        match = MatchRecord(
             guild_id=guild.id,
-            user_id=creator.id,
-            **context.as_log_kwargs(validation_result="received"),
+            match_number=match_number,
+            creator_id=creator.id,
+            mode=mode,
+            match_type=match_type,
+            status=MatchStatus.OPEN,
+            team1_player_ids=[creator.id] if config.features.creator_auto_join_team1 else [],
+            source_channel_id=getattr(channel, "id", None),
+            waiting_voice_channel_id=config.waiting_voice_channel_id,
+            created_at=utcnow(),
+            queue_expires_at=minutes_from_now(config.queue_timeout_minutes),
+            season_id=season.season_number,
         )
-        match: MatchRecord | None = None
-        public_message: discord.Message | None = None
-        result_channel: discord.TextChannel | None = None
-        try:
-            context.validation_stage = "normalize_type"
-            match_type = MatchType.from_input(type_input)
-            context.normalized_type = match_type.value
-            self.logger.info(
-                "play_command_stage_passed",
-                guild_id=guild.id,
-                user_id=creator.id,
-                **context.as_log_kwargs(validation_result="passed"),
-            )
-
-            context.validation_stage = "validate_mode"
-            mode = MatchMode.from_input(mode_input)
-            context.parsed_mode = mode.value
-            self.logger.info(
-                "play_command_stage_passed",
-                guild_id=guild.id,
-                user_id=creator.id,
-                **context.as_log_kwargs(validation_result="passed"),
-            )
-            await self._update_transition(
-                transition,
-                TransitionFrame(
-                    title="Checking Room Permissions",
-                    detail="Confirming the configured play room, Waiting Voice, and current match rules.",
-                    tone="progress",
-                    step_index=2,
-                    step_total=4,
-                ),
-            )
-
-            context.validation_stage = "validate_play_channel"
-            if not isinstance(channel, discord.abc.GuildChannel):
-                raise UserFacingError("Use match commands only in the configured play room.")
-            config = await self.config_service.ensure_match_resources(
-                guild,
-                await self.config_service.get_or_create(guild.id),
-            )
-            context.allowed_apostado_channel_id = config.apostado_play_channel_id
-            context.allowed_highlight_channel_id = config.highlight_play_channel_id
-            context.waiting_voice_id = config.waiting_voice_channel_id
-            config = await self.config_service.validate_ready_for_matches(guild)
-            context.allowed_apostado_channel_id = config.apostado_play_channel_id
-            context.allowed_highlight_channel_id = config.highlight_play_channel_id
-            context.waiting_voice_id = config.waiting_voice_channel_id
-            self.config_service.validate_play_channel(channel, config, match_type)
-            self.logger.info(
-                "play_command_stage_passed",
-                guild_id=guild.id,
-                user_id=creator.id,
-                **context.as_log_kwargs(validation_result="passed"),
-            )
-
-            context.validation_stage = "validate_waiting_voice"
-            self.voice_service.ensure_member_in_waiting_voice(creator, config)
-            self.logger.info(
-                "play_command_stage_passed",
-                guild_id=guild.id,
-                user_id=creator.id,
-                **context.as_log_kwargs(validation_result="passed"),
-            )
-
-            context.validation_stage = "validate_eligibility"
-            await self.profile_service.require_not_blacklisted(guild, creator.id, config)
-            self.logger.info(
-                "play_command_stage_passed",
-                guild_id=guild.id,
-                user_id=creator.id,
-                **context.as_log_kwargs(validation_result="passed"),
-            )
-            await self._update_transition(
-                transition,
-                TransitionFrame(
-                    title="Preparing Match",
-                    detail="Reserving the match slot, securing the private result room, and saving the live match state.",
-                    tone="progress",
-                    step_index=3,
-                    step_total=4,
-                ),
-            )
-
-            context.validation_stage = "reserve_match_number"
-            match_number = await self.config_service.reserve_next_match_number(guild.id)
-
-            context.validation_stage = "ensure_active_season"
-            season = await self.season_service.ensure_active(guild.id)
-
-            context.validation_stage = "persist_match"
-            match = MatchRecord(
-                guild_id=guild.id,
-                match_number=match_number,
-                creator_id=creator.id,
-                mode=mode,
-                match_type=match_type,
-                status=MatchStatus.OPEN,
-                team1_player_ids=[creator.id] if config.features.creator_auto_join_team1 else [],
-                source_channel_id=channel.id,
-                waiting_voice_channel_id=config.waiting_voice_channel_id,
-                created_at=utcnow(),
-                queue_expires_at=None,
-                season_id=season.season_number,
-            )
-            await self.repository.create(match)
-
-            context.validation_stage = "ensure_private_result_channel"
-            try:
-                result_channel, created_result_channel = await self._ensure_result_channel(guild, match, config)
-                match.result_channel_id = result_channel.id
-                await self.result_channel_service.sync_channel_access(guild, result_channel.id, match, config)
-                if created_result_channel:
-                    await result_channel.send(
-                        embed=build_result_room_embed(match, guild),
-                        view=self._build_room_info_view(match),
-                    )
-            except discord.Forbidden as exc:
-                await self._cleanup_failed_match_creation(
-                    guild,
-                    match,
-                    public_message,
-                    context.validation_stage,
-                    preserve_public_message=transition is not None,
-                )
-                raise UserFacingError(
-                    "I could not create the private match room. Check my channel and permission settings."
-                ) from exc
-            except discord.HTTPException as exc:
-                await self._cleanup_failed_match_creation(
-                    guild,
-                    match,
-                    public_message,
-                    context.validation_stage,
-                    preserve_public_message=transition is not None,
-                )
-                raise UserFacingError(
-                    "I could not prepare the private match room right now. Please try again."
-                ) from exc
-
-            context.validation_stage = "register_room_setup_view"
-            try:
-                self.register_views(match)
-            except Exception as exc:
-                self.logger.warning(
-                    "play_command_view_registration_failed",
-                    guild_id=guild.id,
-                    user_id=creator.id,
-                    match_number=match.match_number,
-                    error=str(exc),
-                    **context.as_log_kwargs(validation_result="warning"),
-                )
-
-            context.validation_stage = "post_room_setup_message"
-            try:
-                if transition is not None:
-                    public_message = transition.message
-                    await self._update_transition(
-                        transition,
-                        TransitionFrame(
-                            title="Match Created",
-                            detail="The private room is secured and the queue setup card is ready for room info submission.",
-                            tone="success",
-                            step_index=4,
-                            step_total=4,
-                            footer="The creator can now unlock the queue from this card.",
-                        ),
-                        embed=build_match_room_setup_embed(match, guild),
-                        view=self._build_room_info_view(match),
-                    )
-                else:
-                    public_message = await channel.send(
-                        embed=build_match_room_setup_embed(match, guild),
-                        view=self._build_room_info_view(match),
-                    )
-            except discord.Forbidden as exc:
-                await self._cleanup_failed_match_creation(
-                    guild,
-                    match,
-                    public_message,
-                    context.validation_stage,
-                    preserve_public_message=transition is not None,
-                )
-                raise UserFacingError(
-                    "I could not post the room setup card in this room. Check my Send Messages and Embed Links permissions."
-                ) from exc
-            except discord.HTTPException as exc:
-                await self._cleanup_failed_match_creation(
-                    guild,
-                    match,
-                    public_message,
-                    context.validation_stage,
-                    preserve_public_message=transition is not None,
-                )
-                raise UserFacingError(
-                    "I could not publish the room setup card in this room right now. Please try again."
-                ) from exc
-
-            context.validation_stage = "persist_room_setup_message"
-            match.public_message_id = public_message.id
-            match = await self.repository.replace(match)
-
-            context.validation_stage = "audit_log"
-            try:
-                await self.audit_service.log(
-                    guild,
-                    AuditAction.MATCH_CREATED,
-                    f"{creator.mention} created Match #{match.display_id} ({match.mode.value} {match.match_type.label}).",
-                    actor_id=creator.id,
-                    metadata={"match_number": match.match_number, "type": match.match_type.value, "mode": match.mode.value},
-                )
-            except Exception as exc:
-                self.logger.warning(
-                    "play_command_audit_log_failed",
-                    guild_id=guild.id,
-                    user_id=creator.id,
-                    match_number=match.match_number,
-                    error=str(exc),
-                    **context.as_log_kwargs(validation_result="warning"),
-                )
-            self.logger.info(
-                "play_command_completed",
-                guild_id=guild.id,
-                user_id=creator.id,
-                match_number=match.match_number,
-                match_display_id=match.display_id,
-                **context.as_log_kwargs(validation_result="success"),
-            )
-            return MatchActionResult(
-                match=match,
-                message=f"Match #{match.display_id} is waiting for room info. Use the button in the setup card to open the queue.",
-            )
-        except HighlightError as exc:
-            self.logger.warning(
-                "play_command_validation_failed",
-                guild_id=guild.id,
-                user_id=creator.id,
-                error=str(exc),
-                **context.as_log_kwargs(validation_result="failed"),
-            )
-            raise
-        except Exception:
-            if match is not None and context.validation_stage in {
-                "persist_match",
-                "ensure_private_result_channel",
-                "post_room_setup_message",
-                "persist_room_setup_message",
-            }:
-                await self._cleanup_failed_match_creation(
-                    guild,
-                    match,
-                    public_message,
-                    context.validation_stage,
-                    preserve_public_message=transition is not None,
-                )
-            self.logger.exception(
-                "play_command_unexpected_failure",
-                guild_id=guild.id,
-                user_id=creator.id,
-                match_number=match.match_number if match is not None else None,
-                **context.as_log_kwargs(validation_result="error"),
-            )
-            raise
+        await self.repository.create(match)
+        self.register_views(match)
+        public_message = await channel.send(embed=build_match_embed(match, guild), view=self._build_queue_view(match))
+        match.public_message_id = public_message.id
+        match = await self.repository.replace(match)
+        await self.audit_service.log(
+            guild,
+            AuditAction.MATCH_CREATED,
+            f"{creator.mention} created Match #{match.display_id} ({match.mode.value} {match.match_type.label}).",
+            actor_id=creator.id,
+            metadata={"match_number": match.match_number, "type": match.match_type.value, "mode": match.mode.value},
+        )
+        return MatchActionResult(match=match, message=f"Created Match #{match.display_id}.")
 
     async def join_team(self, member: discord.Member, match_number: int, team_number: int) -> MatchActionResult:
-        return await self.join_team_with_key(member, match_number, team_number, private_match_key=None)
+        config = await self.config_service.ensure_match_resources(
+            member.guild,
+            await self.config_service.get_or_create(member.guild.id),
+        )
+        config = await self.config_service.validate_ready_for_matches(member.guild.id)
+        await self.profile_service.require_not_blacklisted(member.guild, member.id, config)
+        self.voice_service.ensure_member_in_waiting_voice(member, config)
+        match = await self.require_match(member.guild.id, match_number)
+        if match.status != MatchStatus.OPEN:
+            raise StateTransitionError("That match is no longer open for joining.")
+        if member.id in match.all_player_ids:
+            raise UserFacingError("You are already in this match.")
 
-    async def join_team_with_key(
-        self,
-        member: discord.Member,
-        match_number: int,
-        team_number: int,
-        *,
-        private_match_key: str | None,
-    ) -> MatchActionResult:
-        async with self._match_state_lock(member.guild.id, match_number):
-            config = await self.config_service.ensure_match_resources(
-                member.guild,
-                await self.config_service.get_or_create(member.guild.id),
-            )
-            config = await self.config_service.validate_ready_for_matches(member.guild)
-            await self.profile_service.require_not_blacklisted(member.guild, member.id, config)
-            self.voice_service.ensure_member_in_waiting_voice(member, config)
-            match = await self.require_match(member.guild.id, match_number)
-            if match.status != MatchStatus.OPEN:
-                raise StateTransitionError("That match is no longer open for joining.")
-            if match.queue_opened_at is None:
-                raise StateTransitionError("This match is still waiting for room info before players can join.")
-            self._validate_join_private_match_key(match, private_match_key)
-            if member.id in match.all_player_ids:
-                raise UserFacingError("You are already in this match.")
+        target_team = match.team1_player_ids if team_number == 1 else match.team2_player_ids
+        if len(target_team) >= match.team_size:
+            raise UserFacingError(f"Team {team_number} is already full.")
 
-            target_team = match.team1_player_ids if team_number == 1 else match.team2_player_ids
-            if len(target_team) >= match.team_size:
-                raise UserFacingError(f"Team {team_number} is already full.")
-
-            target_team.append(member.id)
+        target_team.append(member.id)
+        match = await self.repository.replace(match)
+        await self.audit_service.log(
+            member.guild,
+            AuditAction.MATCH_JOINED,
+            f"{member.mention} joined Team {team_number} for Match #{match.display_id}.",
+            actor_id=member.id,
+            metadata={"match_number": match.match_number, "team": team_number},
+        )
+        if match.is_full:
+            match.status = MatchStatus.FULL
+            match.vote_expires_at = minutes_from_now(config.vote_timeout_minutes)
             match = await self.repository.replace(match)
-            self._schedule_background_task(
-                self._sync_result_channel_access(member.guild, match, config),
-                event_name="match_join_result_access_sync_failed",
-                guild_id=member.guild.id,
-                match_number=match.match_number,
-                actor_id=member.id,
-            )
-            self._schedule_background_task(
-                self.audit_service.log(
-                    member.guild,
-                    AuditAction.MATCH_JOINED,
-                    f"{member.mention} joined Team {team_number} for Match #{match.display_id}.",
-                    actor_id=member.id,
-                    metadata={"match_number": match.match_number, "team": team_number},
-                ),
-                event_name="match_join_audit_failed",
-                guild_id=member.guild.id,
-                match_number=match.match_number,
-                actor_id=member.id,
-            )
-            if match.is_full:
-                match.status = MatchStatus.FULL
-                match.vote_expires_at = minutes_from_now(config.vote_timeout_minutes)
-                match = await self.repository.replace(match)
-                match = await self.start_full_match(member.guild, match, config)
-                return MatchActionResult(match=match, message=f"Match #{match.display_id} is now full.")
+            await self.refresh_match_message(member.guild, match)
+            await self.start_full_match(member.guild, match, config)
+            return MatchActionResult(match=match, message=f"Match #{match.display_id} is now full.")
 
-            self._schedule_background_task(
-                self.refresh_match_message(member.guild, match),
-                event_name="match_join_refresh_failed",
-                guild_id=member.guild.id,
-                match_number=match.match_number,
-                actor_id=member.id,
-            )
-            return MatchActionResult(match=match, message=f"Joined Team {team_number} in Match #{match.display_id}.")
+        await self.refresh_match_message(member.guild, match)
+        return MatchActionResult(match=match, message=f"Joined Team {team_number} in Match #{match.display_id}.")
 
     async def leave_open_match(
         self,
@@ -472,47 +147,26 @@ class MatchService:
         *,
         triggered_by_voice: bool = False,
     ) -> MatchActionResult:
-        async with self._match_state_lock(member.guild.id, match_number):
-            match = await self.require_match(member.guild.id, match_number)
-            if match.status != MatchStatus.OPEN:
-                raise StateTransitionError("You can only leave a match while it is still open.")
-            if member.id not in match.all_player_ids:
-                raise UserFacingError("You are not in that match.")
-            if member.id in match.team1_player_ids:
-                match.team1_player_ids.remove(member.id)
-            if member.id in match.team2_player_ids:
-                match.team2_player_ids.remove(member.id)
-            match = await self.repository.replace(match)
-            config = await self.config_service.get_or_create(member.guild.id)
-            self._schedule_background_task(
-                self._sync_result_channel_access(member.guild, match, config),
-                event_name="match_leave_result_access_sync_failed",
-                guild_id=member.guild.id,
-                match_number=match.match_number,
+        match = await self.require_match(member.guild.id, match_number)
+        if match.status != MatchStatus.OPEN:
+            raise StateTransitionError("You can only leave a match while it is still open.")
+        if member.id not in match.all_player_ids:
+            raise UserFacingError("You are not in that match.")
+        if member.id in match.team1_player_ids:
+            match.team1_player_ids.remove(member.id)
+        if member.id in match.team2_player_ids:
+            match.team2_player_ids.remove(member.id)
+        match = await self.repository.replace(match)
+        await self.refresh_match_message(member.guild, match)
+        if not triggered_by_voice:
+            await self.audit_service.log(
+                member.guild,
+                AuditAction.MATCH_LEFT,
+                f"{member.mention} left Match #{match.display_id}.",
                 actor_id=member.id,
+                metadata={"match_number": match.match_number},
             )
-            self._schedule_background_task(
-                self.refresh_match_message(member.guild, match),
-                event_name="match_leave_refresh_failed",
-                guild_id=member.guild.id,
-                match_number=match.match_number,
-                actor_id=member.id,
-            )
-            if not triggered_by_voice:
-                self._schedule_background_task(
-                    self.audit_service.log(
-                        member.guild,
-                        AuditAction.MATCH_LEFT,
-                        f"{member.mention} left Match #{match.display_id}.",
-                        actor_id=member.id,
-                        metadata={"match_number": match.match_number},
-                    ),
-                    event_name="match_leave_audit_failed",
-                    guild_id=member.guild.id,
-                    match_number=match.match_number,
-                    actor_id=member.id,
-                )
-            return MatchActionResult(match=match, message=f"You left Match #{match.display_id}.")
+        return MatchActionResult(match=match, message=f"You left Match #{match.display_id}.")
 
     async def cancel_match(
         self,
@@ -523,104 +177,40 @@ class MatchService:
         force: bool,
         reason: str,
     ) -> MatchActionResult:
-        async with self._match_state_lock(guild.id, match_number):
-            match = await self.require_match(guild.id, match_number)
-            if match.status in {MatchStatus.FINALIZED, MatchStatus.CANCELED, MatchStatus.EXPIRED}:
-                raise StateTransitionError("That match is already closed.")
-            if self._match_finalization_in_progress(match):
-                raise StateTransitionError("That match is already being finalized.")
-            if match.status != MatchStatus.OPEN and not force:
-                raise StateTransitionError("This match can only be canceled by admins now.")
+        match = await self.require_match(guild.id, match_number)
+        if match.status in {MatchStatus.FINALIZED, MatchStatus.CANCELED, MatchStatus.EXPIRED}:
+            raise StateTransitionError("That match is already closed.")
+        if match.status != MatchStatus.OPEN and not force:
+            raise StateTransitionError("This match can only be canceled by admins now.")
 
-            match.metadata["close_requested"] = True
-            match.metadata["close_requested_at"] = utcnow()
-            if actor_id is not None:
-                match.metadata["close_requested_by"] = actor_id
-            match = await self.repository.replace(match)
-            config = await self.config_service.get_or_create(guild.id)
-            waiting_voice_warnings = await self.voice_service.move_players_to_waiting_voice(guild, match, config)
-            await self.voice_service.cleanup_match_voices(guild, match, config=config)
-            await self.vote_service.clear_votes(match)
-            match.status = MatchStatus.CANCELED
-            match.canceled_at = utcnow()
-            match.metadata["cancel_reason"] = reason
-            match.metadata["stats_skipped_due_to_cancel"] = True
-            match.team1_voice_channel_id = None
-            match.team2_voice_channel_id = None
-            match.result_summary = None
-            match.penalties_applied = False
-            match.vote_expires_at = None
-            match.queue_expires_at = None
-            if match.result_channel_id:
-                if config.result_channel_behavior.value != "DELETE":
-                    await self.post_result_note(guild, match, f"Match #{match.display_id} was canceled.\nReason: {reason}")
-                    if waiting_voice_warnings:
-                        await self.post_result_note(guild, match, "\n".join(waiting_voice_warnings))
-                match = await self._close_result_channel_on_match_close(guild, match, config)
-            match = await self.repository.replace(match)
-            self._schedule_background_task(
-                self.refresh_match_message(guild, match),
-                event_name="match_cancel_refresh_failed",
-                guild_id=guild.id,
-                match_number=match.match_number,
-                actor_id=actor_id,
-            )
-            self._schedule_background_task(
-                self.audit_service.log(
-                    guild,
-                    AuditAction.MATCH_CANCELED,
-                    f"Match #{match.display_id} was canceled. Reason: {reason}",
-                    actor_id=actor_id,
-                    metadata={"match_number": match.match_number, "reason": reason, "force": force},
-                ),
-                event_name="match_cancel_audit_failed",
-                guild_id=guild.id,
-                match_number=match.match_number,
-                actor_id=actor_id,
-            )
-            return MatchActionResult(match=match, message=f"Canceled Match #{match.display_id}.")
+        config = await self.config_service.get_or_create(guild.id)
+        await self.voice_service.cleanup_match_voices(guild, match)
+        await self.vote_service.clear_votes(match)
+        match.status = MatchStatus.CANCELED
+        match.canceled_at = utcnow()
+        match.team1_voice_channel_id = None
+        match.team2_voice_channel_id = None
+        if match.result_channel_id:
+            await self.post_result_note(guild, match, f"Match #{match.display_id} was canceled.\nReason: {reason}")
+            if config.result_channel_behavior.value == "DELETE":
+                match.result_channel_cleanup_at = seconds_from_now(config.result_channel_delete_delay_seconds)
+            else:
+                await self.result_channel_service.finalize_channel_behavior(guild, match, config)
+        match = await self.repository.replace(match)
+        await self.refresh_match_message(guild, match)
+        await self.audit_service.log(
+            guild,
+            AuditAction.MATCH_CANCELED,
+            f"Match #{match.display_id} was canceled. Reason: {reason}",
+            actor_id=actor_id,
+            metadata={"match_number": match.match_number, "reason": reason, "force": force},
+        )
+        return MatchActionResult(match=match, message=f"Canceled Match #{match.display_id}.")
 
-    async def start_full_match(
-        self,
-        guild: discord.Guild,
-        match: MatchRecord,
-        config: GuildConfig,
-        *,
-        resume: bool = False,
-    ) -> MatchRecord:
+    async def start_full_match(self, guild: discord.Guild, match: MatchRecord, config) -> MatchRecord:
         warnings: list[str] = []
-        result_channel: discord.TextChannel | None = None
-        created_result_channel = False
-        transition: StatusMessageTransition | None = None
-        public_message = await self._resolve_public_message(guild, match)
-        if public_message is not None:
-            transition = StatusMessageTransition.attach(
-                public_message,
-                heading=f"Match #{match.display_id} Live Status",
-                default_footer="Highlight Manager is moving the match into live play.",
-            )
-            await self._update_transition(
-                transition,
-                TransitionFrame(
-                    title="Match Ready",
-                    detail="Teams are locked. Preparing team voice channels and live match access.",
-                    tone="success",
-                    step_index=1,
-                    step_total=3,
-                ),
-            )
         try:
-            await self._update_transition(
-                transition,
-                TransitionFrame(
-                    title="Preparing Team Voice Channels",
-                    detail="Creating the team rooms and locking the roster before moving players.",
-                    tone="progress",
-                    step_index=2,
-                    step_total=3,
-                ),
-            )
-            team1_channel, team2_channel = await self._ensure_match_voice_channels(guild, match, config)
+            team1_channel, team2_channel = await self.voice_service.create_match_voice_channels(guild, match, config)
             match.team1_voice_channel_id = team1_channel.id
             match.team2_voice_channel_id = team2_channel.id
             warnings.extend(
@@ -631,58 +221,40 @@ class MatchService:
             self.logger.warning("full_match_voice_setup_failed", guild_id=guild.id, match_number=match.match_number, error=str(exc))
 
         try:
-            await self._update_transition(
-                transition,
-                TransitionFrame(
-                    title="Moving Players Into Match Flow",
-                    detail="Opening the private result room, syncing access, and preparing the live match controls.",
-                    tone="progress",
-                    step_index=3,
-                    step_total=3,
-                ),
-            )
-            result_channel, created_result_channel = await self._ensure_result_channel(guild, match, config)
+            result_channel = await self.result_channel_service.create_private_channel(guild, match, config)
             match.result_channel_id = result_channel.id
-            await self.result_channel_service.sync_channel_access(guild, result_channel.id, match, config)
         except Exception as exc:
             warnings.append(f"Could not create private result channel: {exc}")
             self.logger.warning("result_channel_creation_failed", guild_id=guild.id, match_number=match.match_number, error=str(exc))
+            result_channel = None
 
         match.status = MatchStatus.IN_PROGRESS
         match.vote_expires_at = match.vote_expires_at or minutes_from_now(config.vote_timeout_minutes)
         match = await self.repository.replace(match)
         self.register_views(match)
-        if transition is not None:
-            await transition.replace(embed=build_match_embed(match, guild), view=None)
-        else:
-            await self.refresh_match_message(guild, match)
+        await self.refresh_match_message(guild, match)
 
         if result_channel is not None:
-            if created_result_channel:
-                await result_channel.send(
-                    embed=build_result_room_embed(match, guild),
-                    view=None,
-                )
-            elif resume:
-                await result_channel.send(
-                    "Bot restarted while this match was moving into play. Result controls have been restored.",
-                    view=None,
-                )
+            await result_channel.send(
+                embed=discord.Embed(
+                    title=f"Result Room | Match #{match.display_id}",
+                    description=(
+                        f"Mode: **{match.mode.value}**\n"
+                        f"Type: **{match.match_type.label}**\n"
+                        f"Vote deadline: <t:{int(match.vote_expires_at.timestamp())}:R>\n"
+                        "When the match ends, every player must submit a result vote here."
+                    ),
+                    colour=discord.Colour.orange(),
+                ),
+                view=self._build_result_view(match),
+            )
             if warnings:
                 await result_channel.send("\n".join(warnings))
-        match = await self._ensure_room_info_available_in_result_channel(guild, match)
-        match = await self._ensure_captain_result_messages(guild, match)
-        match = await self._announce_match_ready_if_needed(guild, match, config)
-        self._schedule_background_task(
-            self.audit_service.log(
-                guild,
-                AuditAction.MATCH_FULL,
-                f"Match #{match.display_id} is full and moved to active play.",
-                metadata={"match_number": match.match_number, "warnings": warnings, "resume": resume},
-            ),
-            event_name="match_full_audit_failed",
-            guild_id=guild.id,
-            match_number=match.match_number,
+        await self.audit_service.log(
+            guild,
+            AuditAction.MATCH_FULL,
+            f"Match #{match.display_id} is full and moved to active play.",
+            metadata={"match_number": match.match_number, "warnings": warnings},
         )
         return match
 
@@ -708,28 +280,9 @@ class MatchService:
             loser_mvp_id=loser_mvp_id,
         )
         if match.status == MatchStatus.IN_PROGRESS:
-            transition: StatusMessageTransition | None = None
-            public_message = await self._resolve_public_message(guild, match)
-            if public_message is not None:
-                transition = StatusMessageTransition.attach(
-                    public_message,
-                    heading=f"Match #{match.display_id} Result Flow",
-                    default_footer="Highlight Manager is opening the vote session.",
-                )
-                await self._update_transition(
-                    transition,
-                    TransitionFrame(
-                        title="Opening Vote Session",
-                        detail="The match is complete. Private vote controls are opening for the result flow now.",
-                        tone="progress",
-                    ),
-                )
             match.status = MatchStatus.VOTING
             match = await self.repository.replace(match)
-            if transition is not None:
-                await transition.replace(embed=build_match_embed(match, guild), view=None)
-            else:
-                await self.refresh_match_message(guild, match)
+            await self.refresh_match_message(guild, match)
 
         votes = await self.vote_service.get_votes(match)
         await self.post_vote_status(guild, match, votes)
@@ -769,149 +322,85 @@ class MatchService:
         actor_id: int | None = None,
         notes: str | None = None,
     ) -> MatchRecord:
-        async with self._match_state_lock(guild.id, match_number):
-            match = await self.require_match(guild.id, match_number)
-            if match.status in {MatchStatus.FINALIZED, MatchStatus.CANCELED, MatchStatus.EXPIRED}:
-                raise StateTransitionError("That match is already closed.")
-            if self._match_close_requested(match):
-                raise StateTransitionError("That match is already being closed.")
-            if self._match_finalization_in_progress(match):
-                raise StateTransitionError("That match is already being finalized.")
-            self.vote_service.validate_result_selection(
-                match,
-                winner_team=winner_team,
-                winner_mvp_id=winner_mvp_id,
-                loser_mvp_id=loser_mvp_id,
-            )
-            config = await self.config_service.get_or_create(guild.id)
-            match.metadata["finalize_in_progress"] = True
-            match.metadata["finalize_requested_at"] = utcnow()
-            if actor_id is not None:
-                match.metadata["finalize_requested_by"] = actor_id
-            match = await self.repository.replace(match)
-            waiting_voice_warnings: list[str] = []
-            try:
-                waiting_voice_warnings = await self.voice_service.move_players_to_waiting_voice(guild, match, config)
-                await self.voice_service.cleanup_match_voices(guild, match, config=config)
-                match.team1_voice_channel_id = None
-                match.team2_voice_channel_id = None
-                match = await self.repository.replace(match)
-                summary = await self.profile_service.apply_match_outcome(
-                    guild,
-                    match,
-                    config,
-                    winner_team=winner_team,
-                    winner_mvp_id=winner_mvp_id,
-                    loser_mvp_id=loser_mvp_id,
-                    source=source,
-                    notes=notes,
-                )
-                match.status = MatchStatus.FINALIZED
-                match.finalized_at = utcnow()
-                match.penalties_applied = source == ResultSource.VOTE_TIMEOUT
-                match.result_summary = summary
-                match.metadata.pop("finalize_in_progress", None)
-                match.metadata.pop("finalize_requested_at", None)
-                match.metadata.pop("finalize_requested_by", None)
-                match = await self.repository.replace(match)
-                await self.post_result_summary(guild, match)
-                if waiting_voice_warnings and match.result_channel_id:
-                    await self.post_result_note(guild, match, "\n".join(waiting_voice_warnings))
-                match = await self._close_result_channel_on_match_close(guild, match, config)
-                match = await self.repository.replace(match)
-                await self.refresh_match_message(guild, match)
-            except Exception:
-                await self._clear_finalize_in_progress(match)
-                raise
-            self._schedule_background_task(
-                self.audit_service.log(
-                    guild,
-                    AuditAction.MATCH_FINALIZED,
-                    f"Match #{match.display_id} finalized.",
-                    actor_id=actor_id,
-                    metadata={
-                        "match_number": match.match_number,
-                        "source": source.value,
-                        "winner_team": winner_team,
-                        "winner_mvp_id": winner_mvp_id,
-                        "loser_mvp_id": loser_mvp_id,
-                    },
-                ),
-                event_name="match_finalize_audit_failed",
-                guild_id=guild.id,
-                match_number=match.match_number,
-                actor_id=actor_id,
-            )
-            self._schedule_background_task(
-                self.profile_service.sync_rank_identities_for_guild(guild, config),
-                event_name="match_finalize_rank_identity_sync_failed",
-                guild_id=guild.id,
-                match_number=match.match_number,
-            )
-            return match
+        match = await self.require_match(guild.id, match_number)
+        if match.status in {MatchStatus.FINALIZED, MatchStatus.CANCELED, MatchStatus.EXPIRED}:
+            raise StateTransitionError("That match is already closed.")
+        self.vote_service.validate_result_selection(
+            match,
+            winner_team=winner_team,
+            winner_mvp_id=winner_mvp_id,
+            loser_mvp_id=loser_mvp_id,
+        )
+        config = await self.config_service.get_or_create(guild.id)
+        summary = await self.profile_service.apply_match_outcome(
+            guild,
+            match,
+            config,
+            winner_team=winner_team,
+            winner_mvp_id=winner_mvp_id,
+            loser_mvp_id=loser_mvp_id,
+            source=source,
+            notes=notes,
+        )
+        if self.coins_service is not None and not match.coin_rewards_applied:
+            await self.coins_service.award_regular_match_rewards(guild, match, summary)
+            match.coin_rewards_applied = True
+        await self.voice_service.cleanup_match_voices(guild, match)
+        match.status = MatchStatus.FINALIZED
+        match.finalized_at = utcnow()
+        match.team1_voice_channel_id = None
+        match.team2_voice_channel_id = None
+        match.penalties_applied = source == ResultSource.VOTE_TIMEOUT
+        match.result_summary = summary
+        if match.result_channel_id and config.result_channel_behavior.value == "DELETE":
+            match.result_channel_cleanup_at = seconds_from_now(config.result_channel_delete_delay_seconds)
+        match = await self.repository.replace(match)
+        await self.refresh_match_message(guild, match)
+        await self.post_result_summary(guild, match)
+        await self.result_channel_service.finalize_channel_behavior(guild, match, config)
+        await self.audit_service.log(
+            guild,
+            AuditAction.MATCH_FINALIZED,
+            f"Match #{match.display_id} finalized.",
+            actor_id=actor_id,
+            metadata={
+                "match_number": match.match_number,
+                "source": source.value,
+                "winner_team": winner_team,
+                "winner_mvp_id": winner_mvp_id,
+                "loser_mvp_id": loser_mvp_id,
+            },
+        )
+        return match
 
     async def expire_vote_timeout(self, guild: discord.Guild, match: MatchRecord) -> MatchRecord:
-        async with self._match_state_lock(guild.id, match.match_number):
-            latest_match = await self.require_match(guild.id, match.match_number)
-            if latest_match.status in {MatchStatus.FINALIZED, MatchStatus.CANCELED, MatchStatus.EXPIRED}:
-                return latest_match
-            if self._match_close_requested(latest_match):
-                raise StateTransitionError("That match is already being closed.")
-            if self._match_finalization_in_progress(latest_match):
-                raise StateTransitionError("That match is already being finalized.")
-            match = latest_match
-            config = await self.config_service.get_or_create(guild.id)
-            match.metadata["finalize_in_progress"] = True
-            match.metadata["finalize_requested_at"] = utcnow()
-            match = await self.repository.replace(match)
-            waiting_voice_warnings: list[str] = []
-            try:
-                waiting_voice_warnings = await self.voice_service.move_players_to_waiting_voice(guild, match, config)
-                await self.voice_service.cleanup_match_voices(guild, match, config=config)
-                match.team1_voice_channel_id = None
-                match.team2_voice_channel_id = None
-                match = await self.repository.replace(match)
-                summary = await self.profile_service.apply_vote_timeout_penalty(
-                    guild,
-                    match,
-                    config,
-                    notes="Voting timed out before a valid consensus or force result was recorded.",
-                )
-                match.status = MatchStatus.EXPIRED
-                match.penalties_applied = True
-                match.finalized_at = utcnow()
-                match.result_summary = summary
-                match.metadata.pop("finalize_in_progress", None)
-                match.metadata.pop("finalize_requested_at", None)
-                match.metadata.pop("finalize_requested_by", None)
-                match = await self.repository.replace(match)
-                await self.post_result_summary(guild, match)
-                if waiting_voice_warnings and match.result_channel_id:
-                    await self.post_result_note(guild, match, "\n".join(waiting_voice_warnings))
-                match = await self._close_result_channel_on_match_close(guild, match, config)
-                match = await self.repository.replace(match)
-                await self.refresh_match_message(guild, match)
-            except Exception:
-                await self._clear_finalize_in_progress(match)
-                raise
-            self._schedule_background_task(
-                self.audit_service.log(
-                    guild,
-                    AuditAction.MATCH_EXPIRED,
-                    f"Match #{match.display_id} expired because voting timed out.",
-                    metadata={"match_number": match.match_number},
-                ),
-                event_name="match_expire_audit_failed",
-                guild_id=guild.id,
-                match_number=match.match_number,
-            )
-            self._schedule_background_task(
-                self.profile_service.sync_rank_identities_for_guild(guild, config),
-                event_name="match_expire_rank_identity_sync_failed",
-                guild_id=guild.id,
-                match_number=match.match_number,
-            )
-            return match
+        config = await self.config_service.get_or_create(guild.id)
+        summary = await self.profile_service.apply_vote_timeout_penalty(
+            guild,
+            match,
+            config,
+            notes="Voting timed out before a valid consensus or force result was recorded.",
+        )
+        await self.voice_service.cleanup_match_voices(guild, match)
+        match.status = MatchStatus.EXPIRED
+        match.penalties_applied = True
+        match.team1_voice_channel_id = None
+        match.team2_voice_channel_id = None
+        match.finalized_at = utcnow()
+        match.result_summary = summary
+        if match.result_channel_id and config.result_channel_behavior.value == "DELETE":
+            match.result_channel_cleanup_at = seconds_from_now(config.result_channel_delete_delay_seconds)
+        match = await self.repository.replace(match)
+        await self.refresh_match_message(guild, match)
+        await self.post_result_summary(guild, match)
+        await self.result_channel_service.finalize_channel_behavior(guild, match, config)
+        await self.audit_service.log(
+            guild,
+            AuditAction.MATCH_EXPIRED,
+            f"Match #{match.display_id} expired because voting timed out.",
+            metadata={"match_number": match.match_number},
+        )
+        return match
 
     async def process_due_events(self) -> None:
         now = utcnow()
@@ -943,14 +432,7 @@ class MatchService:
             guild = self.bot.get_guild(match.guild_id)
             if guild is None or not match.result_channel_id:
                 continue
-            config = await self.config_service.get_or_create(guild.id)
             await self.result_channel_service.delete_channel(guild, match.result_channel_id, match.match_number)
-            await self.result_channel_service.delete_match_channels(
-                guild,
-                match,
-                config,
-                keep_channel_ids=set(),
-            )
             match.result_channel_id = None
             match.result_channel_cleanup_at = None
             await self.repository.replace(match)
@@ -964,86 +446,33 @@ class MatchService:
             config = await self.config_service.get_or_create(guild.id)
             self.register_views(match)
             if match.status == MatchStatus.FULL:
-                async with self._match_state_lock(guild.id, match.match_number):
-                    latest_match = await self.require_match(guild.id, match.match_number)
-                    if latest_match.status == MatchStatus.FULL:
-                        await self.start_full_match(guild, latest_match, config, resume=True)
-                continue
-            if match.team1_voice_channel_id and not isinstance(guild.get_channel(match.team1_voice_channel_id), discord.VoiceChannel):
-                match.team1_voice_channel_id = None
-            if match.team2_voice_channel_id and not isinstance(guild.get_channel(match.team2_voice_channel_id), discord.VoiceChannel):
-                match.team2_voice_channel_id = None
-            if match.status == MatchStatus.OPEN:
+                match.status = MatchStatus.IN_PROGRESS
+                match.vote_expires_at = match.vote_expires_at or minutes_from_now(config.vote_timeout_minutes)
+                match = await self.repository.replace(match)
                 await self.refresh_match_message(guild, match)
-                continue
-            result_channel: discord.TextChannel | None = None
-            if match.result_channel_id:
+            if match.status in {MatchStatus.IN_PROGRESS, MatchStatus.VOTING} and match.result_channel_id:
                 channel = guild.get_channel(match.result_channel_id)
                 if isinstance(channel, discord.TextChannel):
-                    result_channel = channel
-                else:
-                    match.result_channel_id = None
-            if result_channel is None:
-                try:
-                    result_channel, _ = await self._ensure_result_channel(guild, match, config)
-                    match.result_channel_id = result_channel.id
-                except Exception as exc:
-                    self.logger.warning(
-                        "active_match_result_recovery_failed",
-                        guild_id=guild.id,
-                        match_number=match.match_number,
-                        error=str(exc),
-                    )
-            match = await self.repository.replace(match)
-            await self._sync_result_channel_access(guild, match, config)
-            await self.refresh_match_message(guild, match)
-            if match.status == MatchStatus.OPEN and match.room_info is not None and match.queue_opened_at is None:
-                try:
-                    match = await self._open_public_queue_after_room_info(guild, match, config)
-                except Exception as exc:
-                    self.logger.warning(
-                        "pending_queue_open_recovery_failed",
-                        guild_id=guild.id,
-                        match_number=match.match_number,
-                        error=str(exc),
-                    )
-            if match.status in {MatchStatus.IN_PROGRESS, MatchStatus.VOTING}:
-                match = await self._announce_match_ready_if_needed(guild, match, config)
-                match = await self._ensure_captain_result_messages(guild, match)
-            match = await self._ensure_room_info_available_in_result_channel(guild, match)
-            if result_channel is not None:
-                await result_channel.send("Bot restarted. Result selection controls have been restored.")
-
-    async def cleanup_stale_resources(self) -> None:
-        closed_statuses = [MatchStatus.FINALIZED, MatchStatus.CANCELED, MatchStatus.EXPIRED]
-        for match in await self.repository.list_active(statuses=closed_statuses):
-            guild = self.bot.get_guild(match.guild_id)
-            if guild is None:
-                continue
-            config = await self.config_service.get_or_create(guild.id)
-            changed = False
-            if match.team1_voice_channel_id or match.team2_voice_channel_id:
-                await self.voice_service.cleanup_match_voices(guild, match, config=config)
-                match.team1_voice_channel_id = None
-                match.team2_voice_channel_id = None
-                changed = True
-            if config.result_channel_behavior.value == "DELETE" and match.result_channel_id:
-                match = await self._close_result_channel_on_match_close(guild, match, config)
-                changed = True
-            elif match.result_channel_id:
-                await self.result_channel_service.delete_match_channels(
-                    guild,
-                    match,
-                    config,
-                    keep_channel_ids={match.result_channel_id},
-                )
-            if changed:
-                await self.repository.replace(match)
+                    await channel.send("Bot restarted. Voting controls have been restored.", view=self._build_result_view(match))
 
     async def handle_waiting_voice_departure(self, member: discord.Member) -> None:
         open_matches = await self.repository.find_open_matches_for_player(member.guild.id, member.id)
         for match in open_matches:
             try:
+                if member.id == match.creator_id:
+                    await self.cancel_match(
+                        member.guild,
+                        match.match_number,
+                        actor_id=None,
+                        force=True,
+                        reason="Creator left the Waiting Voice before the match started.",
+                    )
+                    await self.post_public_note(
+                        member.guild,
+                        match,
+                        f"Match #{match.display_id} was canceled because the creator left the Waiting Voice.",
+                    )
+                    continue
                 await self.leave_open_match(member, match.match_number, triggered_by_voice=True)
                 await self.post_public_note(member.guild, match, f"{member.mention} was removed after leaving the Waiting Voice.")
             except Exception as exc:
@@ -1052,168 +481,34 @@ class MatchService:
     async def force_close(self, guild: discord.Guild, match_number: int, actor_id: int | None, reason: str) -> MatchActionResult:
         return await self.cancel_match(guild, match_number, actor_id=actor_id, force=True, reason=reason)
 
-    async def submit_room_info(
-        self,
-        guild: discord.Guild,
-        match_number: int,
-        actor: discord.Member,
-        *,
-        room_id: str,
-        password: str | None,
-        private_match_key: str | None,
-    ) -> MatchActionResult:
-        async with self._match_state_lock(guild.id, match_number):
-            match = await self.require_match(guild.id, match_number)
-            if match.status not in {MatchStatus.OPEN, MatchStatus.FULL, MatchStatus.IN_PROGRESS, MatchStatus.VOTING}:
-                raise StateTransitionError("Room info can only be submitted for an active match.")
-            if actor.id != match.creator_id:
-                raise UserFacingError("Only the match creator can submit room info.")
+    async def cancel_result_room_match(self, guild: discord.Guild, match_number: int, actor: discord.Member) -> MatchActionResult:
+        match = await self.require_match(guild.id, match_number)
+        if match.status in {MatchStatus.FINALIZED, MatchStatus.CANCELED, MatchStatus.EXPIRED}:
+            raise StateTransitionError("That match is already closed.")
+        is_staff = await self.config_service.is_staff(actor)
+        if actor.id != match.creator_id and not is_staff:
+            raise UserFacingError("Only the creator or staff can cancel this match.")
 
-            config = await self.config_service.get_or_create(guild.id)
-            normalized_room_id = room_id.strip()
-            normalized_password = password.strip() if password else None
-            normalized_key = private_match_key.strip() if private_match_key else None
-            if not normalized_room_id.isdigit():
-                self.logger.warning(
-                    "room_info_validation_failed",
-                    guild_id=guild.id,
-                    match_number=match.match_number,
-                    actor_id=actor.id,
-                    validation_error="room_id_not_numeric",
-                )
-                raise UserFacingError("Room ID must contain numbers only.")
-            if config.private_match_key_required and not normalized_key:
-                self.logger.warning(
-                    "room_info_validation_failed",
-                    guild_id=guild.id,
-                    match_number=match.match_number,
-                    actor_id=actor.id,
-                    validation_error="missing_private_match_key",
-                )
-                raise UserFacingError("Private Match Key is required before this room info can be saved.")
+        reason: str
+        if is_staff:
+            reason = "Canceled by staff from the result room."
+        else:
+            votes = await self.vote_service.get_votes(match)
+            if votes:
+                raise StateTransitionError("Once result voting starts, only staff can cancel this match.")
+            if match.status not in {MatchStatus.IN_PROGRESS, MatchStatus.VOTING, MatchStatus.FULL}:
+                raise StateTransitionError("The creator can only cancel while the match is active.")
+            reason = "Canceled by the creator before result voting started."
 
-            transition: StatusMessageTransition | None = None
-            public_message = await self._resolve_public_message(guild, match)
-            if public_message is not None:
-                transition = StatusMessageTransition.attach(
-                    public_message,
-                    heading=f"Match #{match.display_id} Room Access",
-                    default_footer="Highlight Manager is securing room access before the queue opens.",
-                )
-                await self._update_transition(
-                    transition,
-                    TransitionFrame(
-                        title="Room Info Received",
-                        detail="Validating the submitted room access so it can be shared safely with players.",
-                        tone="progress",
-                        step_index=1,
-                        step_total=3,
-                    ),
-                )
-
-            was_edit = match.room_info is not None
-            if was_edit and match.room_info is not None:
-                room_info = match.room_info.model_copy(
-                    update={
-                        "room_id": normalized_room_id,
-                        "password": normalized_password or None,
-                        "private_match_key": normalized_key or None,
-                        "updated_by": actor.id,
-                        "updated_at": utcnow(),
-                    }
-                )
-            else:
-                room_info = MatchRoomInfo(
-                    room_id=normalized_room_id,
-                    password=normalized_password or None,
-                    private_match_key=normalized_key or None,
-                    submitted_by=actor.id,
-                )
-            match.room_info = room_info
-            if not match.result_channel_id:
-                result_channel, _ = await self._ensure_result_channel(guild, match, config)
-                match.result_channel_id = result_channel.id
-            await self._sync_result_channel_access(guild, match, config)
-            match = await self.repository.replace(match)
-            await self._update_transition(
-                transition,
-                TransitionFrame(
-                    title="Sharing With Players",
-                    detail="Posting the private room details inside the match room and syncing participant access.",
-                    tone="info",
-                    step_index=2,
-                    step_total=3,
-                ),
-            )
-            match = await self._ensure_room_info_available_in_result_channel(guild, match, force_post=True)
-            queue_opened_now = False
-            if match.queue_opened_at is None:
-                match = await self._open_public_queue_after_room_info(guild, match, config, transition=transition)
-                queue_opened_now = True
-            else:
-                await self._update_transition(
-                    transition,
-                    TransitionFrame(
-                        title="Room Ready",
-                        detail="The queue stays live while the updated room access remains private to match players.",
-                        tone="success",
-                        step_index=3,
-                        step_total=3,
-                        footer="Room access updates stay private inside the match room.",
-                    ),
-                    embed=build_match_embed(match, guild),
-                    view=self._build_queue_view(match) if match.status == MatchStatus.OPEN else None,
-                )
-                self._schedule_background_task(
-                    self.post_public_note(
-                        guild,
-                        match,
-                        f"Room details for Match #{match.display_id} were updated and shared privately.",
-                    ),
-                    event_name="room_info_public_note_failed",
-                    guild_id=guild.id,
-                    match_number=match.match_number,
-                    actor_id=actor.id,
-                )
-            self.logger.info(
-                "room_info_saved",
-                guild_id=guild.id,
-                match_number=match.match_number,
-                actor_id=actor.id,
-                edited=was_edit,
-                queue_opened_now=queue_opened_now,
-                has_password=bool(room_info.password),
-                has_private_match_key=bool(room_info.private_match_key),
-            )
-            self._schedule_background_task(
-                self.audit_service.log(
-                    guild,
-                    AuditAction.ROOM_INFO_UPDATED,
-                    (
-                        f"{actor.mention} {'updated' if was_edit else 'submitted'} room info "
-                        f"for Match #{match.display_id}."
-                    ),
-                    actor_id=actor.id,
-                    metadata={
-                        "match_number": match.match_number,
-                        "edited": was_edit,
-                        "has_password": bool(room_info.password),
-                        "private_match_key_provided": bool(room_info.private_match_key),
-                    },
-                ),
-                event_name="room_info_audit_failed",
-                guild_id=guild.id,
-                match_number=match.match_number,
-                actor_id=actor.id,
-            )
-            return MatchActionResult(
-                match=match,
-                message=(
-                    f"Room info saved and Match #{match.display_id} is now open for players."
-                    if queue_opened_now
-                    else f"Room info {'updated' if was_edit else 'saved'} for Match #{match.display_id}."
-                ),
-            )
+        result = await self.cancel_match(
+            guild,
+            match_number,
+            actor_id=actor.id,
+            force=True,
+            reason=reason,
+        )
+        await self.post_public_note(guild, result.match, f"Match #{result.match.display_id} was canceled. Reason: {reason}")
+        return result
 
     async def require_match(self, guild_id: int, match_number: int) -> MatchRecord:
         match = await self.repository.get(guild_id, match_number)
@@ -1221,1073 +516,70 @@ class MatchService:
             raise UserFacingError(f"Match #{match_number:03d} was not found.")
         return match
 
-    def _captain_flow(self, match: MatchRecord) -> dict[str, Any]:
-        workflow = match.metadata.get("captain_result_flow")
-        if not isinstance(workflow, dict):
-            workflow = {
-                "team2_captain_id": match.team2_player_ids[0] if match.team2_player_ids else None,
-                "winner_votes": {},
-                "winner_team": None,
-                "loser_team": None,
-                "winner_mvp_id": None,
-                "loser_mvp_id": None,
-                "winner_prompt_message_id": None,
-                "winner_mvp_prompt_message_id": None,
-                "loser_mvp_prompt_message_id": None,
-            }
-            match.metadata["captain_result_flow"] = workflow
-        if workflow.get("team2_captain_id") is None and match.team2_player_ids:
-            workflow["team2_captain_id"] = match.team2_player_ids[0]
-        if not isinstance(workflow.get("winner_votes"), dict):
-            workflow["winner_votes"] = {}
-        return workflow
-
-    def _match_close_requested(self, match: MatchRecord) -> bool:
-        return bool(match.metadata.get("close_requested"))
-
-    def _match_finalization_in_progress(self, match: MatchRecord) -> bool:
-        return bool(match.metadata.get("finalize_in_progress"))
-
-    async def _clear_finalize_in_progress(self, match: MatchRecord) -> None:
-        if not self._match_finalization_in_progress(match):
-            return
-        match.metadata.pop("finalize_in_progress", None)
-        match.metadata.pop("finalize_requested_at", None)
-        match.metadata.pop("finalize_requested_by", None)
-        try:
-            await self.repository.replace(match)
-        except Exception as exc:
-            self.logger.warning(
-                "match_finalize_in_progress_clear_failed",
-                guild_id=match.guild_id,
-                match_number=match.match_number,
-                error=str(exc),
-            )
-
-    def _validate_join_private_match_key(
-        self,
-        match: MatchRecord,
-        private_match_key: str | None,
-    ) -> None:
-        expected_key = match.room_info.private_match_key if match.room_info else None
-        if not expected_key:
-            return
-        normalized_key = private_match_key.strip() if private_match_key else None
-        if normalized_key != expected_key:
-            raise UserFacingError("You must enter the correct private match key to join this match.")
-
-    def _match_state_lock(self, guild_id: int, match_number: int) -> asyncio.Lock:
-        key = (guild_id, match_number)
-        lock = self._match_locks.get(key)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._match_locks[key] = lock
-        return lock
-
-    def _team2_captain_id(self, match: MatchRecord) -> int | None:
-        workflow = self._captain_flow(match)
-        return workflow.get("team2_captain_id")
-
-    def _winner_captain_id(self, match: MatchRecord) -> int | None:
-        workflow = self._captain_flow(match)
-        winner_team = workflow.get("winner_team")
-        if winner_team == 1:
-            return match.creator_id
-        if winner_team == 2:
-            return workflow.get("team2_captain_id")
-        return None
-
-    def _loser_captain_id(self, match: MatchRecord) -> int | None:
-        workflow = self._captain_flow(match)
-        loser_team = workflow.get("loser_team")
-        if loser_team == 1:
-            return match.creator_id
-        if loser_team == 2:
-            return workflow.get("team2_captain_id")
-        return None
-
-    def _eligible_winner_voter_ids(self, match: MatchRecord) -> list[int]:
-        voter_ids = [match.creator_id]
-        team2_captain_id = self._team2_captain_id(match)
-        if team2_captain_id and team2_captain_id not in voter_ids:
-            voter_ids.append(team2_captain_id)
-        return voter_ids
-
-    def _captain_mvp_prompts_created(self, match: MatchRecord) -> bool:
-        workflow = self._captain_flow(match)
-        return bool(
-            workflow.get("winner_mvp_prompt_message_id")
-            and workflow.get("loser_mvp_prompt_message_id")
-        )
-
-    def _schedule_background_task(
-        self,
-        coro,
-        *,
-        event_name: str,
-        **context: Any,
-    ) -> None:
-        task = asyncio.create_task(coro)
-
-        def _done(completed: asyncio.Task) -> None:
-            try:
-                completed.result()
-            except Exception as exc:
-                self.logger.warning(event_name, error=str(exc), **context)
-
-        task.add_done_callback(_done)
-
-    async def _update_transition(
-        self,
-        transition: StatusMessageTransition | None,
-        frame: TransitionFrame,
-        *,
-        embed: discord.Embed | None = None,
-        view: discord.ui.View | None = None,
-        content: str | None = None,
-    ) -> None:
-        if transition is None:
-            return
-        if embed is None:
-            await transition.step(frame, content=content, view=view)
-            return
-        await transition.step(frame, content=content, view=view)
-        await transition.replace(embed=embed, content=content, view=view)
-
-    async def _persist_captain_flow(
-        self,
-        match: MatchRecord,
-        workflow: dict[str, Any],
-        *,
-        status: MatchStatus | None = None,
-    ) -> MatchRecord:
-        match.metadata["captain_result_flow"] = workflow
-        updates: dict[str, Any] = {
-            "metadata.captain_result_flow": workflow,
-        }
-        if status is not None:
-            match.status = status
-            updates["status"] = status.value
-        set_fields = getattr(self.repository, "set_fields", None)
-        if callable(set_fields):
-            updated = await set_fields(match.guild_id, match.match_number, updates)
-            if updated is not None:
-                return updated
-        return await self.repository.replace(match)
-
-    async def record_captain_winner_vote(
-        self,
-        guild: discord.Guild,
-        match_number: int,
-        actor: discord.Member,
-        *,
-        winner_team: int,
-    ) -> MatchActionResult:
-        match = await self.require_match(guild.id, match_number)
-        if match.status not in {MatchStatus.IN_PROGRESS, MatchStatus.VOTING, MatchStatus.FULL}:
-            raise StateTransitionError("Winner selection is not available for that match.")
-        if self._match_close_requested(match):
-            raise StateTransitionError("That match is already being closed.")
-        if self._match_finalization_in_progress(match):
-            raise StateTransitionError("That match is already being finalized.")
-
-        workflow = self._captain_flow(match)
-        eligible_voter_ids = self._eligible_winner_voter_ids(match)
-        if actor.id not in eligible_voter_ids:
-            raise UserFacingError("Only the match creator and the first Team 2 player can choose the winner.")
-
-        workflow["winner_votes"][str(actor.id)] = winner_team
-        match = await self._persist_captain_flow(match, workflow, status=MatchStatus.VOTING)
-        self.logger.info(
-            "captain_winner_vote_recorded",
-            guild_id=guild.id,
-            match_number=match.match_number,
-            actor_id=actor.id,
-            winner_team=winner_team,
-        )
-        self._schedule_background_task(
-            self.audit_service.log(
-                guild,
-                AuditAction.MATCH_NOTIFICATION,
-                f"{actor.mention} selected Team {winner_team} as the winner for Match #{match.display_id}.",
-                actor_id=actor.id,
-                metadata={"match_number": match.match_number, "winner_team": winner_team},
-            ),
-            event_name="captain_winner_vote_audit_failed",
-            guild_id=guild.id,
-            match_number=match.match_number,
-            actor_id=actor.id,
-        )
-
-        votes = {int(user_id): int(team) for user_id, team in workflow["winner_votes"].items()}
-        if len(votes) < len(eligible_voter_ids):
-            return MatchActionResult(
-                match=match,
-                message="Winner vote saved. Waiting for the other captain to choose the winner team.",
-            )
-
-        selected_teams = set(votes.values())
-        if len(selected_teams) != 1:
-            return MatchActionResult(
-                match=match,
-                message="Winner votes do not match yet. One of the captains needs to update the selection.",
-            )
-
-        locked_winner_team = selected_teams.pop()
-        workflow["winner_team"] = locked_winner_team
-        workflow["loser_team"] = 2 if locked_winner_team == 1 else 1
-        match = await self._persist_captain_flow(match, workflow)
-        self.logger.info(
-            "captain_winner_lock_persisted",
-            guild_id=guild.id,
-            match_number=match.match_number,
-            winner_team=workflow["winner_team"],
-            loser_team=workflow["loser_team"],
-        )
-        match = await self._ensure_captain_result_messages(guild, match)
-        if not self._captain_mvp_prompts_created(match):
-            self.logger.warning(
-                "captain_mvp_prompts_missing_after_winner_lock",
-                guild_id=guild.id,
-                match_number=match.match_number,
-                actor_id=actor.id,
-                workflow=match.metadata.get("captain_result_flow"),
-            )
-            raise UserFacingError(
-                "I could not open the MVP selection prompts right now. Please try the winner vote again or ask staff to reopen the result flow."
-            )
-
-        return MatchActionResult(
-            match=match,
-            message="Winner team locked. Winner MVP and loser MVP selection is now open.",
-        )
-
-    async def record_captain_mvp_choice(
-        self,
-        guild: discord.Guild,
-        match_number: int,
-        actor: discord.Member,
-        *,
-        selection_kind: str,
-        player_id: int,
-    ) -> MatchActionResult:
-        match = await self.require_match(guild.id, match_number)
-        if match.status not in {MatchStatus.IN_PROGRESS, MatchStatus.VOTING, MatchStatus.FULL}:
-            raise StateTransitionError("MVP selection is not available for that match.")
-        if self._match_close_requested(match):
-            raise StateTransitionError("That match is already being closed.")
-        if self._match_finalization_in_progress(match):
-            raise StateTransitionError("That match is already being finalized.")
-
-        workflow = self._captain_flow(match)
-        winner_team = workflow.get("winner_team")
-        loser_team = workflow.get("loser_team")
-        if winner_team not in {1, 2} or loser_team not in {1, 2}:
-            raise UserFacingError("Choose the winner team first.")
-
-        if selection_kind == "winner":
-            authorized_actor_id = self._winner_captain_id(match)
-            valid_team_ids = set(match.team1_player_ids if winner_team == 1 else match.team2_player_ids)
-            if actor.id != authorized_actor_id:
-                raise UserFacingError("Only the winning team captain can choose winner MVP.")
-            if player_id not in valid_team_ids:
-                raise UserFacingError("Winner MVP must be selected from the winning team.")
-            workflow["winner_mvp_id"] = player_id
-        else:
-            authorized_actor_id = self._loser_captain_id(match)
-            valid_team_ids = set(match.team1_player_ids if loser_team == 1 else match.team2_player_ids)
-            if actor.id != authorized_actor_id:
-                raise UserFacingError("Only the losing team captain can choose loser MVP.")
-            if player_id not in valid_team_ids:
-                raise UserFacingError("Loser MVP must be selected from the losing team.")
-            workflow["loser_mvp_id"] = player_id
-
-        match = await self._persist_captain_flow(match, workflow)
-        self.logger.info(
-            "captain_mvp_selection_recorded",
-            guild_id=guild.id,
-            match_number=match.match_number,
-            actor_id=actor.id,
-            selection_kind=selection_kind,
-            player_id=player_id,
-        )
-        self._schedule_background_task(
-            self.audit_service.log(
-                guild,
-                AuditAction.MATCH_NOTIFICATION,
-                f"{actor.mention} selected <@{player_id}> as the {selection_kind} MVP for Match #{match.display_id}.",
-                actor_id=actor.id,
-                metadata={"match_number": match.match_number, "selection_kind": selection_kind, "player_id": player_id},
-            ),
-            event_name="captain_mvp_vote_audit_failed",
-            guild_id=guild.id,
-            match_number=match.match_number,
-            actor_id=actor.id,
-            selection_kind=selection_kind,
-            player_id=player_id,
-        )
-        match = await self._ensure_captain_result_messages(guild, match)
-        if workflow.get("winner_mvp_id") and workflow.get("loser_mvp_id"):
-            latest_match = await self.require_match(guild.id, match.match_number)
-            if latest_match.status in {MatchStatus.FINALIZED, MatchStatus.CANCELED, MatchStatus.EXPIRED}:
-                raise StateTransitionError("That match is already closed.")
-            if self._match_close_requested(latest_match):
-                raise StateTransitionError("That match is already being closed.")
-            if self._match_finalization_in_progress(latest_match):
-                raise StateTransitionError("That match is already being finalized.")
-            finalized = await self.finalize_match(
-                guild,
-                match.match_number,
-                winner_team=winner_team,
-                winner_mvp_id=workflow.get("winner_mvp_id"),
-                loser_mvp_id=workflow.get("loser_mvp_id"),
-                source=ResultSource.CONSENSUS,
-                actor_id=actor.id,
-                notes="Finalized from captain MVP selections.",
-            )
-            return MatchActionResult(
-                match=finalized,
-                message=f"MVPs locked and Match #{finalized.display_id} was finalized automatically.",
-            )
-
-        pending_label = "loser MVP" if selection_kind == "winner" else "winner MVP"
-        return MatchActionResult(
-            match=match,
-            message=f"{selection_kind.title()} MVP saved. Waiting for {pending_label} selection.",
-        )
-
     def register_views(self, match: MatchRecord) -> None:
-        match_key = (match.guild_id, match.match_number)
-        if match.queue_opened_at is not None and match_key not in self._registered_queue_views:
-            self.bot.add_view(self._build_queue_view(match))
-            self._registered_queue_views.add(match_key)
-        if match.status in {MatchStatus.IN_PROGRESS, MatchStatus.VOTING, MatchStatus.FULL} and match_key not in self._registered_result_views:
+        self.bot.add_view(self._build_queue_view(match))
+        if match.status in {MatchStatus.IN_PROGRESS, MatchStatus.VOTING, MatchStatus.FULL}:
             self.bot.add_view(self._build_result_view(match))
-            self._registered_result_views.add(match_key)
-        if match.status in {MatchStatus.OPEN, MatchStatus.FULL, MatchStatus.IN_PROGRESS, MatchStatus.VOTING} and match_key not in self._registered_room_info_views:
-            self.bot.add_view(self._build_room_info_view(match))
-            self._registered_room_info_views.add(match_key)
-        workflow = self._captain_flow(match)
-        if match.status in {MatchStatus.FULL, MatchStatus.IN_PROGRESS, MatchStatus.VOTING} and workflow.get("winner_team") is None:
-            captain_key = (match.guild_id, match.match_number, "winner")
-            if captain_key not in self._registered_captain_views:
-                self.bot.add_view(self._build_captain_winner_view(match))
-                self._registered_captain_views.add(captain_key)
-        if match.status in {MatchStatus.IN_PROGRESS, MatchStatus.VOTING} and workflow.get("winner_team") in {1, 2}:
-            if workflow.get("winner_mvp_id") is None:
-                winner_key = (match.guild_id, match.match_number, "winner_mvp")
-                if winner_key not in self._registered_captain_views:
-                    self.bot.add_view(self._build_captain_mvp_view(match, selection_kind="winner"))
-                    self._registered_captain_views.add(winner_key)
-            if workflow.get("loser_mvp_id") is None:
-                loser_key = (match.guild_id, match.match_number, "loser_mvp")
-                if loser_key not in self._registered_captain_views:
-                    self.bot.add_view(self._build_captain_mvp_view(match, selection_kind="loser"))
-                    self._registered_captain_views.add(loser_key)
 
     async def refresh_match_message(self, guild: discord.Guild, match: MatchRecord) -> None:
-        message = await self._resolve_public_message(guild, match)
-        if message is None:
+        if not match.public_message_id or not match.source_channel_id:
+            return
+        channel = guild.get_channel(match.source_channel_id)
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
             return
         try:
-            if match.status == MatchStatus.OPEN and match.queue_opened_at is None:
-                await message.edit(
-                    embed=build_match_room_setup_embed(match, guild),
-                    view=self._build_room_info_view(match),
-                )
-            elif match.status == MatchStatus.OPEN:
-                await message.edit(
-                    embed=build_match_embed(match, guild),
-                    view=self._build_queue_view(match),
-                )
-            else:
-                await message.edit(embed=build_match_embed(match, guild), view=None)
+            message = await channel.fetch_message(match.public_message_id)
+            await message.edit(embed=build_match_embed(match, guild), view=self._build_queue_view(match))
         except discord.NotFound:
             self.logger.warning("match_public_message_missing", guild_id=guild.id, match_number=match.match_number, message_id=match.public_message_id)
         except discord.HTTPException as exc:
             self.logger.warning("match_public_message_refresh_failed", guild_id=guild.id, match_number=match.match_number, error=str(exc))
 
-    async def _resolve_public_message(self, guild: discord.Guild, match: MatchRecord) -> discord.Message | None:
-        if not match.public_message_id or not match.source_channel_id:
-            return None
-        channel = guild.get_channel(match.source_channel_id)
-        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
-            return None
-        try:
-            return await channel.fetch_message(match.public_message_id)
-        except discord.NotFound:
-            self.logger.warning(
-                "match_public_message_missing",
-                guild_id=guild.id,
-                match_number=match.match_number,
-                message_id=match.public_message_id,
-            )
-            return None
-
     async def post_vote_status(self, guild: discord.Guild, match: MatchRecord, votes) -> None:
         if not match.result_channel_id:
             return
-        channel = await self._resolve_text_channel(
-            guild,
-            match.result_channel_id,
-            purpose="post_vote_status",
-            match_number=match.match_number,
-        )
+        channel = guild.get_channel(match.result_channel_id)
         if isinstance(channel, discord.TextChannel):
             await channel.send(embed=build_vote_status_embed(match, guild, votes), view=self._build_result_view(match))
 
     async def post_result_summary(self, guild: discord.Guild, match: MatchRecord) -> None:
         if not match.result_channel_id:
             return
-        channel = await self._resolve_text_channel(
-            guild,
-            match.result_channel_id,
-            purpose="post_result_summary",
-            match_number=match.match_number,
-        )
+        channel = guild.get_channel(match.result_channel_id)
         if isinstance(channel, discord.TextChannel):
             await channel.send(embed=build_result_summary_embed(match, guild))
-
-    async def post_room_info_summary(self, guild: discord.Guild, match: MatchRecord) -> bool:
-        if not match.result_channel_id or match.room_info is None:
-            return False
-        channel = await self._resolve_text_channel(
-            guild,
-            match.result_channel_id,
-            purpose="post_room_info_summary",
-            match_number=match.match_number,
-        )
-        if not isinstance(channel, discord.TextChannel):
-            self.logger.warning(
-                "room_info_result_channel_missing",
-                guild_id=guild.id,
-                match_number=match.match_number,
-                channel_id=match.result_channel_id,
-            )
-            return False
-        try:
-            await channel.send(embed=build_room_info_embed(match, guild))
-        except discord.HTTPException as exc:
-            self.logger.warning(
-                "room_info_post_failed",
-                guild_id=guild.id,
-                match_number=match.match_number,
-                channel_id=channel.id,
-                error=str(exc),
-            )
-            return False
-        self.logger.info(
-            "room_info_posted",
-            guild_id=guild.id,
-            match_number=match.match_number,
-            channel_id=channel.id,
-            has_password=bool(match.room_info.password),
-            has_private_match_key=bool(match.room_info.private_match_key),
-        )
-        return True
 
     async def post_result_note(self, guild: discord.Guild, match: MatchRecord, message: str) -> None:
         if not match.result_channel_id:
             return
-        channel = await self._resolve_text_channel(
-            guild,
-            match.result_channel_id,
-            purpose="post_result_note",
-            match_number=match.match_number,
-        )
+        channel = guild.get_channel(match.result_channel_id)
         if isinstance(channel, discord.TextChannel):
             await channel.send(message)
 
     async def post_public_note(self, guild: discord.Guild, match: MatchRecord, message: str) -> None:
         if not match.source_channel_id:
             return
-        channel = await self._resolve_text_channel(
-            guild,
-            match.source_channel_id,
-            purpose="post_public_note",
-            match_number=match.match_number,
-        )
+        channel = guild.get_channel(match.source_channel_id)
         if isinstance(channel, (discord.TextChannel, discord.Thread)):
             await channel.send(message)
 
     def _build_queue_view(self, match: MatchRecord):
         from highlight_manager.interactions.views import MatchQueueView
 
-        return MatchQueueView(
-            self,
-            match.guild_id,
-            match.match_number,
-            disabled=match.status != MatchStatus.OPEN or match.queue_opened_at is None,
-            team1_full=len(match.team1_player_ids) >= match.team_size,
-            team2_full=len(match.team2_player_ids) >= match.team_size,
-        )
+        return MatchQueueView(self, match.match_number, disabled=match.status != MatchStatus.OPEN)
 
     def _build_result_view(self, match: MatchRecord):
         from highlight_manager.interactions.views import ResultEntryView
 
-        return ResultEntryView(
-            self,
-            match.guild_id,
-            match.match_number,
-            disabled=match.status not in {MatchStatus.IN_PROGRESS, MatchStatus.VOTING},
+        return ResultEntryView(self, match.match_number, disabled=match.status not in {MatchStatus.IN_PROGRESS, MatchStatus.VOTING})
+
+    def _validate_play_channel(self, channel: discord.abc.Messageable, config, match_type: MatchType) -> None:
+        channel_id = getattr(channel, "id", None)
+        expected_channel_id = (
+            config.apostado_channel_id
+            if match_type == MatchType.APOSTADO
+            else config.highlight_channel_id
         )
-
-    def _build_room_info_view(self, match: MatchRecord):
-        from highlight_manager.interactions.views import RoomInfoEntryView
-
-        return RoomInfoEntryView(
-            self,
-            match.guild_id,
-            match.match_number,
-            disabled=match.status in {MatchStatus.FINALIZED, MatchStatus.CANCELED, MatchStatus.EXPIRED},
-        )
-
-    def _build_captain_winner_view(self, match: MatchRecord):
-        from highlight_manager.interactions.views import CaptainWinnerSelectionView
-
-        return CaptainWinnerSelectionView(
-            self,
-            match.guild_id,
-            match.match_number,
-            disabled=match.status not in {MatchStatus.FULL, MatchStatus.IN_PROGRESS, MatchStatus.VOTING},
-        )
-
-    def _build_captain_mvp_view(self, match: MatchRecord, *, selection_kind: str):
-        from highlight_manager.interactions.views import CaptainMVPSelectionView
-
-        workflow = self._captain_flow(match)
-        if selection_kind == "winner":
-            team_number = workflow.get("winner_team")
-        else:
-            team_number = workflow.get("loser_team")
-        player_ids = match.team1_player_ids if team_number == 1 else match.team2_player_ids
-        return CaptainMVPSelectionView(
-            self,
-            match.guild_id,
-            match.match_number,
-            selection_kind=selection_kind,
-            player_ids=player_ids,
-            disabled=match.status not in {MatchStatus.IN_PROGRESS, MatchStatus.VOTING},
-        )
-
-    async def _ensure_match_voice_channels(
-        self,
-        guild: discord.Guild,
-        match: MatchRecord,
-        config: GuildConfig,
-    ) -> tuple[discord.VoiceChannel, discord.VoiceChannel]:
-        existing_team1 = await self.voice_service.resolve_voice_channel(
-            guild,
-            match.team1_voice_channel_id,
-            match_number=match.match_number,
-            purpose="ensure_match_voice_channels_team1",
-        )
-        existing_team2 = await self.voice_service.resolve_voice_channel(
-            guild,
-            match.team2_voice_channel_id,
-            match_number=match.match_number,
-            purpose="ensure_match_voice_channels_team2",
-        )
-        if isinstance(existing_team1, discord.VoiceChannel) and isinstance(existing_team2, discord.VoiceChannel):
-            await self.voice_service.delete_duplicate_match_voice_channels(
-                guild,
-                match,
-                config,
-                keep_channel_ids={existing_team1.id, existing_team2.id},
-            )
-            return existing_team1, existing_team2
-        if isinstance(existing_team1, discord.VoiceChannel) or isinstance(existing_team2, discord.VoiceChannel):
-            await self.voice_service.cleanup_match_voices(guild, match, config=config)
-            match.team1_voice_channel_id = None
-            match.team2_voice_channel_id = None
-        team1_channel, team2_channel = await self.voice_service.create_match_voice_channels(guild, match, config)
-        await self.voice_service.delete_duplicate_match_voice_channels(
-            guild,
-            match,
-            config,
-            keep_channel_ids={team1_channel.id, team2_channel.id},
-        )
-        return team1_channel, team2_channel
-
-    async def _ensure_result_channel(
-        self,
-        guild: discord.Guild,
-        match: MatchRecord,
-        config: GuildConfig,
-    ) -> tuple[discord.TextChannel, bool]:
-        existing = await self.result_channel_service.resolve_text_channel(
-            guild,
-            match.result_channel_id,
-            match_number=match.match_number,
-            purpose="ensure_result_channel",
-        )
-        if isinstance(existing, discord.TextChannel):
-            await self.result_channel_service.delete_match_channels(
-                guild,
-                match,
-                config,
-                keep_channel_ids={existing.id},
-            )
-            return existing, False
-        channel = await self.result_channel_service.create_private_channel(guild, match, config)
-        await self.result_channel_service.delete_match_channels(
-            guild,
-            match,
-            config,
-            keep_channel_ids={channel.id},
-        )
-        return channel, True
-
-    async def _sync_result_channel_access(
-        self,
-        guild: discord.Guild,
-        match: MatchRecord,
-        config: GuildConfig,
-    ) -> None:
-        if not match.result_channel_id:
-            return
-        await self.result_channel_service.sync_channel_access(guild, match.result_channel_id, match, config)
-
-    async def _open_public_queue_after_room_info(
-        self,
-        guild: discord.Guild,
-        match: MatchRecord,
-        config: GuildConfig,
-        *,
-        transition: StatusMessageTransition | None = None,
-    ) -> MatchRecord:
-        if match.queue_opened_at is not None:
-            return match
-        if not match.source_channel_id:
-            raise UserFacingError("The configured play room for this match is missing.")
-
-        channel = guild.get_channel(match.source_channel_id)
-        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
-            raise UserFacingError("The configured play room for this match is missing.")
-
-        match.queue_opened_at = utcnow()
-        match.queue_expires_at = minutes_from_now(config.queue_timeout_minutes)
-        match = await self.repository.replace(match)
-        self.register_views(match)
-
-        queue_message: discord.Message | None = None
-        if match.public_message_id:
-            try:
-                queue_message = await channel.fetch_message(match.public_message_id)
-                if transition is None:
-                    transition = StatusMessageTransition.attach(
-                        queue_message,
-                        heading=f"Match #{match.display_id} Queue",
-                        default_footer="Highlight Manager is opening the public queue.",
-                    )
-                await self._update_transition(
-                    transition,
-                    TransitionFrame(
-                        title="Room Ready",
-                        detail="Unlocking the public queue and applying the live match controls for players.",
-                        tone="success",
-                        step_index=3,
-                        step_total=3,
-                        footer="Room access was shared privately before the queue opened.",
-                    ),
-                    embed=build_match_embed(match, guild),
-                    view=self._build_queue_view(match),
-                )
-            except discord.NotFound:
-                self.logger.warning(
-                    "room_setup_message_missing_before_queue_open",
-                    guild_id=guild.id,
-                    match_number=match.match_number,
-                    message_id=match.public_message_id,
-                )
-                match.public_message_id = None
-            except discord.HTTPException as exc:
-                self.logger.warning(
-                    "room_setup_message_update_failed",
-                    guild_id=guild.id,
-                    match_number=match.match_number,
-                    message_id=match.public_message_id,
-                    error=str(exc),
-                )
-
-        if match.public_message_id is None:
-            if transition is not None:
-                queue_message = transition.message
-                await transition.replace(
-                    embed=build_match_embed(match, guild),
-                    view=self._build_queue_view(match),
-                )
-            else:
-                queue_message = await channel.send(
-                    embed=build_match_embed(match, guild),
-                    view=self._build_queue_view(match),
-                )
-            match.public_message_id = queue_message.id
-
-        if config.ping_here_on_match_create and not match.create_here_ping_sent:
-            try:
-                await self._send_match_here_ping(guild, match, stage="create")
-                match.create_here_ping_sent = True
-            except Exception as exc:
-                self.logger.warning(
-                    "match_create_here_ping_failed",
-                    guild_id=guild.id,
-                    match_number=match.match_number,
-                    error=str(exc),
-                )
-
-        match = await self.repository.replace(match)
-        self.logger.info(
-            "match_queue_opened_after_room_info",
-            guild_id=guild.id,
-            match_number=match.match_number,
-            channel_id=channel.id,
-            public_message_id=match.public_message_id,
-        )
-        self._schedule_background_task(
-            self.audit_service.log(
-                guild,
-                AuditAction.MATCH_NOTIFICATION,
-                f"Opened the public queue for Match #{match.display_id} after room info submission.",
-                metadata={"match_number": match.match_number},
-            ),
-            event_name="queue_open_audit_failed",
-            guild_id=guild.id,
-            match_number=match.match_number,
-        )
-        return match
-
-    async def _cleanup_failed_match_creation(
-        self,
-        guild: discord.Guild,
-        match: MatchRecord,
-        public_message: discord.Message | None,
-        validation_stage: str,
-        *,
-        preserve_public_message: bool = False,
-    ) -> None:
-        if public_message is not None and not preserve_public_message:
-            try:
-                await public_message.delete()
-            except discord.HTTPException as exc:
-                self.logger.warning(
-                    "failed_match_public_message_cleanup_failed",
-                    guild_id=guild.id,
-                    match_number=match.match_number,
-                    message_id=public_message.id,
-                    validation_stage=validation_stage,
-                    error=str(exc),
-                )
-        if match.result_channel_id:
-            await self.result_channel_service.delete_channel(guild, match.result_channel_id, match.match_number)
-        deleted = False
-        delete_match = getattr(self.repository, "delete", None)
-        if callable(delete_match):
-            deleted = await delete_match(match.guild_id, match.match_number)
-        self.logger.info(
-            "failed_match_creation_cleaned_up",
-            guild_id=guild.id,
-            match_number=match.match_number,
-            validation_stage=validation_stage,
-            deleted_from_repository=deleted,
-            had_public_message=public_message is not None,
-            preserved_public_message=preserve_public_message,
-        )
-
-    async def _ensure_room_info_available_in_result_channel(
-        self,
-        guild: discord.Guild,
-        match: MatchRecord,
-        *,
-        force_post: bool = False,
-    ) -> MatchRecord:
-        if match.room_info is None or not match.result_channel_id:
-            return match
-        last_posted_channel_id = match.metadata.get("room_info_posted_channel_id")
-        if not force_post and last_posted_channel_id == match.result_channel_id:
-            return match
-        posted = await self.post_room_info_summary(guild, match)
-        if not posted:
-            return match
-        match.metadata["room_info_posted_channel_id"] = match.result_channel_id
-        return await self.repository.replace(match)
-
-    async def _ensure_captain_result_messages(
-        self,
-        guild: discord.Guild,
-        match: MatchRecord,
-    ) -> MatchRecord:
-        if not match.result_channel_id:
-            return match
-        channel = await self._resolve_text_channel(
-            guild,
-            match.result_channel_id,
-            purpose="ensure_captain_result_messages",
-            match_number=match.match_number,
-        )
-        if not isinstance(channel, discord.TextChannel):
-            self.logger.warning(
-                "captain_result_channel_unavailable",
-                guild_id=guild.id,
-                match_number=match.match_number,
-                channel_id=match.result_channel_id,
-            )
-            return match
-
-        workflow = self._captain_flow(match)
-        self.register_views(match)
-
-        winner_message_id = await self._upsert_result_embed_message(
-            channel,
-            workflow.get("winner_prompt_message_id"),
-            embed=build_captain_winner_embed(match, guild),
-            view=(
-                self._build_captain_winner_view(match)
-                if workflow.get("winner_team") is None and match.status in {MatchStatus.FULL, MatchStatus.IN_PROGRESS, MatchStatus.VOTING}
-                else None
-            ),
-        )
-        workflow["winner_prompt_message_id"] = winner_message_id
-
-        if workflow.get("winner_team") not in {1, 2}:
-            return await self.repository.replace(match)
-
-        winner_mvp_message_id = await self._upsert_result_embed_message(
-            channel,
-            workflow.get("winner_mvp_prompt_message_id"),
-            embed=build_captain_mvp_embed(match, guild, selection_kind="winner"),
-            view=(
-                self._build_captain_mvp_view(match, selection_kind="winner")
-                if workflow.get("winner_mvp_id") is None
-                else None
-            ),
-        )
-        loser_mvp_message_id = await self._upsert_result_embed_message(
-            channel,
-            workflow.get("loser_mvp_prompt_message_id"),
-            embed=build_captain_mvp_embed(match, guild, selection_kind="loser"),
-            view=(
-                self._build_captain_mvp_view(match, selection_kind="loser")
-                if workflow.get("loser_mvp_id") is None
-                else None
-            ),
-        )
-        workflow["winner_mvp_prompt_message_id"] = winner_mvp_message_id
-        workflow["loser_mvp_prompt_message_id"] = loser_mvp_message_id
-        self.logger.info(
-            "captain_mvp_prompts_ready",
-            guild_id=guild.id,
-            match_number=match.match_number,
-            winner_prompt_message_id=winner_mvp_message_id,
-            loser_prompt_message_id=loser_mvp_message_id,
-            winner_team=workflow.get("winner_team"),
-            loser_team=workflow.get("loser_team"),
-        )
-        return await self.repository.replace(match)
-
-    async def _resolve_text_channel(
-        self,
-        guild: discord.Guild,
-        channel_id: int | None,
-        *,
-        purpose: str,
-        match_number: int,
-    ) -> discord.abc.GuildChannel | None:
-        if not channel_id:
-            return None
-        channel = guild.get_channel(channel_id)
-        if channel is not None:
-            self.logger.info(
-                "channel_resolved_from_cache",
-                guild_id=guild.id,
-                match_number=match_number,
-                channel_id=channel_id,
-                purpose=purpose,
-                channel_type=type(channel).__name__,
-            )
-            return channel
-        fetch_channel = getattr(guild, "fetch_channel", None)
-        if callable(fetch_channel):
-            try:
-                fetched = await fetch_channel(channel_id)
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException, KeyError) as exc:
-                self.logger.warning(
-                    "channel_fetch_failed",
-                    guild_id=guild.id,
-                    match_number=match_number,
-                    channel_id=channel_id,
-                    purpose=purpose,
-                    error=str(exc),
-                )
-                return None
-            self.logger.info(
-                "channel_fetched_from_api",
-                guild_id=guild.id,
-                match_number=match_number,
-                channel_id=channel_id,
-                purpose=purpose,
-                channel_type=type(fetched).__name__,
-            )
-            return fetched
-        self.logger.warning(
-            "channel_missing_from_cache",
-            guild_id=guild.id,
-            match_number=match_number,
-            channel_id=channel_id,
-            purpose=purpose,
-        )
-        return None
-
-    async def _upsert_result_embed_message(
-        self,
-        channel: discord.TextChannel,
-        message_id: int | None,
-        *,
-        embed: discord.Embed,
-        view: discord.ui.View | None,
-    ) -> int:
-        if message_id:
-            try:
-                message = await channel.fetch_message(message_id)
-                await message.edit(embed=embed, view=view)
-                return message.id
-            except discord.NotFound:
-                self.logger.warning(
-                    "result_prompt_message_missing",
-                    channel_id=channel.id,
-                    message_id=message_id,
-                    embed_title=embed.title,
-                )
-            except discord.HTTPException as exc:
-                self.logger.warning(
-                    "result_prompt_message_edit_failed",
-                    channel_id=channel.id,
-                    message_id=message_id,
-                    embed_title=embed.title,
-                    error=str(exc),
-                )
-        message = await channel.send(embed=embed, view=view)
-        return message.id
-
-    async def _close_result_channel_on_match_close(
-        self,
-        guild: discord.Guild,
-        match: MatchRecord,
-        config: GuildConfig,
-    ) -> MatchRecord:
-        if not match.result_channel_id:
-            if config.result_channel_behavior.value == "DELETE":
-                await self.result_channel_service.delete_match_channels(
-                    guild,
-                    match,
-                    config,
-                    keep_channel_ids=set(),
-                )
-            return match
-        if config.result_channel_behavior.value == "DELETE":
-            await self.result_channel_service.delete_channel(guild, match.result_channel_id, match.match_number)
-            await self.result_channel_service.delete_match_channels(
-                guild,
-                match,
-                config,
-                keep_channel_ids=set(),
-            )
-            match.result_channel_id = None
-            match.result_channel_cleanup_at = None
-            return match
-        await self.result_channel_service.finalize_channel_behavior(guild, match, config)
-        await self.result_channel_service.delete_match_channels(
-            guild,
-            match,
-            config,
-            keep_channel_ids={match.result_channel_id},
-        )
-        return match
-
-    async def _announce_match_ready_if_needed(
-        self,
-        guild: discord.Guild,
-        match: MatchRecord,
-        config: GuildConfig,
-    ) -> MatchRecord:
-        if match.ready_announcement_sent or not match.source_channel_id:
-            return match
-        if match.public_message_id and not config.ping_here_on_match_ready:
-            return match
-        channel = guild.get_channel(match.source_channel_id)
-        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
-            return match
-        content = "@here" if config.ping_here_on_match_ready and not match.ready_here_ping_sent else None
-        try:
-            await channel.send(
-                content=content,
-                embed=build_match_ready_embed(match, guild),
-                view=None if match.room_info is not None else self._build_room_info_view(match),
-            )
-            match.ready_announcement_sent = True
-            if content:
-                match.ready_here_ping_sent = True
-            match = await self.repository.replace(match)
-            self.logger.info(
-                "match_ready_announced",
-                guild_id=guild.id,
-                match_number=match.match_number,
-                channel_id=channel.id,
-                here_ping_sent=bool(content),
-            )
-            self._schedule_background_task(
-                self.audit_service.log(
-                    guild,
-                    AuditAction.MATCH_NOTIFICATION,
-                    f"Posted the Match Ready announcement for Match #{match.display_id}.",
-                    metadata={
-                        "match_number": match.match_number,
-                        "here_ping_sent": bool(content),
-                    },
-                ),
-                event_name="match_ready_audit_failed",
-                guild_id=guild.id,
-                match_number=match.match_number,
-            )
-        except Exception as exc:
-            self.logger.warning(
-                "match_ready_announcement_failed",
-                guild_id=guild.id,
-                match_number=match.match_number,
-                channel_id=channel.id,
-                error=str(exc),
-            )
-        return match
-
-    async def _send_match_here_ping(
-        self,
-        guild: discord.Guild,
-        match: MatchRecord,
-        *,
-        stage: str,
-    ) -> None:
-        if not match.source_channel_id:
-            return
-        channel = guild.get_channel(match.source_channel_id)
-        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
-            return
-        await channel.send("@here")
-        self.logger.info(
-            "match_here_ping_sent",
-            guild_id=guild.id,
-            match_number=match.match_number,
-            channel_id=channel.id,
-            stage=stage,
-        )
-        self._schedule_background_task(
-            self.audit_service.log(
-                guild,
-                AuditAction.MATCH_NOTIFICATION,
-                f"Sent @here for Match #{match.display_id} during the {stage} stage.",
-                metadata={"match_number": match.match_number, "stage": stage},
-            ),
-            event_name="match_here_ping_audit_failed",
-            guild_id=guild.id,
-            match_number=match.match_number,
-            stage=stage,
-        )
+        if expected_channel_id and channel_id != expected_channel_id:
+            label = match_type.label
+            raise UserFacingError(f"{label} matches can only be created in <#{expected_channel_id}>.")

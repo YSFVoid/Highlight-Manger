@@ -1,32 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime
-
 from pydantic import Field
 
 from highlight_manager.models.base import AppModel
-from highlight_manager.models.common import BootstrapSummary, PointRule
+from datetime import datetime
+
+from highlight_manager.models.common import BootstrapSummary, BootstrapThreshold, PointRule, RankThreshold
 from highlight_manager.models.enums import MatchMode, MatchType, ResultChannelBehavior
-
-
-class ResourceNameConfig(AppModel):
-    waiting_voice: str = "𝐖𝐀𝐈𝐓𝐈𝐍𝐆-𝐕𝐎𝐈𝐂𝐄"
-    temp_voice_category: str = "𝐇𝐈𝐆𝐇𝐋𝐈𝐆𝐇𝐓-𝐌𝐀𝐓𝐂𝐇-𝐕𝐎𝐈𝐂𝐄𝐒"
-    result_category: str = "𝐌𝐀𝐓𝐂𝐇-𝐑𝐄𝐒𝐔𝐋𝐓𝐒"
-    log_channel: str = "𝐇𝐈𝐆𝐇𝐋𝐈𝐆𝐇𝐓-𝐋𝐎𝐆𝐒"
-    apostado_play_channel: str = "𝐀𝐏𝐎𝐒𝐓𝐀𝐃𝐎-𝐏𝐋𝐀𝐘"
-    highlight_play_channel: str = "𝐇𝐈𝐆𝐇𝐋𝐈𝐆𝐇𝐓-𝐏𝐋𝐀𝐘"
-
-
-def fallback_resource_names() -> ResourceNameConfig:
-    return ResourceNameConfig(
-        waiting_voice="Waiting Voice",
-        temp_voice_category="Highlight Match Voices",
-        result_category="Match Results",
-        log_channel="highlight-logs",
-        apostado_play_channel="apostado-play",
-        highlight_play_channel="highlight-play",
-    )
 
 
 def default_point_rules() -> dict[str, dict[str, PointRule]]:
@@ -68,12 +48,32 @@ def default_point_rules() -> dict[str, dict[str, PointRule]]:
     }
 
 
+def default_rank_thresholds() -> list[RankThreshold]:
+    return [
+        RankThreshold(rank=1, min_points=None, max_points=99),
+        RankThreshold(rank=2, min_points=100, max_points=249),
+        RankThreshold(rank=3, min_points=250, max_points=499),
+        RankThreshold(rank=4, min_points=500, max_points=799),
+        RankThreshold(rank=5, min_points=800, max_points=None),
+    ]
+
+
+def default_bootstrap_thresholds() -> list[BootstrapThreshold]:
+    return [
+        BootstrapThreshold(minimum_days=180, rank=5, starting_points=800),
+        BootstrapThreshold(minimum_days=120, rank=4, starting_points=500),
+        BootstrapThreshold(minimum_days=60, rank=3, starting_points=250),
+        BootstrapThreshold(minimum_days=30, rank=2, starting_points=100),
+        BootstrapThreshold(minimum_days=0, rank=1, starting_points=0),
+    ]
+
+
 class GuildFeatures(AppModel):
+    auto_create_resources: bool = True
     creator_auto_join_team1: bool = True
+    preserve_rank0: bool = True
     auto_create_waiting_voice: bool = True
     auto_create_temp_category: bool = True
-    auto_create_season_reward_role: bool = True
-    auto_create_mvp_reward_role: bool = True
     nickname_rank_sync: bool = True
     bootstrap_on_first_setup: bool = True
 
@@ -81,32 +81,23 @@ class GuildFeatures(AppModel):
 class GuildConfig(AppModel):
     guild_id: int
     prefix: str = "!"
-    resource_names: ResourceNameConfig = Field(default_factory=ResourceNameConfig)
-    apostado_play_channel_id: int | None = None
-    highlight_play_channel_id: int | None = None
+    apostado_channel_id: int | None = None
+    highlight_channel_id: int | None = None
     waiting_voice_channel_id: int | None = None
-    additional_waiting_voice_channel_ids: list[int] = Field(default_factory=list)
     temp_voice_category_id: int | None = None
     result_category_id: int | None = None
     log_channel_id: int | None = None
     admin_role_ids: list[int] = Field(default_factory=list)
     staff_role_ids: list[int] = Field(default_factory=list)
-    mvp_reward_role_id: int | None = None
-    mvp_reward_role_name: str = "Mvp"
-    mvp_winner_requirement: int = 50
-    mvp_loser_requirement: int = 75
-    season_reward_role_id: int | None = None
-    season_reward_role_name: str = "Professional Highlight Player"
-    season_reward_top_count: int = 5
+    rank_role_map: dict[str, int] = Field(default_factory=dict)
+    rank_thresholds: list[RankThreshold] = Field(default_factory=default_rank_thresholds)
+    bootstrap_thresholds: list[BootstrapThreshold] = Field(default_factory=default_bootstrap_thresholds)
     point_rules: dict[str, dict[str, PointRule]] = Field(default_factory=default_point_rules)
     result_channel_behavior: ResultChannelBehavior = ResultChannelBehavior.DELETE
     result_channel_delete_delay_seconds: int = 600
-    result_channel_name_template: str = "{match_type_styled}-{match_number_styled}-𝐑𝐄𝐒𝐔𝐋𝐓"
-    team1_voice_name_template: str = "{match_type_styled} {match_number_styled} • {team1_label_styled}"
-    team2_voice_name_template: str = "{match_type_styled} {match_number_styled} • {team2_label_styled}"
-    ping_here_on_match_create: bool = True
-    ping_here_on_match_ready: bool = False
-    private_match_key_required: bool = False
+    result_channel_name_template: str = "result-{match_id}"
+    team1_voice_name_template: str = "TEAM 1 - Match #{match_id}"
+    team2_voice_name_template: str = "TEAM 2 - Match #{match_id}"
     queue_timeout_minutes: int = 5
     vote_timeout_minutes: int = 30
     features: GuildFeatures = Field(default_factory=GuildFeatures)
@@ -115,13 +106,3 @@ class GuildConfig(AppModel):
     bootstrap_completed_at: datetime | None = None
     bootstrap_last_summary: BootstrapSummary | None = None
     next_match_number: int = 1
-
-    @property
-    def all_waiting_voice_channel_ids(self) -> list[int]:
-        ordered_ids: list[int] = []
-        if self.waiting_voice_channel_id:
-            ordered_ids.append(self.waiting_voice_channel_id)
-        for channel_id in self.additional_waiting_voice_channel_ids:
-            if channel_id and channel_id not in ordered_ids:
-                ordered_ids.append(channel_id)
-        return ordered_ids

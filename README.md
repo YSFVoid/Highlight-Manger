@@ -1,8 +1,6 @@
 # Highlight Manager
 
-Highlight Manager is a Python Discord bot for one competitive Free Fire server. It manages Apostado and Highlight matches, waiting voice validation, private match result rooms, temporary team voice channels, private room-info sharing, player voting, seasonal points, live placement ranks, blacklist checks, reward roles, and polished update announcements.
-
-Ranks are stored internally and synced to nicknames as `RANK X | UserName`. Rank is live leaderboard placement, not a fixed tier and not a Discord role. A manual `Rank 0` override is also supported for staff use.
+Highlight Manager is a production-minded Discord bot for a single Free Fire server. It manages ranked Apostado and Highlight matches, waiting voice validation, auto-created team voices, private result channels, player voting, points, ranks, blacklists, and seasons.
 
 ## Stack
 
@@ -14,177 +12,146 @@ Ranks are stored internally and synced to nicknames as `RANK X | UserName`. Rank
 - `python-dotenv`
 - `structlog`
 
-## Member Commands
+## What It Does
 
-- `!play <mode> <type>`
-- `!profile`
-- `!rank`
-- `!r`
-- `!leaderboard`
-- `!top`
-- `!stats [user]`
+- Member prefix commands for gameplay:
+  - `!play <mode> <type>`
+  - `!profile`
+  - `!rank`
+  - `!leaderboard`
+  - `!top`
+  - `!stats [user]`
+- Admin slash commands for setup and moderation:
+  - `/setup`
+  - `/bootstrap preview`
+  - `/bootstrap rerun`
+  - `/config`
+  - `/season start`
+  - `/season end`
+  - `/rank set`
+  - `/rank0 grant`
+  - `/rank0 revoke`
+  - `/points add`
+  - `/points remove`
+  - `/points set`
+  - `/match cancel`
+  - `/match force-result`
+  - `/match force-close`
+  - `/blacklist add`
+  - `/blacklist remove`
 
-Supported match modes:
+## Core Flow
 
-- `1v1`
-- `2v2`
-- `3v3`
-- `4v4`
+1. Player joins the configured Waiting Voice.
+2. Player runs `!play 2v2 apos`, `!play 4v4 high`, and similar variants.
+3. Bot creates the public match queue embed with buttons.
+4. Players join teams through buttons.
+5. When the queue fills, the bot:
+   - creates `TEAM 1` and `TEAM 2` temporary voice channels
+   - moves players into team voices
+   - creates a private result channel
+   - opens vote flow and starts the voting deadline
+6. Players submit result votes in the result channel.
+7. When consensus is valid, the bot finalizes the match, updates points/ranks, posts the summary, and cleans resources.
+8. If queue fill or vote reporting times out, the bot persists the failure state, applies the configured penalties, and cleans up safely.
 
-Supported type aliases:
+## Project Structure
 
-- `apos`
-- `apostado`
-- `high`
-- `highlight`
+```text
+src/highlight_manager/
+  bot.py
+  commands/
+    prefix/gameplay.py
+    slash/admin.py
+  config/
+    logging.py
+    settings.py
+  interactions/
+    views.py
+  models/
+  repositories/
+  services/
+  utils/
+tests/
+deploy/
+  systemd/highlight-manager.service
+  supervisor/highlight-manager.conf
+```
 
-## Admin Commands
+## Installation
 
-- `/setup`
-- `/setup action:status`
-- `/setup action:repair`
-- `/bootstrap preview`
-- `/bootstrap rerun`
-- `/config`
-- `/waitingvoice add`
-- `/waitingvoice remove`
-- `/nickname sync-rank`
-- `/nickname sync-all`
-- `/announce latest-update`
-- `/season start`
-- `/season end`
-- `/rank0 grant`
-- `/rank0 revoke`
-- `/points add`
-- `/points remove`
-- `/points set`
-- `/match cancel`
-- `/match force-result`
-- `/match force-close`
-- `/blacklist add`
-- `/blacklist remove`
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .[dev]
+cp .env.example .env
+```
 
-## Rank Model
+Update `.env` with your bot token, client ID, and MongoDB URI.
 
-- Rank is live seasonal leaderboard placement.
-- Rank 1 means first place, Rank 2 means second place, and so on with no hard cap.
-- `Rank 0` is a manual override and is never assigned by normal recalculation.
-- Tiebreak order is:
-  - higher seasonal points
-  - higher seasonal wins
-  - higher seasonal winner-MVP count
-  - older server join date
-  - lower user ID as a stable fallback
-- Nicknames are always synced as `RANK X | UserName`.
+## Environment Variables
 
-## Reward Roles
+See [.env.example](.env.example).
 
-### `Mvp`
+- `DISCORD_TOKEN`
+- `DISCORD_CLIENT_ID`
+- `MONGODB_URI`
+- `DISCORD_GUILD_ID`
+- `DEFAULT_PREFIX`
+- `LOG_LEVEL`
+- `POLL_INTERVAL_SECONDS`
+- `RESULT_CHANNEL_DELETE_DELAY_SECONDS`
 
-Permanent achievement role.
+## Local Run
 
-- awarded once `mvpWinnerCount >= 50`
-- or `mvpLoserCount >= 75`
-- created during setup if missing
-- limited to `Move Members`, `Mute Members`, and `Deafen Members`
-- never removed automatically
+```bash
+python -m highlight_manager
+```
 
-### `Professional Highlight Player`
+## Production Run
 
-Season reward role.
+### systemd
 
-- granted to the configured top seasonal placements when a season ends
-- removed from previous holders who are no longer in the configured top group
-- default top count is `5`
+Copy [highlight-manager.service](deploy/systemd/highlight-manager.service) to `/etc/systemd/system/highlight-manager.service`, adjust paths/user, then:
 
-## Match Room Info Flow
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable highlight-manager
+sudo systemctl start highlight-manager
+sudo systemctl status highlight-manager
+```
 
-- When a member runs `!play`, the bot now posts a room-setup card first instead of opening the public queue immediately.
-- The creator or staff presses **Enter Room Info** to open the modal before the queue goes live.
-- The modal collects:
-  - Room ID
-  - Password
-  - Private Match Key
-- Room ID must be numeric.
-- Password is optional.
-- Private Match Key is optional unless the guild config requires it.
-- After valid room info is submitted, the bot opens the public queue card and can send the configured one-time `@here`.
-- Sensitive room details are only posted in the private match result room, never in the public play room.
-- The private result room is created up front so room details always have a private delivery surface.
-- If the private result room is recreated later, the stored room info is reposted there automatically.
+### Supervisor
 
-## Match Result Flow
+Use [highlight-manager.conf](deploy/supervisor/highlight-manager.conf) inside your Supervisor config directory, adjust paths/user, then:
 
-- When a match goes live, the private result room posts a **Choose Winner Team** embed first.
-- Only two people can choose the winner team:
-  - the match creator
-  - the first player who entered Team 2
-- Once both captain votes match, the losing team is inferred automatically.
-- For team matches, the bot then posts two more private embeds:
-  - **Choose Winner MVP**
-  - **Choose Loser MVP**
-- The winning team captain selects winner MVP.
-- The losing team captain selects loser MVP.
-- As soon as both MVP selections are recorded, the bot finalizes the match automatically.
-- During auto-finalize, the bot:
-  - posts the result summary
-  - moves players back to Waiting Voice when possible
-  - deletes the temporary Team 1 and Team 2 voice channels
-  - schedules the private result room for cleanup using the configured delete behavior
+```bash
+sudo supervisorctl reread
+sudo supervisorctl update
+sudo supervisorctl status highlight-manager
+```
 
-## Leaderboard / Profile UI
+## Setup Guide
 
-- `!rank` opens a focused rank overview embed.
-- `!profile` and `!stats [user]` open a richer profile card with season and lifetime stats.
-- `!leaderboard` and `!top` open a paginated leaderboard with switchable views for:
-  - season points
-  - season wins
-  - season MVP totals
-- Match cards, ready cards, room-info cards, and setup/config cards now share one consistent mobile-friendly visual style.
+1. Invite the bot with the permissions listed below.
+2. Run `/setup` and optionally provide a prefix.
+3. The bot automatically reuses or creates:
+   - Waiting Voice
+   - temp match voice category
+   - results category
+   - logs channel
+   - Rank 0 through Rank 5 roles
+4. On the first successful setup, the bot runs a one-time bootstrap for current members:
+   - assigns starting rank by server age
+   - assigns aligned starting points
+   - applies rank role
+   - renames members to `Rank X UserName`
+5. Use `/setup action:status` to inspect saved setup state.
+6. Use `/setup action:repair` to repair missing resources safely.
+7. Use `/bootstrap preview` and `/bootstrap rerun` for maintenance.
+8. Use `/config` later for additional manual adjustments.
 
-## Default Setup Resources
-
-The bot auto-creates or reuses these resources during `/setup`:
-
-- Apostado play room
-- Highlight play room
-- Waiting Voice
-- Additional waiting voices when needed
-- Temporary match voice category
-- Match results category
-- Logs channel
-- `Mvp`
-- `Professional Highlight Player`
-
-Default channel and category names use stylized Unicode labels. If Discord rejects a stylized name for a resource type, setup falls back cleanly to the ASCII legacy name instead of crashing.
-
-Configured rooms, voice channels, categories, and reward roles are used by their Discord IDs at runtime. Renaming a configured resource later does not break the bot.
-
-Default live announcement behavior:
-
-- `@here` on queue open: enabled
-- `@here` on match ready: disabled
-
-Both can still be changed with `/config`.
-
-## Bootstrap Behavior
-
-On the first successful `/setup` only:
-
-1. All non-bot members are sorted by server join date, oldest first.
-2. Oldest member gets Rank 1, next gets Rank 2, and so on with no limit.
-3. Everyone starts with `0` season points.
-4. Everyone is renamed to `RANK X | UserName` when permissions allow.
-5. Rename results are reported separately for:
-   - renamed members
-   - already-correct nicknames
-   - hierarchy skips
-   - missing-permission skips
-   - other failures
-
-New members who join later start with `0` points and are assigned the last current rank position by default.
-
-## Required Discord Permissions
+## Permissions Required
 
 - View Channels
 - Send Messages
@@ -195,45 +162,77 @@ New members who join later start with `0` points and are assigned the last curre
 - Manage Channels
 - Use Application Commands
 - Manage Roles
-- Manage Nicknames
 
-## What Setup Must Validate
+## Data Stored
 
-- Waiting Voice exists
-- temp match voice category exists
-- results parent exists
-- logs channel exists
-- Apostado play room exists
-- Highlight play room exists
-- `Mvp` role exists
-- `Professional Highlight Player` role exists or is reusable
-- configurable match announcement settings are available
-- private room-info flow is available once a match is ready
+- Guild config
+- Player profiles
+- Matches
+- Match votes
+- Seasons
+- Audit logs
 
-## Startup / Recovery
+## Startup and Recovery
 
 On startup the bot:
 
-- validates env settings
+- validates settings
 - connects to MongoDB
-- ensures indexes
+- ensures Mongo indexes
+- loads commands
 - syncs slash commands
-- reconciles unfinished matches
-- restores timeout polling
-- recreates missing result rooms when possible
-- cleans stale temporary match voices
+- reconciles active matches
 - restores persistent button views
-- restores room-info submission views for active matches
+- resumes polling for queue and vote deadlines
+- keeps ongoing rank nickname sync active through the normal rank-update path
+
+Timeouts are persisted in MongoDB and polled from storage, so the bot does not rely only on in-memory timers.
+
+## Automated Validation
+
+Run:
+
+```bash
+ruff check src tests
+pytest -q
+python -m compileall src
+```
+
+## Manual Verification Checklist
+
+1. New member joins and receives a profile plus the default lowest rank role.
+2. First `/setup` creates or reuses all required resources automatically.
+3. First `/setup` bootstraps existing members by server age and renames them to `Rank X UserName`.
+4. `/setup action:status` shows configured resources and stored IDs.
+5. `/setup action:repair` repairs missing resources without duplicating existing ones.
+6. Member outside Waiting Voice is blocked from `!play`.
+7. Member inside Waiting Voice creates `!play 2v2 apos`.
+8. Team buttons fill both teams.
+9. TEAM 1 and TEAM 2 voice channels are created.
+10. Players are moved into the correct temporary voices.
+11. Private result channel is created and only players/staff can see it.
+12. Players submit votes and consensus finalizes correctly.
+13. Result summary shows old balance, delta, and new balance.
+14. Points, roles, and nicknames update automatically when rank changes.
+15. An open queue expires after 5 minutes.
+16. An unresolved active match expires after 30 minutes and applies penalties.
+17. Restart the bot during an active match and confirm buttons/timers recover.
+18. Staff-only slash commands reject non-staff users.
 
 ## Troubleshooting
 
-- If `!play` is rejected, use the configured Apostado or Highlight play room shown by `/setup status` or `/config`.
-- If `!play` says setup is incomplete, run `/setup` or `/setup action:repair`.
-- If a match is ready but players cannot see the room details, check the private result room and confirm the creator or staff submitted room info through **Enter Room Info**.
-- If `@here` is too noisy or missing, review `ping_here_on_match_create` and `ping_here_on_match_ready` through `/config`.
-- If nickname sync fails, check `Manage Nicknames` and role hierarchy.
-- If Rank 0 was granted accidentally, use `/rank0 revoke`.
-- If waiting-voice enforcement fails, confirm the configured waiting-voice pool still exists and that the correct voice IDs are saved in config.
-- If the `Mvp` role is not being granted, check `Manage Roles`, bot hierarchy, and the configured MVP thresholds.
-- If the season reward role is not updating, check `Manage Roles` and that the bot role is above `Professional Highlight Player`.
-- If MongoDB Atlas rejects the connection, allow the VPS or panel node IP in the Atlas allowlist.
+- If `!play` says setup is missing, run `/setup` or `/config` and ensure Waiting Voice plus temp voice category exist.
+- If setup bootstrap skips renames, verify `Manage Nicknames` and bot role hierarchy.
+- If players are not moved, verify `Move Members`, `Connect`, and `Manage Channels`.
+- If rank roles do not sync, verify `Manage Roles` and the bot role position.
+- If slash commands appear late globally, set `DISCORD_GUILD_ID` for faster guild sync during development.
+- If MongoDB connection fails, verify the URI, network allowlist, and database user permissions.
+
+## Notes for v2
+
+Potential future improvements:
+
+- richer slash config subcommands for point/rank rule editing
+- better stale-resource cleanup heuristics on startup
+- more advanced admin review workflows for conflicting votes
+- richer audit exports and dashboarding

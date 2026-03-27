@@ -11,17 +11,7 @@ from highlight_manager.repositories.base import BaseRepository
 class ProfileRepository(BaseRepository[PlayerProfile]):
     async def ensure_indexes(self) -> None:
         await self.collection.create_index([("guild_id", 1), ("user_id", 1)], unique=True)
-        await self.collection.create_index(
-            [
-                ("guild_id", 1),
-                ("manual_rank_override", 1),
-                ("current_points", -1),
-                ("season_stats.wins", -1),
-                ("season_stats.mvp_wins", -1),
-                ("joined_at", 1),
-                ("user_id", 1),
-            ],
-        )
+        await self.collection.create_index([("guild_id", 1), ("current_points", -1)])
         await self.collection.create_index([("guild_id", 1), ("blacklisted", 1)])
 
     async def get(self, guild_id: int, user_id: int) -> PlayerProfile | None:
@@ -45,53 +35,24 @@ class ProfileRepository(BaseRepository[PlayerProfile]):
         return self._to_model(updated)
 
     async def list_leaderboard(self, guild_id: int, limit: int = 10) -> list[PlayerProfile]:
-        cursor = (
-            self.collection.find({"guild_id": guild_id, "manual_rank_override": None})
-            .sort(
-                [
-                    ("current_points", -1),
-                    ("season_stats.wins", -1),
-                    ("season_stats.mvp_wins", -1),
-                    ("joined_at", 1),
-                    ("user_id", 1),
-                ],
-            )
-            .limit(limit)
-        )
+        cursor = self.collection.find({"guild_id": guild_id}).sort("current_points", -1).limit(limit)
         return self._to_models(await cursor.to_list(length=limit))
 
-    async def list_for_ranking(self, guild_id: int) -> list[PlayerProfile]:
-        cursor = self.collection.find({"guild_id": guild_id}).sort(
-            [
-                ("manual_rank_override", 1),
-                ("current_points", -1),
-                ("season_stats.wins", -1),
-                ("season_stats.mvp_wins", -1),
-                ("joined_at", 1),
-                ("user_id", 1),
-            ],
-        )
-        return self._to_models(await cursor.to_list(length=None))
-
-    async def count_for_guild(self, guild_id: int) -> int:
-        return await self.collection.count_documents({"guild_id": guild_id})
-
-    async def count_ranked_for_guild(self, guild_id: int) -> int:
-        return await self.collection.count_documents({"guild_id": guild_id, "manual_rank_override": None})
-
     async def reset_for_new_season(self, guild_id: int, updated_at: datetime) -> None:
-        base_reset = {
-            "current_points": 0,
-            "season_stats": {
-                "matches_played": 0,
-                "wins": 0,
-                "losses": 0,
-                "mvp_wins": 0,
-                "mvp_losses": 0,
-            },
-            "updated_at": updated_at,
-        }
         await self.collection.update_many(
-            {"guild_id": guild_id},
-            {"$set": base_reset},
+            {"guild_id": guild_id, "rank0": False},
+            {
+                "$set": {
+                    "current_points": 0,
+                    "current_rank": 1,
+                    "season_stats": {
+                        "matches_played": 0,
+                        "wins": 0,
+                        "losses": 0,
+                        "mvp_wins": 0,
+                        "mvp_losses": 0,
+                    },
+                    "updated_at": updated_at,
+                },
+            },
         )

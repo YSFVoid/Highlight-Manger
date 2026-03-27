@@ -43,10 +43,6 @@ class MatchRepository(BaseRepository[MatchRecord]):
         )
         return self._to_model(updated) or match
 
-    async def delete(self, guild_id: int, match_number: int) -> bool:
-        result = await self.collection.delete_one({"guild_id": guild_id, "match_number": match_number})
-        return result.deleted_count > 0
-
     async def list_active(
         self,
         guild_id: int | None = None,
@@ -64,7 +60,10 @@ class MatchRepository(BaseRepository[MatchRecord]):
         cursor = self.collection.find(
             {
                 "status": MatchStatus.OPEN.value,
-                "queue_expires_at": {"$ne": None, "$lte": now},
+                "$or": [
+                    {"queue_expires_at": {"$lte": now}},
+                    {"queue_expires_at": None},
+                ],
             },
         )
         return self._to_models(await cursor.to_list(length=None))
@@ -73,7 +72,10 @@ class MatchRepository(BaseRepository[MatchRecord]):
         cursor = self.collection.find(
             {
                 "status": {"$in": [MatchStatus.IN_PROGRESS.value, MatchStatus.VOTING.value, MatchStatus.FULL.value]},
-                "vote_expires_at": {"$lte": now},
+                "$or": [
+                    {"vote_expires_at": {"$lte": now}},
+                    {"vote_expires_at": None},
+                ],
                 "penalties_applied": False,
             },
         )
@@ -104,21 +106,3 @@ class MatchRepository(BaseRepository[MatchRecord]):
 
     async def get_by_public_message(self, message_id: int) -> MatchRecord | None:
         return self._to_model(await self.collection.find_one({"public_message_id": message_id}))
-
-    async def list_closed_with_voice_channels(self) -> list[MatchRecord]:
-        cursor = self.collection.find(
-            {
-                "status": {
-                    "$in": [
-                        MatchStatus.FINALIZED.value,
-                        MatchStatus.CANCELED.value,
-                        MatchStatus.EXPIRED.value,
-                    ],
-                },
-                "$or": [
-                    {"team1_voice_channel_id": {"$ne": None}},
-                    {"team2_voice_channel_id": {"$ne": None}},
-                ],
-            },
-        )
-        return self._to_models(await cursor.to_list(length=None))

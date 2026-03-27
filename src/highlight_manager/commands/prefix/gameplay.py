@@ -5,11 +5,8 @@ from typing import TYPE_CHECKING
 import discord
 from discord.ext import commands
 
-from highlight_manager.config.logging import get_logger
-from highlight_manager.interactions.views import LeaderboardView
-from highlight_manager.utils.embeds import build_help_embed, build_profile_embed, build_rank_embed
+from highlight_manager.utils.embeds import build_leaderboard_embed, build_profile_embed
 from highlight_manager.utils.exceptions import HighlightError
-from highlight_manager.utils.transitions import StatusMessageTransition, TransitionFrame
 
 if TYPE_CHECKING:
     from highlight_manager.bot import HighlightBot
@@ -18,139 +15,43 @@ if TYPE_CHECKING:
 class GameplayCog(commands.Cog):
     def __init__(self, bot: "HighlightBot") -> None:
         self.bot = bot
-        self.logger = get_logger(__name__)
-
-    @commands.command(name="help")
-    async def help_command(self, ctx: commands.Context) -> None:
-        if not ctx.guild:
-            return await ctx.reply("This command can only be used inside the server.")
-        try:
-            config = await self.bot.config_service.get_or_create(ctx.guild.id)
-        except HighlightError as exc:
-            return await ctx.reply(str(exc))
-        except Exception:
-            self.logger.exception(
-                "help_command_failed",
-                guild_id=ctx.guild.id,
-                user_id=ctx.author.id if ctx.author else None,
-                channel_id=getattr(ctx.channel, "id", None),
-                raw_command_content=ctx.message.content if ctx.message else None,
-            )
-            return await ctx.reply("I hit an internal error while loading the command guide.")
-        await ctx.reply(embed=build_help_embed(config.prefix))
 
     @commands.command(name="play")
     async def play(self, ctx: commands.Context, mode: str, match_type: str) -> None:
         if not ctx.guild or not isinstance(ctx.author, discord.Member):
             return await ctx.reply("This command can only be used inside the server.")
-        transition: StatusMessageTransition | None = None
         try:
-            transition = await StatusMessageTransition.create(
-                ctx.channel,
-                heading="Preparing Match",
-                initial=TransitionFrame(
-                    title="Validating Match Request",
-                    detail="Checking the requested mode, match type, and server rules before opening the queue.",
-                    tone="progress",
-                    step_index=1,
-                    step_total=4,
-                    footer="This message will update as the match is prepared.",
-                ),
-            )
-            result = await self.bot.match_service.create_match(
-                ctx.channel,
-                ctx.guild,
-                ctx.author,
-                mode,
-                match_type,
-                raw_command_content=ctx.message.content if ctx.message else None,
-                transition=transition,
-            )
+            result = await self.bot.match_service.create_match(ctx.channel, ctx.guild, ctx.author, mode, match_type)
         except HighlightError as exc:
-            if transition is not None:
-                await transition.fail(str(exc), title="Match Request Blocked")
-                return
             return await ctx.reply(str(exc))
-        except Exception:
-            self.logger.exception(
-                "play_command_handler_failed",
-                guild_id=ctx.guild.id,
-                user_id=ctx.author.id,
-                channel_id=getattr(ctx.channel, "id", None),
-                raw_command_content=ctx.message.content if ctx.message else None,
-                raw_mode=mode,
-                raw_type=match_type,
-            )
-            if transition is not None:
-                await transition.fail(
-                    "I hit an internal error while processing that request.",
-                    title="Match Request Failed",
-                )
-                return
-            return await ctx.reply("I hit an internal error while processing that request.")
-        if result.match.public_message_id:
-            return
         await ctx.reply(result.message)
 
     @commands.command(name="profile")
     async def profile(self, ctx: commands.Context) -> None:
         if not ctx.guild or not isinstance(ctx.author, discord.Member):
             return await ctx.reply("This command can only be used inside the server.")
-        try:
-            config = await self.bot.config_service.get_or_create(ctx.guild.id)
-            profile = await self.bot.profile_service.ensure_member_profile(ctx.author, config)
-            season = await self.bot.season_service.ensure_active(ctx.guild.id)
-        except HighlightError as exc:
-            return await ctx.reply(str(exc))
-        except Exception:
-            self.logger.exception(
-                "profile_command_failed",
-                guild_id=ctx.guild.id,
-                user_id=ctx.author.id,
-                channel_id=getattr(ctx.channel, "id", None),
-                raw_command_content=ctx.message.content if ctx.message else None,
-            )
-            return await ctx.reply("I hit an internal error while loading that profile.")
+        config = await self.bot.config_service.get_or_create(ctx.guild.id)
+        profile = await self.bot.profile_service.ensure_member_profile(ctx.author, config)
+        season = await self.bot.season_service.ensure_active(ctx.guild.id)
         await ctx.reply(embed=build_profile_embed(ctx.guild, profile, season.name))
 
-    @commands.command(name="rank", aliases=["r"])
+    @commands.command(name="rank")
     async def rank(self, ctx: commands.Context) -> None:
         if not ctx.guild or not isinstance(ctx.author, discord.Member):
             return await ctx.reply("This command can only be used inside the server.")
-        try:
-            config = await self.bot.config_service.get_or_create(ctx.guild.id)
-            profile = await self.bot.profile_service.ensure_member_profile(ctx.author, config)
-            season = await self.bot.season_service.ensure_active(ctx.guild.id)
-        except HighlightError as exc:
-            return await ctx.reply(str(exc))
-        except Exception:
-            self.logger.exception(
-                "rank_command_failed",
-                guild_id=ctx.guild.id,
-                user_id=ctx.author.id,
-                channel_id=getattr(ctx.channel, "id", None),
-                raw_command_content=ctx.message.content if ctx.message else None,
-            )
-            return await ctx.reply("I hit an internal error while loading your rank.")
-        await ctx.reply(embed=build_rank_embed(ctx.guild, profile, season.name))
+        config = await self.bot.config_service.get_or_create(ctx.guild.id)
+        profile = await self.bot.profile_service.ensure_member_profile(ctx.author, config)
+        await ctx.reply(
+            f"{ctx.author.mention} is currently **Rank {profile.current_rank}** with "
+            f"**{profile.current_points}** points and **{profile.coins_balance}** coins."
+        )
 
     @commands.command(name="leaderboard", aliases=["top"])
     async def leaderboard(self, ctx: commands.Context) -> None:
         if not ctx.guild:
             return await ctx.reply("This command can only be used inside the server.")
-        try:
-            view = LeaderboardView(self.bot, ctx.guild)
-            embed = await view.build_embed()
-        except Exception:
-            self.logger.exception(
-                "leaderboard_command_failed",
-                guild_id=ctx.guild.id,
-                user_id=ctx.author.id if ctx.author else None,
-                channel_id=getattr(ctx.channel, "id", None),
-                raw_command_content=ctx.message.content if ctx.message else None,
-            )
-            return await ctx.reply("I hit an internal error while loading the leaderboard.")
-        await ctx.reply(embed=embed, view=view)
+        profiles = await self.bot.profile_service.list_leaderboard(ctx.guild.id, limit=10)
+        await ctx.reply(embed=build_leaderboard_embed(ctx.guild, profiles, title="Current Season Leaderboard"))
 
     @commands.command(name="stats")
     async def stats(self, ctx: commands.Context, member: discord.Member | None = None) -> None:
@@ -159,22 +60,9 @@ class GameplayCog(commands.Cog):
         target = member or ctx.author
         if not isinstance(target, discord.Member):
             return await ctx.reply("Could not find that member.")
-        try:
-            config = await self.bot.config_service.get_or_create(ctx.guild.id)
-            profile = await self.bot.profile_service.ensure_member_profile(target, config)
-            season = await self.bot.season_service.ensure_active(ctx.guild.id)
-        except HighlightError as exc:
-            return await ctx.reply(str(exc))
-        except Exception:
-            self.logger.exception(
-                "stats_command_failed",
-                guild_id=ctx.guild.id,
-                actor_id=ctx.author.id if ctx.author else None,
-                target_id=target.id,
-                channel_id=getattr(ctx.channel, "id", None),
-                raw_command_content=ctx.message.content if ctx.message else None,
-            )
-            return await ctx.reply("I hit an internal error while loading those stats.")
+        config = await self.bot.config_service.get_or_create(ctx.guild.id)
+        profile = await self.bot.profile_service.ensure_member_profile(target, config)
+        season = await self.bot.season_service.ensure_active(ctx.guild.id)
         await ctx.reply(embed=build_profile_embed(ctx.guild, profile, season.name))
 
 

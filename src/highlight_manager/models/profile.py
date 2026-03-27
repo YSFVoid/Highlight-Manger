@@ -14,12 +14,12 @@ class PlayerProfile(AppModel):
     user_id: int
     current_points: int = 0
     lifetime_points: int = 0
+    coins_balance: int = 0
+    lifetime_coins_earned: int = 0
+    lifetime_coins_spent: int = 0
     current_rank: int = 1
-    manual_rank_override: int | None = None
+    rank0: bool = False
     blacklisted: bool = False
-    joined_at: datetime | None = None
-    mvp_winner_count: int = 0
-    mvp_loser_count: int = 0
     season_stats: PlayerStats = Field(default_factory=PlayerStats)
     lifetime_stats: PlayerStats = Field(default_factory=PlayerStats)
     created_at: datetime = Field(default_factory=utcnow)

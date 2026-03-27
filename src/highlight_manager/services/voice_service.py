@@ -5,71 +5,21 @@ import discord
 from highlight_manager.config.logging import get_logger
 from highlight_manager.models.guild_config import GuildConfig
 from highlight_manager.models.match import MatchRecord
-from highlight_manager.utils.channel_names import format_match_channel_name
 from highlight_manager.utils.exceptions import ConfigurationError, UserFacingError
 from highlight_manager.utils.permissions import bot_missing_permissions
 
 
 class VoiceService:
-    FALLBACK_TEAM1_TEMPLATE = "TEAM 1 - Match #{match_id}"
-    FALLBACK_TEAM2_TEMPLATE = "TEAM 2 - Match #{match_id}"
-
     def __init__(self) -> None:
         self.logger = get_logger(__name__)
 
     def ensure_member_in_waiting_voice(self, member: discord.Member, config: GuildConfig) -> None:
-        allowed_waiting_voice_ids = set(config.all_waiting_voice_channel_ids)
-        if not allowed_waiting_voice_ids:
+        if not config.waiting_voice_channel_id:
             raise ConfigurationError("Waiting Voice channel is not configured.")
         if member.voice is None or member.voice.channel is None:
             raise UserFacingError("You must be in the configured Waiting Voice channel to do that.")
-        if member.voice.channel.id not in allowed_waiting_voice_ids:
+        if member.voice.channel.id != config.waiting_voice_channel_id:
             raise UserFacingError("You must be in the configured Waiting Voice channel to do that.")
-
-    async def resolve_voice_channel(
-        self,
-        guild: discord.Guild,
-        channel_id: int | None,
-        *,
-        match_number: int,
-        purpose: str,
-    ) -> discord.VoiceChannel | None:
-        if not channel_id:
-            return None
-        channel = guild.get_channel(channel_id)
-        if isinstance(channel, discord.VoiceChannel):
-            return channel
-        fetch_channel = getattr(guild, "fetch_channel", None)
-        if callable(fetch_channel):
-            try:
-                fetched = await fetch_channel(channel_id)
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException, KeyError) as exc:
-                self.logger.warning(
-                    "voice_channel_fetch_failed",
-                    guild_id=guild.id,
-                    match_number=match_number,
-                    channel_id=channel_id,
-                    purpose=purpose,
-                    error=str(exc),
-                )
-                return None
-            if isinstance(fetched, discord.VoiceChannel):
-                self.logger.info(
-                    "voice_channel_fetched_from_api",
-                    guild_id=guild.id,
-                    match_number=match_number,
-                    channel_id=channel_id,
-                    purpose=purpose,
-                )
-                return fetched
-        self.logger.warning(
-            "voice_channel_unavailable",
-            guild_id=guild.id,
-            match_number=match_number,
-            channel_id=channel_id,
-            purpose=purpose,
-        )
-        return None
 
     async def create_match_voice_channels(
         self,
@@ -90,29 +40,15 @@ class VoiceService:
                 "I am missing permissions to manage match voices: " + ", ".join(missing_perms)
             )
 
-        team1 = await self._create_voice_channel_with_fallback(
-            guild,
-            preferred_name=format_match_channel_name(config.team1_voice_name_template, match),
-            fallback_name=self.FALLBACK_TEAM1_TEMPLATE.format(match_id=match.display_id),
+        team1 = await guild.create_voice_channel(
+            config.team1_voice_name_template.format(match_id=match.display_id),
             category=category,
-            overwrites=self._build_match_voice_overwrites(
-                guild,
-                match.team1_player_ids,
-                config,
-            ),
             user_limit=match.team_size,
             reason=f"Match #{match.display_id} Team 1",
         )
-        team2 = await self._create_voice_channel_with_fallback(
-            guild,
-            preferred_name=format_match_channel_name(config.team2_voice_name_template, match),
-            fallback_name=self.FALLBACK_TEAM2_TEMPLATE.format(match_id=match.display_id),
+        team2 = await guild.create_voice_channel(
+            config.team2_voice_name_template.format(match_id=match.display_id),
             category=category,
-            overwrites=self._build_match_voice_overwrites(
-                guild,
-                match.team2_player_ids,
-                config,
-            ),
             user_limit=match.team_size,
             reason=f"Match #{match.display_id} Team 2",
         )
@@ -156,71 +92,14 @@ class VoiceService:
             )
         return warnings
 
-    async def move_players_to_waiting_voice(
-        self,
-        guild: discord.Guild,
-        match: MatchRecord,
-        config: GuildConfig,
-    ) -> list[str]:
-        warnings: list[str] = []
-        waiting_channel = await self.resolve_voice_channel(
-            guild,
-            config.waiting_voice_channel_id,
-            match_number=match.match_number,
-            purpose="move_players_to_waiting_voice",
-        )
-        if not isinstance(waiting_channel, discord.VoiceChannel):
-            self.logger.warning(
-                "waiting_voice_return_missing",
-                guild_id=guild.id,
-                match_number=match.match_number,
-                waiting_voice_channel_id=config.waiting_voice_channel_id,
-            )
-            return warnings
-
-        for user_id in match.all_player_ids:
-            member = guild.get_member(user_id)
-            if member is None or member.voice is None or member.voice.channel is None:
-                continue
-            if member.voice.channel.id not in {match.team1_voice_channel_id, match.team2_voice_channel_id}:
-                continue
-            try:
-                await member.move_to(waiting_channel, reason=f"Returning Match #{match.display_id} players to Waiting Voice")
-            except discord.Forbidden:
-                warnings.append(f"Could not move {member.mention} back to Waiting Voice because bot lacks Move Members.")
-            except discord.HTTPException:
-                warnings.append(f"Could not move {member.mention} back to Waiting Voice.")
-
-        if warnings:
-            self.logger.warning(
-                "waiting_voice_return_partial",
-                guild_id=guild.id,
-                match_number=match.match_number,
-                warnings=warnings,
-            )
-        return warnings
-
-    async def cleanup_match_voices(
-        self,
-        guild: discord.Guild,
-        match: MatchRecord,
-        *,
-        config: GuildConfig | None = None,
-    ) -> None:
-        deleted_channel_ids: set[int] = set()
+    async def cleanup_match_voices(self, guild: discord.Guild, match: MatchRecord) -> None:
         for channel_id in [match.team1_voice_channel_id, match.team2_voice_channel_id]:
-            if not channel_id or channel_id in deleted_channel_ids:
+            if not channel_id:
                 continue
-            channel = await self.resolve_voice_channel(
-                guild,
-                channel_id,
-                match_number=match.match_number,
-                purpose="cleanup_match_voices",
-            )
+            channel = guild.get_channel(channel_id)
             if isinstance(channel, discord.VoiceChannel):
                 try:
                     await channel.delete(reason=f"Cleaning up Match #{match.display_id}")
-                    deleted_channel_ids.add(channel.id)
                     self.logger.info(
                         "match_voice_channel_deleted",
                         guild_id=guild.id,
@@ -242,164 +121,47 @@ class VoiceService:
                         channel_id=channel_id,
                         error=str(exc),
                     )
-        if config is not None:
-            await self.delete_duplicate_match_voice_channels(
-                guild,
-                match,
-                config,
-                keep_channel_ids=set(),
-            )
 
-    async def delete_duplicate_match_voice_channels(
+    async def create_tournament_voice_channels(
         self,
         guild: discord.Guild,
-        match: MatchRecord,
+        tournament,
+        match,
         config: GuildConfig,
-        *,
-        keep_channel_ids: set[int],
-    ) -> None:
-        duplicate_channels = self._find_duplicate_match_voice_channels(guild, match, config, keep_channel_ids=keep_channel_ids)
-        for channel in duplicate_channels:
-            try:
-                await channel.delete(reason=f"Removing duplicate Match #{match.display_id} voice channel")
-                self.logger.info(
-                    "duplicate_match_voice_channel_deleted",
-                    guild_id=guild.id,
-                    match_number=match.match_number,
-                    channel_id=channel.id,
-                    channel_name=channel.name,
-                )
-            except discord.Forbidden:
-                self.logger.warning(
-                    "duplicate_match_voice_channel_delete_forbidden",
-                    guild_id=guild.id,
-                    match_number=match.match_number,
-                    channel_id=channel.id,
-                )
-            except discord.HTTPException as exc:
-                self.logger.warning(
-                    "duplicate_match_voice_channel_delete_failed",
-                    guild_id=guild.id,
-                    match_number=match.match_number,
-                    channel_id=channel.id,
-                    error=str(exc),
-                )
-
-    async def _create_voice_channel_with_fallback(
-        self,
-        guild: discord.Guild,
-        *,
-        preferred_name: str,
-        fallback_name: str,
-        category: discord.CategoryChannel,
-        overwrites: dict[discord.Role | discord.Member, discord.PermissionOverwrite],
-        user_limit: int,
-        reason: str,
-    ) -> discord.VoiceChannel:
-        try:
-            return await guild.create_voice_channel(
-                preferred_name,
-                category=category,
-                overwrites=overwrites,
-                user_limit=user_limit,
-                reason=reason,
-            )
-        except discord.HTTPException as exc:
-            if exc.status != 400 or preferred_name.casefold() == fallback_name.casefold():
-                raise
-            self.logger.warning(
-                "voice_channel_name_fallback_used",
-                guild_id=guild.id,
-                preferred_name=preferred_name,
-                fallback_name=fallback_name,
-                error=str(exc),
-            )
-            return await guild.create_voice_channel(
-                fallback_name,
-                category=category,
-                overwrites=overwrites,
-                user_limit=user_limit,
-                reason=reason,
-            )
-
-    def _build_match_voice_overwrites(
-        self,
-        guild: discord.Guild,
-        player_ids: list[int],
-        config: GuildConfig,
-    ) -> dict[discord.Role | discord.Member, discord.PermissionOverwrite]:
-        overwrites: dict[discord.Role | discord.Member, discord.PermissionOverwrite] = {
-            guild.default_role: discord.PermissionOverwrite(
-                view_channel=False,
-                connect=False,
-            ),
-        }
-        me = guild.me
-        if me:
-            overwrites[me] = discord.PermissionOverwrite(
-                view_channel=True,
-                connect=True,
-                manage_channels=True,
-                move_members=True,
-                mute_members=True,
-                deafen_members=True,
-            )
-        for role_id in {*(config.admin_role_ids or []), *(config.staff_role_ids or [])}:
-            role = guild.get_role(role_id)
-            if role is None:
-                continue
-            overwrites[role] = discord.PermissionOverwrite(
-                view_channel=True,
-                connect=True,
-                move_members=True,
-                mute_members=True,
-                deafen_members=True,
-            )
-        for user_id in player_ids:
-            member = guild.get_member(user_id)
-            if member is None:
-                continue
-            overwrites[member] = discord.PermissionOverwrite(
-                view_channel=True,
-                connect=True,
-                speak=True,
-            )
-        return overwrites
-
-    def _find_duplicate_match_voice_channels(
-        self,
-        guild: discord.Guild,
-        match: MatchRecord,
-        config: GuildConfig,
-        *,
-        keep_channel_ids: set[int],
-    ) -> list[discord.VoiceChannel]:
-        candidate_names = {
-            format_match_channel_name(config.team1_voice_name_template, match),
-            format_match_channel_name(config.team2_voice_name_template, match),
-            self.FALLBACK_TEAM1_TEMPLATE.format(match_id=match.display_id),
-            self.FALLBACK_TEAM2_TEMPLATE.format(match_id=match.display_id),
-        }
+    ) -> tuple[discord.VoiceChannel, discord.VoiceChannel]:
         category = guild.get_channel(config.temp_voice_category_id) if config.temp_voice_category_id else None
-        if isinstance(category, discord.CategoryChannel):
-            channels = [channel for channel in category.channels if isinstance(channel, discord.VoiceChannel)]
-        else:
-            channels = [
-                channel
-                for channel in self._iter_guild_channels(guild)
-                if isinstance(channel, discord.VoiceChannel)
-            ]
-        return [
-            channel
-            for channel in channels
-            if channel.id not in keep_channel_ids and channel.name in candidate_names
-        ]
+        if not isinstance(category, discord.CategoryChannel):
+            raise ConfigurationError("Temporary voice category is not configured or no longer exists.")
+        missing_perms = bot_missing_permissions(
+            guild.me,
+            category,
+            ["manage_channels", "connect", "view_channel"],
+        )
+        if missing_perms:
+            raise UserFacingError(
+                "I am missing permissions to manage tournament voices: " + ", ".join(missing_perms)
+            )
 
-    def _iter_guild_channels(self, guild: discord.Guild) -> list[discord.abc.GuildChannel]:
-        channels = getattr(guild, "channels", None)
-        if channels is not None:
-            return list(channels)
-        fake_channels = getattr(guild, "_channels", None)
-        if isinstance(fake_channels, dict):
-            return list(fake_channels.values())
-        return []
+        base_name = f"T{tournament.tournament_number:03d}-M{match.match_number:03d}"
+        team1 = await guild.create_voice_channel(
+            f"{base_name} Team 1",
+            category=category,
+            reason=f"Tournament Match #{match.match_number:03d} Team 1",
+        )
+        team2 = await guild.create_voice_channel(
+            f"{base_name} Team 2",
+            category=category,
+            reason=f"Tournament Match #{match.match_number:03d} Team 2",
+        )
+        return team1, team2
+
+    async def cleanup_tournament_voices(self, guild: discord.Guild, match) -> None:
+        for channel_id in [match.team1_voice_channel_id, match.team2_voice_channel_id]:
+            if not channel_id:
+                continue
+            channel = guild.get_channel(channel_id)
+            if isinstance(channel, discord.VoiceChannel):
+                try:
+                    await channel.delete(reason=f"Cleaning up Tournament Match #{match.match_number:03d}")
+                except (discord.Forbidden, discord.HTTPException):
+                    continue

@@ -16,7 +16,6 @@ class Settings(BaseSettings):
     discord_token: str = Field(alias="DISCORD_TOKEN")
     discord_client_id: int | None = Field(default=None, alias="DISCORD_CLIENT_ID")
     mongodb_uri: str = Field(alias="MONGODB_URI")
-    mongodb_database: str = Field(default="highlight_manager", alias="MONGODB_DATABASE")
     discord_guild_id: int | None = Field(default=None, alias="DISCORD_GUILD_ID")
     default_prefix: str = Field(default="!", alias="DEFAULT_PREFIX")
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(

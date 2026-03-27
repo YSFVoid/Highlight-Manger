@@ -1,18 +1,16 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 import discord
 
 from highlight_manager.config.logging import get_logger
 from highlight_manager.models.common import BootstrapSummary
-from highlight_manager.models.guild_config import GuildConfig, fallback_resource_names
+from highlight_manager.models.guild_config import GuildConfig
 from highlight_manager.services.bootstrap_service import BootstrapService
 from highlight_manager.services.config_service import ConfigService
 from highlight_manager.utils.dates import utcnow
 from highlight_manager.utils.exceptions import UserFacingError
-from highlight_manager.utils.transitions import TransitionFrame
 
 
 @dataclass(slots=True)
@@ -24,14 +22,9 @@ class SetupRunResult:
     first_bootstrap_ran: bool
 
 
-@dataclass(slots=True)
-class EnsuredResource:
-    channel: discord.abc.GuildChannel
-    created: bool
-    fallback_used: bool = False
-
-
 class SetupService:
+    APOSTADO_PLAY_CHANNEL_NAME = "apostado-play"
+    HIGHLIGHT_PLAY_CHANNEL_NAME = "highlight-play"
     REQUIRED_SETUP_PERMISSIONS = [
         "manage_channels",
         "move_members",
@@ -49,15 +42,6 @@ class SetupService:
         self.bootstrap_service = bootstrap_service
         self.logger = get_logger(__name__)
 
-    async def _emit_progress(
-        self,
-        progress_callback: Callable[[TransitionFrame], Awaitable[None]] | None,
-        frame: TransitionFrame,
-    ) -> None:
-        if progress_callback is None:
-            return
-        await progress_callback(frame)
-
     def validate_permissions(self, guild: discord.Guild) -> None:
         me = guild.me
         if me is None:
@@ -67,206 +51,84 @@ class SetupService:
             pretty = ", ".join(permission.replace("_", " ") for permission in missing)
             raise UserFacingError(f"Setup cannot continue because the bot is missing: {pretty}.")
 
-    async def run(
-        self,
-        guild: discord.Guild,
-        *,
-        prefix: str | None,
-        repair: bool = False,
-        progress_callback: Callable[[TransitionFrame], Awaitable[None]] | None = None,
-    ) -> SetupRunResult:
-        await self._emit_progress(
-            progress_callback,
-            TransitionFrame(
-                title="Validating Permissions",
-                detail="Checking required Discord permissions before setup touches channels, roles, and nicknames.",
-                tone="progress",
-                step_index=1,
-                step_total=6,
-            ),
-        )
+    async def run(self, guild: discord.Guild, *, prefix: str | None, repair: bool = False) -> SetupRunResult:
         self.validate_permissions(guild)
         config = await self.config_service.get_or_create(guild.id)
         created_resources: list[str] = []
         reused_resources: list[str] = []
         setup_resource_ids = dict(config.setup_created_resources)
-        fallback_names = fallback_resource_names()
 
-        await self._emit_progress(
-            progress_callback,
-            TransitionFrame(
-                title="Creating Play Rooms",
-                detail="Ensuring the Apostado room, Highlight room, and Waiting Voice pool are configured.",
-                tone="progress",
-                step_index=2,
-                step_total=6,
-            ),
-        )
-
-        apostado_play_result = await self._ensure_text_channel(
-            guild,
-            configured_id=config.apostado_play_channel_id,
-            name=config.resource_names.apostado_play_channel,
-            fallback_name=fallback_names.apostado_play_channel,
-            reason="Highlight Manager automatic setup",
-        )
-        apostado_play_channel = apostado_play_result.channel
-        label = self._format_resource_entry(
-            "Apostado Play Room",
-            apostado_play_channel.mention,
-            fallback_used=apostado_play_result.fallback_used,
-        )
-        created_resources.append(label) if apostado_play_result.created else reused_resources.append(label)
-        setup_resource_ids["apostado_play_channel_id"] = apostado_play_channel.id
-
-        highlight_play_result = await self._ensure_text_channel(
-            guild,
-            configured_id=config.highlight_play_channel_id,
-            name=config.resource_names.highlight_play_channel,
-            fallback_name=fallback_names.highlight_play_channel,
-            reason="Highlight Manager automatic setup",
-        )
-        highlight_play_channel = highlight_play_result.channel
-        label = self._format_resource_entry(
-            "Highlight Play Room",
-            highlight_play_channel.mention,
-            fallback_used=highlight_play_result.fallback_used,
-        )
-        created_resources.append(label) if highlight_play_result.created else reused_resources.append(label)
-        setup_resource_ids["highlight_play_channel_id"] = highlight_play_channel.id
-
-        waiting_voice_result = await self._ensure_voice_channel(
+        waiting_voice, created = await self._ensure_voice_channel(
             guild,
             configured_id=config.waiting_voice_channel_id,
-            name=config.resource_names.waiting_voice,
-            fallback_name=fallback_names.waiting_voice,
+            name="Waiting Voice",
             reason="Highlight Manager automatic setup",
         )
-        waiting_voice = waiting_voice_result.channel
-        label = self._format_resource_entry(
-            "Waiting Voice",
-            waiting_voice.mention,
-            fallback_used=waiting_voice_result.fallback_used,
-        )
-        created_resources.append(label) if waiting_voice_result.created else reused_resources.append(label)
+        created_resources.append(f"Waiting Voice: {waiting_voice.mention}") if created else reused_resources.append(f"Waiting Voice: {waiting_voice.mention}")
         setup_resource_ids["waiting_voice_channel_id"] = waiting_voice.id
 
-        await self._emit_progress(
-            progress_callback,
-            TransitionFrame(
-                title="Preparing Match Categories",
-                detail="Ensuring the temporary voice category, result room parent, and logs channel are ready.",
-                tone="progress",
-                step_index=3,
-                step_total=6,
-            ),
+        apostado_channel, created = await self._ensure_text_channel(
+            guild,
+            configured_id=config.apostado_channel_id,
+            name=self.APOSTADO_PLAY_CHANNEL_NAME,
+            reason="Highlight Manager automatic setup",
         )
+        created_resources.append(f"Apostado Play Room: {apostado_channel.mention}") if created else reused_resources.append(f"Apostado Play Room: {apostado_channel.mention}")
+        setup_resource_ids["apostado_channel_id"] = apostado_channel.id
 
-        temp_category_result = await self._ensure_category(
+        highlight_channel, created = await self._ensure_text_channel(
+            guild,
+            configured_id=config.highlight_channel_id,
+            name=self.HIGHLIGHT_PLAY_CHANNEL_NAME,
+            reason="Highlight Manager automatic setup",
+        )
+        created_resources.append(f"Highlight Play Room: {highlight_channel.mention}") if created else reused_resources.append(f"Highlight Play Room: {highlight_channel.mention}")
+        setup_resource_ids["highlight_channel_id"] = highlight_channel.id
+
+        temp_category, created = await self._ensure_category(
             guild,
             configured_id=config.temp_voice_category_id,
-            name=config.resource_names.temp_voice_category,
-            fallback_name=fallback_names.temp_voice_category,
+            name="Highlight Match Voices",
             reason="Highlight Manager automatic setup",
         )
-        temp_category = temp_category_result.channel
-        label = self._format_resource_entry(
-            "Temp Match Category",
-            f"**{temp_category.name}**",
-            fallback_used=temp_category_result.fallback_used,
-        )
-        created_resources.append(label) if temp_category_result.created else reused_resources.append(label)
+        created_resources.append(f"Temp Match Category: **{temp_category.name}**") if created else reused_resources.append(f"Temp Match Category: **{temp_category.name}**")
         setup_resource_ids["temp_voice_category_id"] = temp_category.id
 
-        result_category_result = await self._ensure_category(
+        result_category, created = await self._ensure_category(
             guild,
             configured_id=config.result_category_id,
-            name=config.resource_names.result_category,
-            fallback_name=fallback_names.result_category,
+            name="Match Results",
             reason="Highlight Manager automatic setup",
         )
-        result_category = result_category_result.channel
-        label = self._format_resource_entry(
-            "Results Category",
-            f"**{result_category.name}**",
-            fallback_used=result_category_result.fallback_used,
-        )
-        created_resources.append(label) if result_category_result.created else reused_resources.append(label)
+        created_resources.append(f"Results Category: **{result_category.name}**") if created else reused_resources.append(f"Results Category: **{result_category.name}**")
         setup_resource_ids["result_category_id"] = result_category.id
 
-        log_channel_result = await self._ensure_text_channel(
+        log_channel, created = await self._ensure_text_channel(
             guild,
             configured_id=config.log_channel_id,
-            name=config.resource_names.log_channel,
-            fallback_name=fallback_names.log_channel,
+            name="highlight-logs",
             reason="Highlight Manager automatic setup",
         )
-        log_channel = log_channel_result.channel
-        label = self._format_resource_entry(
-            "Logs Channel",
-            log_channel.mention,
-            fallback_used=log_channel_result.fallback_used,
-        )
-        created_resources.append(label) if log_channel_result.created else reused_resources.append(label)
+        created_resources.append(f"Logs Channel: {log_channel.mention}") if created else reused_resources.append(f"Logs Channel: {log_channel.mention}")
         setup_resource_ids["log_channel_id"] = log_channel.id
 
-        await self._emit_progress(
-            progress_callback,
-            TransitionFrame(
-                title="Creating Reward Roles",
-                detail="Checking the MVP reward role and the seasonal reward role before saving the guild config.",
-                tone="progress",
-                step_index=4,
-                step_total=6,
-            ),
-        )
-
-        config, mvp_reward_role, created = await self.config_service.ensure_mvp_reward_role(
-            guild,
-            config,
-            create_missing=True,
-        )
-        if mvp_reward_role is not None:
-            setup_resource_ids["mvp_reward_role_id"] = mvp_reward_role.id
-            label = f"Mvp Role: {mvp_reward_role.mention}"
+        rank_role_map = dict(config.rank_role_map)
+        for rank in range(0, 6):
+            role, created = await self._ensure_role(guild, rank, rank_role_map.get(str(rank)))
+            rank_role_map[str(rank)] = role.id
+            setup_resource_ids[f"rank_role_{rank}"] = role.id
+            label = f"Rank {rank} Role: {role.mention}"
             created_resources.append(label) if created else reused_resources.append(label)
 
-        config, season_reward_role, created = await self.config_service.ensure_season_reward_role(
-            guild,
-            config,
-            create_missing=True,
-        )
-        if season_reward_role is not None:
-            setup_resource_ids["season_reward_role_id"] = season_reward_role.id
-            label = f"Season Reward Role: {season_reward_role.mention}"
-            created_resources.append(label) if created else reused_resources.append(label)
-
-        await self._emit_progress(
-            progress_callback,
-            TransitionFrame(
-                title="Saving Configuration",
-                detail="Persisting resource IDs, feature flags, and setup metadata for this guild.",
-                tone="progress",
-                step_index=5,
-                step_total=6,
-            ),
-        )
         updates = {
             "prefix": prefix or config.prefix,
-            "apostado_play_channel_id": apostado_play_channel.id,
-            "highlight_play_channel_id": highlight_play_channel.id,
+            "apostado_channel_id": apostado_channel.id,
+            "highlight_channel_id": highlight_channel.id,
             "waiting_voice_channel_id": waiting_voice.id,
             "temp_voice_category_id": temp_category.id,
             "result_category_id": result_category.id,
             "log_channel_id": log_channel.id,
-            "mvp_reward_role_id": mvp_reward_role.id if mvp_reward_role else config.mvp_reward_role_id,
-            "mvp_reward_role_name": (
-                mvp_reward_role.name if mvp_reward_role else config.mvp_reward_role_name
-            ),
-            "season_reward_role_id": season_reward_role.id if season_reward_role else config.season_reward_role_id,
-            "season_reward_role_name": (
-                season_reward_role.name if season_reward_role else config.season_reward_role_name
-            ),
+            "rank_role_map": rank_role_map,
             "setup_created_resources": setup_resource_ids,
         }
         config = await self.config_service.update(guild.id, updates)
@@ -274,16 +136,6 @@ class SetupService:
         bootstrap_summary: BootstrapSummary | None = None
         first_bootstrap_ran = False
         if not repair and not config.bootstrap_completed and config.features.bootstrap_on_first_setup:
-            await self._emit_progress(
-                progress_callback,
-                TransitionFrame(
-                    title="Bootstrapping Members",
-                    detail="Assigning starting placements and syncing member nicknames for the first live season.",
-                    tone="progress",
-                    step_index=6,
-                    step_total=6,
-                ),
-            )
             bootstrap_summary = await self.bootstrap_service.run(guild, config)
             config = await self.config_service.update(
                 guild.id,
@@ -294,16 +146,6 @@ class SetupService:
                 },
             )
             first_bootstrap_ran = True
-        await self._emit_progress(
-            progress_callback,
-            TransitionFrame(
-                title="Setup Complete",
-                detail="Resources are configured and the guild is ready for live match flow.",
-                tone="success",
-                step_index=6,
-                step_total=6,
-            ),
-        )
         return SetupRunResult(
             config=config,
             created_resources=created_resources,
@@ -312,13 +154,8 @@ class SetupService:
             first_bootstrap_ran=first_bootstrap_ran,
         )
 
-    async def repair(
-        self,
-        guild: discord.Guild,
-        *,
-        progress_callback: Callable[[TransitionFrame], Awaitable[None]] | None = None,
-    ) -> SetupRunResult:
-        return await self.run(guild, prefix=None, repair=True, progress_callback=progress_callback)
+    async def repair(self, guild: discord.Guild) -> SetupRunResult:
+        return await self.run(guild, prefix=None, repair=True)
 
     async def _ensure_voice_channel(
         self,
@@ -326,20 +163,15 @@ class SetupService:
         *,
         configured_id: int | None,
         name: str,
-        fallback_name: str,
         reason: str,
-    ) -> EnsuredResource:
+    ) -> tuple[discord.VoiceChannel, bool]:
         channel = guild.get_channel(configured_id) if configured_id else None
         if isinstance(channel, discord.VoiceChannel):
-            return EnsuredResource(channel=channel, created=False)
-        accepted_names = {name.casefold(), fallback_name.casefold()}
-        existing = discord.utils.find(
-            lambda item: isinstance(item, discord.VoiceChannel) and item.name.casefold() in accepted_names,
-            guild.channels,
-        )
+            return channel, False
+        existing = discord.utils.find(lambda item: isinstance(item, discord.VoiceChannel) and item.name.lower() == name.lower(), guild.channels)
         if isinstance(existing, discord.VoiceChannel):
-            return EnsuredResource(channel=existing, created=False)
-        return await self._create_voice_channel_with_fallback(guild, name=name, fallback_name=fallback_name, reason=reason)
+            return existing, False
+        return await guild.create_voice_channel(name, reason=reason), True
 
     async def _ensure_text_channel(
         self,
@@ -347,20 +179,15 @@ class SetupService:
         *,
         configured_id: int | None,
         name: str,
-        fallback_name: str,
         reason: str,
-    ) -> EnsuredResource:
+    ) -> tuple[discord.TextChannel, bool]:
         channel = guild.get_channel(configured_id) if configured_id else None
         if isinstance(channel, discord.TextChannel):
-            return EnsuredResource(channel=channel, created=False)
-        accepted_names = {name.casefold(), fallback_name.casefold()}
-        existing = discord.utils.find(
-            lambda item: isinstance(item, discord.TextChannel) and item.name.casefold() in accepted_names,
-            guild.channels,
-        )
+            return channel, False
+        existing = discord.utils.find(lambda item: isinstance(item, discord.TextChannel) and item.name.lower() == name.lower(), guild.channels)
         if isinstance(existing, discord.TextChannel):
-            return EnsuredResource(channel=existing, created=False)
-        return await self._create_text_channel_with_fallback(guild, name=name, fallback_name=fallback_name, reason=reason)
+            return existing, False
+        return await guild.create_text_channel(name, reason=reason), True
 
     async def _ensure_category(
         self,
@@ -368,111 +195,27 @@ class SetupService:
         *,
         configured_id: int | None,
         name: str,
-        fallback_name: str,
         reason: str,
-    ) -> EnsuredResource:
+    ) -> tuple[discord.CategoryChannel, bool]:
         channel = guild.get_channel(configured_id) if configured_id else None
         if isinstance(channel, discord.CategoryChannel):
-            return EnsuredResource(channel=channel, created=False)
-        accepted_names = {name.casefold(), fallback_name.casefold()}
-        existing = discord.utils.find(
-            lambda item: isinstance(item, discord.CategoryChannel) and item.name.casefold() in accepted_names,
-            guild.channels,
-        )
+            return channel, False
+        existing = discord.utils.find(lambda item: isinstance(item, discord.CategoryChannel) and item.name.lower() == name.lower(), guild.channels)
         if isinstance(existing, discord.CategoryChannel):
-            return EnsuredResource(channel=existing, created=False)
-        return await self._create_category_with_fallback(guild, name=name, fallback_name=fallback_name, reason=reason)
+            return existing, False
+        return await guild.create_category(name, reason=reason), True
 
-    def _format_resource_entry(self, label: str, value: str, *, fallback_used: bool) -> str:
-        suffix = " (fallback ASCII name used)" if fallback_used else ""
-        return f"{label}: {value}{suffix}"
-
-    async def _create_text_channel_with_fallback(
+    async def _ensure_role(
         self,
         guild: discord.Guild,
-        *,
-        name: str,
-        fallback_name: str,
-        reason: str,
-    ) -> EnsuredResource:
-        try:
-            return EnsuredResource(
-                channel=await guild.create_text_channel(name, reason=reason),
-                created=True,
-            )
-        except discord.HTTPException as exc:
-            if exc.status != 400 or name.casefold() == fallback_name.casefold():
-                raise
-            self.logger.warning(
-                "resource_name_fallback_used",
-                guild_id=guild.id,
-                resource_type="text_channel",
-                preferred_name=name,
-                fallback_name=fallback_name,
-                error=str(exc),
-            )
-        return EnsuredResource(
-            channel=await guild.create_text_channel(fallback_name, reason=reason),
-            created=True,
-            fallback_used=True,
-        )
-
-    async def _create_voice_channel_with_fallback(
-        self,
-        guild: discord.Guild,
-        *,
-        name: str,
-        fallback_name: str,
-        reason: str,
-    ) -> EnsuredResource:
-        try:
-            return EnsuredResource(
-                channel=await guild.create_voice_channel(name, reason=reason),
-                created=True,
-            )
-        except discord.HTTPException as exc:
-            if exc.status != 400 or name.casefold() == fallback_name.casefold():
-                raise
-            self.logger.warning(
-                "resource_name_fallback_used",
-                guild_id=guild.id,
-                resource_type="voice_channel",
-                preferred_name=name,
-                fallback_name=fallback_name,
-                error=str(exc),
-            )
-        return EnsuredResource(
-            channel=await guild.create_voice_channel(fallback_name, reason=reason),
-            created=True,
-            fallback_used=True,
-        )
-
-    async def _create_category_with_fallback(
-        self,
-        guild: discord.Guild,
-        *,
-        name: str,
-        fallback_name: str,
-        reason: str,
-    ) -> EnsuredResource:
-        try:
-            return EnsuredResource(
-                channel=await guild.create_category(name, reason=reason),
-                created=True,
-            )
-        except discord.HTTPException as exc:
-            if exc.status != 400 or name.casefold() == fallback_name.casefold():
-                raise
-            self.logger.warning(
-                "resource_name_fallback_used",
-                guild_id=guild.id,
-                resource_type="category",
-                preferred_name=name,
-                fallback_name=fallback_name,
-                error=str(exc),
-            )
-        return EnsuredResource(
-            channel=await guild.create_category(fallback_name, reason=reason),
-            created=True,
-            fallback_used=True,
-        )
+        rank: int,
+        configured_id: int | None,
+    ) -> tuple[discord.Role, bool]:
+        role = guild.get_role(configured_id) if configured_id else None
+        role_name = f"Rank {rank}"
+        if role:
+            return role, False
+        existing = discord.utils.find(lambda item: item.name.lower() == role_name.lower(), guild.roles)
+        if existing:
+            return existing, False
+        return await guild.create_role(name=role_name, reason="Highlight Manager automatic setup"), True

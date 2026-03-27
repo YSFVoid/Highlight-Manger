@@ -23,13 +23,10 @@ class SeasonRepository(BaseRepository[SeasonRecord]):
         await self.collection.insert_one(season.model_dump(mode="python"))
         return season
 
-    async def end_active(self, guild_id: int, ended_at, updates: dict | None = None) -> SeasonRecord | None:
-        payload = {"is_active": False, "ended_at": ended_at}
-        if updates:
-            payload.update(updates)
+    async def end_active(self, guild_id: int, ended_at) -> SeasonRecord | None:
         updated = await self.collection.find_one_and_update(
             {"guild_id": guild_id, "is_active": True},
-            {"$set": payload},
+            {"$set": {"is_active": False, "ended_at": ended_at}},
             return_document=ReturnDocument.AFTER,
         )
         return self._to_model(updated)

@@ -8,17 +8,6 @@ from pydantic import Field
 from highlight_manager.models.base import AppModel
 from highlight_manager.models.common import MatchResultSummary
 from highlight_manager.models.enums import MatchMode, MatchStatus, MatchType
-from highlight_manager.utils.dates import utcnow
-
-
-class MatchRoomInfo(AppModel):
-    room_id: str
-    password: str | None = None
-    private_match_key: str | None = None
-    submitted_by: int
-    submitted_at: datetime = Field(default_factory=utcnow)
-    updated_by: int | None = None
-    updated_at: datetime | None = None
 
 
 class MatchRecord(AppModel):
@@ -38,19 +27,15 @@ class MatchRecord(AppModel):
     source_channel_id: int | None = None
     created_at: datetime
     queue_expires_at: datetime | None = None
-    queue_opened_at: datetime | None = None
     vote_expires_at: datetime | None = None
     finalized_at: datetime | None = None
     canceled_at: datetime | None = None
     result_channel_cleanup_at: datetime | None = None
     penalties_applied: bool = False
     needs_admin_review: bool = False
+    coin_rewards_applied: bool = False
     season_id: int | None = None
     result_summary: MatchResultSummary | None = None
-    room_info: MatchRoomInfo | None = None
-    create_here_ping_sent: bool = False
-    ready_here_ping_sent: bool = False
-    ready_announcement_sent: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @property

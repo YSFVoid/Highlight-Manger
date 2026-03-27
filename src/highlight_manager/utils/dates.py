@@ -15,6 +15,14 @@ def seconds_from_now(seconds: int) -> datetime:
     return utcnow() + timedelta(seconds=seconds)
 
 
+def parse_datetime_input(value: str) -> datetime:
+    normalized = value.strip().replace("T", " ").replace("Z", "+00:00")
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
 def format_dt(value: datetime | None) -> str:
     if value is None:
         return "N/A"
