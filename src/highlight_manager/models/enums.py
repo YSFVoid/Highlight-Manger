@@ -156,6 +156,7 @@ class TournamentMatchStatus(str, Enum):
 
 class AuditAction(str, Enum):
     SETUP = "SETUP"
+    ANNOUNCEMENT_POSTED = "ANNOUNCEMENT_POSTED"
     CONFIG_UPDATED = "CONFIG_UPDATED"
     MATCH_CREATED = "MATCH_CREATED"
     MATCH_JOINED = "MATCH_JOINED"

@@ -257,6 +257,55 @@ def build_result_summary_embed(match: MatchRecord, guild: discord.Guild | None) 
     return embed
 
 
+def build_latest_update_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="Latest Update | Highlight Manager",
+        description="A major update is now live with three new systems built into the bot.",
+        colour=discord.Colour.from_rgb(68, 71, 76),
+    )
+    embed.add_field(
+        name="Shop System",
+        value=(
+            "- Premium shop section channels\n"
+            "- One clean embed per section\n"
+            "- Buy here button opens a private ticket\n"
+            "- Supports admin-set product pricing"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Coins System",
+        value=(
+            "- Coins are now part of member profiles\n"
+            "- Coins are earned from match and tournament progress\n"
+            "- Coins can be used for shop items with coin prices\n"
+            "- Balance is visible with `!coins`, `!profile`, and `!rank`"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Tournament System",
+        value=(
+            "- Team registration with captain and player Discord IDs\n"
+            "- Random group stage generation\n"
+            "- BO3 result-room flow for series reporting\n"
+            "- Automatic advancement through knockout rounds to the final"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="What Staff Can Do",
+        value=(
+            "- Configure shop sections with `/shop setup`\n"
+            "- Set coin prices on shop items\n"
+            "- Create and manage tournaments with `/tournament ...` commands"
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="Highlight Manager update")
+    return embed
+
+
 def _channel_label(guild: discord.Guild | None, channel_id: int | None) -> str:
     if not channel_id:
         return "Not configured"

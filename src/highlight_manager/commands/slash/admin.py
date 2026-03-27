@@ -6,7 +6,7 @@ import discord
 from discord import app_commands
 
 from highlight_manager.models.enums import AuditAction, ResultSource
-from highlight_manager.utils.embeds import build_config_embed
+from highlight_manager.utils.embeds import build_config_embed, build_latest_update_embed
 if TYPE_CHECKING:
     from highlight_manager.bot import HighlightBot
 
@@ -164,6 +164,33 @@ def register_admin_commands(bot: "HighlightBot") -> None:
         )
         await bot.audit_service.log(interaction.guild, AuditAction.CONFIG_UPDATED, "Guild config updated.", actor_id=interaction.user.id)
         await interaction.response.send_message(embed=build_config_embed(config, interaction.guild), ephemeral=True)
+
+    @bot.tree.command(name="announce-update", description="Post the latest Highlight Manager update announcement")
+    async def announce_update(
+        interaction: discord.Interaction,
+        channel: discord.TextChannel | None = None,
+    ) -> None:
+        if not await ensure_staff(interaction):
+            return
+        target_channel = channel or interaction.channel
+        if not isinstance(target_channel, discord.TextChannel):
+            return await interaction.response.send_message("Choose a text channel for the update announcement.", ephemeral=True)
+        await target_channel.send(
+            "@everyone",
+            embed=build_latest_update_embed(),
+            allowed_mentions=discord.AllowedMentions(everyone=True),
+        )
+        await bot.audit_service.log(
+            interaction.guild,
+            AuditAction.ANNOUNCEMENT_POSTED,
+            f"Posted latest update announcement in {target_channel.mention}.",
+            actor_id=interaction.user.id,
+            metadata={"channel_id": target_channel.id, "type": "latest_update"},
+        )
+        await interaction.response.send_message(
+            f"Posted the latest update announcement in {target_channel.mention}.",
+            ephemeral=True,
+        )
 
     season = app_commands.Group(name="season", description="Season management")
     bootstrap = app_commands.Group(name="bootstrap", description="Bootstrap preview and rerun")
