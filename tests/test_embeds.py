@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from highlight_manager.models.guild_config import GuildConfig
 from highlight_manager.models.profile import PlayerProfile
-from highlight_manager.utils.embeds import build_leaderboard_embed
+from highlight_manager.utils.embeds import build_config_embed, build_leaderboard_embed
 
 
 class FakeMember:
@@ -36,6 +37,20 @@ def test_build_leaderboard_embed_uses_clean_member_names() -> None:
     embed = build_leaderboard_embed(guild, profiles, title="Current Season Leaderboard")
 
     assert embed.description == (
-        "**1.** Asta | 120 pts | Rank 5\n"
-        "**2.** rayen | 90 pts | Rank 2"
+        "**5.** Asta | 120 pts | RANK 5\n"
+        "**2.** rayen | 90 pts | RANK 2"
     )
+
+
+def test_build_config_embed_describes_live_rank_system() -> None:
+    config = GuildConfig(guild_id=1, rank_role_map={"0": 123, "1": 456, "2": 789})
+
+    embed = build_config_embed(config, guild=None)
+    fields = {field.name: field.value for field in embed.fields}
+
+    assert fields["Live Rank System"] == (
+        "Rank is live leaderboard placement, not a Discord role.\n"
+        "Tie-breaks: points, wins, winner MVP count, older join date, user ID."
+    )
+    assert fields["Rank 0 Override"] == "<@&123>"
+    assert fields["Legacy Rank Roles"] == "2 configured but ignored"

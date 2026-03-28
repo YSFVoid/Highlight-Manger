@@ -19,6 +19,7 @@ from highlight_manager.services.vote_service import VoteService
 from highlight_manager.utils.dates import minutes_from_now, seconds_from_now, utcnow
 from highlight_manager.utils.embeds import build_match_embed, build_result_summary_embed, build_vote_status_embed
 from highlight_manager.utils.exceptions import StateTransitionError, UserFacingError
+from highlight_manager.utils.response_helpers import build_response_embed
 
 
 @dataclass(slots=True)
@@ -295,7 +296,7 @@ class MatchService:
             view=self._build_result_view(match),
         )
         if warnings:
-            await result_channel.send("\n".join(warnings))
+            await result_channel.send(embed=build_response_embed("\n".join(warnings)))
         await self.audit_service.log(
             guild,
             AuditAction.MATCH_FULL,
@@ -505,7 +506,10 @@ class MatchService:
             if match.status in {MatchStatus.IN_PROGRESS, MatchStatus.VOTING} and match.result_channel_id:
                 channel = guild.get_channel(match.result_channel_id)
                 if isinstance(channel, discord.TextChannel):
-                    await channel.send("Bot restarted. Voting controls have been restored.", view=self._build_result_view(match))
+                    await channel.send(
+                        embed=build_response_embed("Bot restarted. Voting controls have been restored."),
+                        view=self._build_result_view(match),
+                    )
 
     async def handle_waiting_voice_departure(self, member: discord.Member) -> None:
         open_matches = await self.repository.find_open_matches_for_player(member.guild.id, member.id)
@@ -606,14 +610,14 @@ class MatchService:
             return
         channel = guild.get_channel(match.result_channel_id)
         if isinstance(channel, discord.TextChannel):
-            await channel.send(message)
+            await channel.send(embed=build_response_embed(message))
 
     async def post_public_note(self, guild: discord.Guild, match: MatchRecord, message: str) -> None:
         if not match.source_channel_id:
             return
         channel = guild.get_channel(match.source_channel_id)
         if isinstance(channel, (discord.TextChannel, discord.Thread)):
-            await channel.send(message)
+            await channel.send(embed=build_response_embed(message))
 
     def _build_queue_view(self, match: MatchRecord):
         from highlight_manager.interactions.views import MatchQueueView

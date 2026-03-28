@@ -19,13 +19,17 @@ class FakeProfileRepository:
         self.storage[(profile.guild_id, profile.user_id)] = profile
         return profile
 
+    async def list_for_guild(self, guild_id: int) -> list[PlayerProfile]:
+        return [profile for (stored_guild_id, _), profile in self.storage.items() if stored_guild_id == guild_id]
+
 
 class FakeRankService:
     def __init__(self) -> None:
         self.calls = 0
 
-    def resolve_rank(self, points: int, thresholds) -> int:
-        return 1
+    def assign_live_ranks(self, profiles) -> dict[int, int]:
+        ordered = sorted(profiles, key=lambda profile: profile.user_id)
+        return {profile.user_id: index for index, profile in enumerate(ordered, start=1)}
 
     async def sync_member_roles(self, member, profile, config) -> RankSyncResult:
         self.calls += 1
@@ -41,6 +45,7 @@ class FakeMember:
         self.id = user_id
         self.bot = bot
         self.guild = None
+        self.joined_at = None
 
 
 class FakeGuild:

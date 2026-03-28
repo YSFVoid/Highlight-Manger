@@ -113,12 +113,11 @@ class SetupService:
         setup_resource_ids["log_channel_id"] = log_channel.id
 
         rank_role_map = dict(config.rank_role_map)
-        for rank in range(0, 6):
-            role, created = await self._ensure_role(guild, rank, rank_role_map.get(str(rank)))
-            rank_role_map[str(rank)] = role.id
-            setup_resource_ids[f"rank_role_{rank}"] = role.id
-            label = f"Rank {rank} Role: {role.mention}"
-            created_resources.append(label) if created else reused_resources.append(label)
+        rank0_role, created = await self._ensure_role(guild, 0, rank_role_map.get("0"))
+        rank_role_map["0"] = rank0_role.id
+        setup_resource_ids["rank_role_0"] = rank0_role.id
+        label = f"Rank 0 Override Role: {rank0_role.mention}"
+        created_resources.append(label) if created else reused_resources.append(label)
 
         updates = {
             "prefix": prefix or config.prefix,

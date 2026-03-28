@@ -7,6 +7,7 @@ from discord import app_commands
 
 from highlight_manager.models.enums import TournamentSize
 from highlight_manager.utils.dates import parse_datetime_input
+from highlight_manager.utils.response_helpers import send_interaction_response
 
 if TYPE_CHECKING:
     from highlight_manager.bot import HighlightBot
@@ -16,11 +17,11 @@ def register_tournament_commands(bot: "HighlightBot") -> None:
     async def ensure_staff(interaction: discord.Interaction) -> bool:
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
             if not interaction.response.is_done():
-                await interaction.response.send_message("This command can only be used inside the server.", ephemeral=True)
+                await send_interaction_response(interaction, "This command can only be used inside the server.", error=True, ephemeral=True)
             return False
         if not await bot.config_service.is_staff(interaction.user):
             if not interaction.response.is_done():
-                await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+                await send_interaction_response(interaction, "You do not have permission to use this command.", error=True, ephemeral=True)
             return False
         return True
 
@@ -41,7 +42,8 @@ def register_tournament_commands(bot: "HighlightBot") -> None:
             size=size,
             announcement_channel=announcement_channel,
         )
-        await interaction.response.send_message(
+        await send_interaction_response(
+            interaction,
             f"Created tournament #{record.tournament_number:03d} in {announcement_channel.mention}.",
             ephemeral=True,
         )
@@ -54,7 +56,7 @@ def register_tournament_commands(bot: "HighlightBot") -> None:
             interaction.guild,
             (await bot.tournament_service.require_tournament(interaction.guild.id, tournament_number)).tournament_number,
         )
-        await interaction.response.send_message(f"Started tournament #{record.tournament_number:03d}.", ephemeral=True)
+        await send_interaction_response(interaction, f"Started tournament #{record.tournament_number:03d}.", ephemeral=True)
 
     @tournament.command(name="close-registration", description="Close registration for the active tournament")
     async def tournament_close_registration(interaction: discord.Interaction, tournament_number: int | None = None) -> None:
@@ -62,7 +64,8 @@ def register_tournament_commands(bot: "HighlightBot") -> None:
             return
         target = await bot.tournament_service.require_tournament(interaction.guild.id, tournament_number)
         record = await bot.tournament_service.close_registration(interaction.guild, target.tournament_number)
-        await interaction.response.send_message(
+        await send_interaction_response(
+            interaction,
             f"Closed registration for tournament #{record.tournament_number:03d}.",
             ephemeral=True,
         )
@@ -77,7 +80,8 @@ def register_tournament_commands(bot: "HighlightBot") -> None:
             return
         target = await bot.tournament_service.require_tournament(interaction.guild.id, tournament_number)
         record = await bot.tournament_service.set_size(interaction.guild, target.tournament_number, size)
-        await interaction.response.send_message(
+        await send_interaction_response(
+            interaction,
             f"Tournament #{record.tournament_number:03d} is now set to {record.size.value}.",
             ephemeral=True,
         )
@@ -98,7 +102,8 @@ def register_tournament_commands(bot: "HighlightBot") -> None:
             match_number,
             parse_datetime_input(when),
         )
-        await interaction.response.send_message(
+        await send_interaction_response(
+            interaction,
             f"Scheduled Match #{match.match_number:03d} for <t:{int(match.scheduled_at.timestamp())}:f>.",
             ephemeral=True,
         )
@@ -109,7 +114,8 @@ def register_tournament_commands(bot: "HighlightBot") -> None:
             return
         target = await bot.tournament_service.require_tournament(interaction.guild.id, tournament_number)
         record = await bot.tournament_service.start_tournament(interaction.guild, target.tournament_number)
-        await interaction.response.send_message(
+        await send_interaction_response(
+            interaction,
             f"Generated groups and started tournament #{record.tournament_number:03d}.",
             ephemeral=True,
         )
@@ -120,7 +126,8 @@ def register_tournament_commands(bot: "HighlightBot") -> None:
             return
         target = await bot.tournament_service.require_tournament(interaction.guild.id, tournament_number)
         record = await bot.tournament_service.manual_advance(interaction.guild, target.tournament_number)
-        await interaction.response.send_message(
+        await send_interaction_response(
+            interaction,
             f"Processed tournament advance for #{record.tournament_number:03d}.",
             ephemeral=True,
         )
@@ -141,7 +148,8 @@ def register_tournament_commands(bot: "HighlightBot") -> None:
             match_number,
             winner_team,
         )
-        await interaction.response.send_message(
+        await send_interaction_response(
+            interaction,
             f"Forced result for tournament match #{match.match_number:03d}.",
             ephemeral=True,
         )
@@ -156,7 +164,8 @@ def register_tournament_commands(bot: "HighlightBot") -> None:
             return
         target = await bot.tournament_service.require_tournament(interaction.guild.id, tournament_number)
         record = await bot.tournament_service.cancel_tournament(interaction.guild, target.tournament_number, reason=reason)
-        await interaction.response.send_message(
+        await send_interaction_response(
+            interaction,
             f"Canceled tournament #{record.tournament_number:03d}.",
             ephemeral=True,
         )

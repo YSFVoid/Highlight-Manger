@@ -26,6 +26,7 @@ from highlight_manager.services.tournament_standings_service import TournamentSt
 from highlight_manager.services.voice_service import VoiceService
 from highlight_manager.utils.dates import utcnow
 from highlight_manager.utils.exceptions import UserFacingError
+from highlight_manager.utils.response_helpers import build_response_embed
 from highlight_manager.utils.tournament_embeds import (
     build_champion_embed,
     build_group_standings_embed,
@@ -517,9 +518,11 @@ class TournamentService:
             channel = guild.get_channel(tournament.announcement_channel_id) if tournament.announcement_channel_id else None
             if isinstance(channel, discord.TextChannel):
                 await channel.send(
-                    f"Upcoming tournament series in {self.REMINDER_MINUTES}m: "
-                    f"**{team1.team_name if team1 else match.team1_id}** vs **{team2.team_name if team2 else match.team2_id}** "
-                    f"for Match #{match.match_number:03d}."
+                    embed=build_response_embed(
+                        f"Upcoming tournament series in {self.REMINDER_MINUTES}m: "
+                        f"**{team1.team_name if team1 else match.team1_id}** vs **{team2.team_name if team2 else match.team2_id}** "
+                        f"for Match #{match.match_number:03d}."
+                    )
                 )
             match.reminder_sent_at = now
             match = await self.match_repository.replace(match)

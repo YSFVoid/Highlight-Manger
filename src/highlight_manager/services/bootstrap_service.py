@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+from datetime import UTC
 
 import discord
 
@@ -65,8 +66,6 @@ class BootstrapService:
 
     async def run(self, guild: discord.Guild, config: GuildConfig) -> BootstrapSummary:
         rank_counts: Counter[str] = Counter()
-        rename_successes = 0
-        rename_failures = 0
         skipped_members: list[str] = []
         processed_members = 0
 
@@ -81,20 +80,17 @@ class BootstrapService:
                 continue
 
             profile.rank0 = False
-            profile.current_rank = threshold.rank
             profile.current_points = threshold.starting_points
             profile.lifetime_points = threshold.starting_points
+            if member.joined_at is not None:
+                profile.server_joined_at = (
+                    member.joined_at.replace(tzinfo=UTC)
+                    if member.joined_at.tzinfo is None
+                    else member.joined_at.astimezone(UTC)
+                )
             profile.updated_at = utcnow()
-            saved = await self.profile_service.repository.upsert(profile)
-            sync_result = await self.profile_service.rank_service.sync_member_roles(member, saved, config)
+            await self.profile_service.repository.upsert(profile)
             rank_counts[str(threshold.rank)] += 1
-
-            if sync_result.nickname_updated:
-                rename_successes += 1
-            if sync_result.nickname_failed:
-                rename_failures += 1
-            if sync_result.skipped_reason:
-                skipped_members.append(f"{member.display_name}: {sync_result.skipped_reason}")
 
             self.logger.info(
                 "bootstrap_member_processed",
@@ -105,11 +101,13 @@ class BootstrapService:
                 points=threshold.starting_points,
             )
 
+        sync_result = await self.profile_service.sync_all_member_identities(guild, config)
+
         return BootstrapSummary(
             processed_members=processed_members,
             rank_counts=dict(rank_counts),
-            rename_successes=rename_successes,
-            rename_failures=rename_failures,
+            rename_successes=sync_result.nickname_updates,
+            rename_failures=sync_result.nickname_failures,
             skipped_members=skipped_members,
             completed_at=utcnow(),
         )

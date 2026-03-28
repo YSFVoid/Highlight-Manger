@@ -4,6 +4,7 @@ import discord
 
 from highlight_manager.models.enums import AuditAction, ShopSection
 from highlight_manager.utils.exceptions import HighlightError
+from highlight_manager.utils.response_helpers import send_interaction_response
 
 
 class ShopOrderView(discord.ui.View):
@@ -16,10 +17,10 @@ class ShopOrderView(discord.ui.View):
     @discord.ui.button(label="Buy here", style=discord.ButtonStyle.success, custom_id="placeholder")
     async def order_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if interaction.guild is None:
-            return await interaction.response.send_message("This only works inside the server.", ephemeral=True)
+            return await send_interaction_response(interaction, "This only works inside the server.", error=True, ephemeral=True)
         shop_service = getattr(interaction.client, "shop_service", None)
         if shop_service is None:
-            return await interaction.response.send_message("Shop service is not available right now.", ephemeral=True)
+            return await send_interaction_response(interaction, "Shop service is not available right now.", error=True, ephemeral=True)
         await interaction.response.send_modal(ShopPurchaseModal(self.section))
 
 
@@ -44,10 +45,10 @@ class ShopPurchaseModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-            return await interaction.response.send_message("This only works inside the server.", ephemeral=True)
+            return await send_interaction_response(interaction, "This only works inside the server.", error=True, ephemeral=True)
         shop_service = getattr(interaction.client, "shop_service", None)
         if shop_service is None:
-            return await interaction.response.send_message("Shop service is not available right now.", ephemeral=True)
+            return await send_interaction_response(interaction, "Shop service is not available right now.", error=True, ephemeral=True)
         try:
             await interaction.response.defer(ephemeral=True, thinking=True)
         except discord.NotFound:
@@ -63,11 +64,11 @@ class ShopPurchaseModal(discord.ui.Modal):
         audit_service = getattr(interaction.client, "audit_service", None)
         if matched_item is not None and matched_item.coin_price is not None:
             if coins_service is None:
-                return await interaction.followup.send("Coins service is not available right now.", ephemeral=True)
+                return await send_interaction_response(interaction, "Coins service is not available right now.", error=True, ephemeral=True)
             try:
                 purchase = await coins_service.purchase_shop_item(interaction.guild, interaction.user.id, matched_item)
             except HighlightError as exc:
-                return await interaction.followup.send(str(exc), ephemeral=True)
+                return await send_interaction_response(interaction, str(exc), error=True, ephemeral=True)
             balance_text = str(purchase.new_balance)
         try:
             ticket_channel = await shop_service.create_purchase_ticket(
@@ -82,13 +83,15 @@ class ShopPurchaseModal(discord.ui.Modal):
         except HighlightError as exc:
             if matched_item is not None and matched_item.coin_price is not None and coins_service is not None:
                 await coins_service.adjust_balance(interaction.guild, interaction.user.id, matched_item.coin_price)
-            return await interaction.followup.send(str(exc), ephemeral=True)
+            return await send_interaction_response(interaction, str(exc), error=True, ephemeral=True)
         except discord.HTTPException:
             if matched_item is not None and matched_item.coin_price is not None and coins_service is not None:
                 await coins_service.adjust_balance(interaction.guild, interaction.user.id, matched_item.coin_price)
-            return await interaction.followup.send(
+            return await send_interaction_response(
+                interaction,
                 "I could not open a private shop ticket right now. Your coins were not kept.",
                 ephemeral=True,
+                error=True,
             )
         if matched_item is not None and matched_item.coin_price is not None and audit_service is not None:
             await audit_service.log(
@@ -106,12 +109,14 @@ class ShopPurchaseModal(discord.ui.Modal):
                 },
             )
         if matched_item is not None and matched_item.coin_price is not None:
-            return await interaction.followup.send(
+            return await send_interaction_response(
+                interaction,
                 f"Bought **{matched_item.title}** for **{matched_item.coin_price}** coins. "
                 f"Your private ticket is {ticket_channel.mention}. Remaining balance: **{balance_text}**.",
                 ephemeral=True,
             )
-        await interaction.followup.send(
+        await send_interaction_response(
+            interaction,
             f"Your private ticket is {ticket_channel.mention}. Staff will continue there.",
             ephemeral=True,
         )

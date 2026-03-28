@@ -124,17 +124,8 @@ class ConfigService:
             created_ids["log_channel_id"] = log_channel.id
 
         rank_role_map = dict(config.rank_role_map)
-        optional_roles = {
-            "0": rank0_role,
-            "1": rank1_role,
-            "2": rank2_role,
-            "3": rank3_role,
-            "4": rank4_role,
-            "5": rank5_role,
-        }
-        for rank_key, role in optional_roles.items():
-            if role is not None:
-                rank_role_map[rank_key] = role.id
+        if rank0_role is not None:
+            rank_role_map["0"] = rank0_role.id
 
         updates: dict[str, Any] = {
             "prefix": prefix or config.prefix,

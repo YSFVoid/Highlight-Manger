@@ -5,6 +5,7 @@ import re
 import discord
 
 from highlight_manager.utils.exceptions import HighlightError
+from highlight_manager.utils.response_helpers import send_interaction_response
 
 
 class TournamentRegistrationView(discord.ui.View):
@@ -19,7 +20,7 @@ class TournamentRegistrationView(discord.ui.View):
     @discord.ui.button(label="Apply Now", style=discord.ButtonStyle.primary, custom_id="placeholder")
     async def apply_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-            return await interaction.response.send_message("This only works inside the server.", ephemeral=True)
+            return await send_interaction_response(interaction, "This only works inside the server.", error=True, ephemeral=True)
         await interaction.response.send_modal(
             TournamentApplicationModal(self.tournament_service, self.tournament_number, interaction.user),
         )
@@ -46,13 +47,15 @@ class TournamentApplicationModal(discord.ui.Modal, title="Tournament Registratio
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:
-            return await interaction.response.send_message("This only works inside the server.", ephemeral=True)
+            return await send_interaction_response(interaction, "This only works inside the server.", error=True, ephemeral=True)
         try:
             additional_ids = [int(value) for value in re.findall(r"\d+", str(self.player_ids))][:3]
             if len(additional_ids) != 3:
-                return await interaction.response.send_message(
+                return await send_interaction_response(
+                    interaction,
                     "Provide exactly 3 additional Discord IDs for the roster.",
                     ephemeral=True,
+                    error=True,
                 )
             team = await self.tournament_service.apply_team(
                 interaction.guild,
@@ -62,8 +65,9 @@ class TournamentApplicationModal(discord.ui.Modal, title="Tournament Registratio
                 [self.captain.id, *additional_ids],
             )
         except HighlightError as exc:
-            return await interaction.response.send_message(str(exc), ephemeral=True)
-        await interaction.response.send_message(
+            return await send_interaction_response(interaction, str(exc), error=True, ephemeral=True)
+        await send_interaction_response(
+            interaction,
             f"Registered **{team.team_name}** for tournament #{self.tournament_number:03d}.",
             ephemeral=True,
         )
@@ -92,7 +96,7 @@ class TournamentSeriesView(discord.ui.View):
     @discord.ui.button(label="Refresh Score", style=discord.ButtonStyle.secondary, custom_id="placeholder")
     async def refresh(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if interaction.guild is None:
-            return await interaction.response.send_message("This only works inside the server.", ephemeral=True)
+            return await send_interaction_response(interaction, "This only works inside the server.", error=True, ephemeral=True)
         try:
             match = await self.tournament_service.require_match(
                 interaction.guild.id,
@@ -100,15 +104,16 @@ class TournamentSeriesView(discord.ui.View):
                 self.match_number,
             )
         except HighlightError as exc:
-            return await interaction.response.send_message(str(exc), ephemeral=True)
-        await interaction.response.send_message(
+            return await send_interaction_response(interaction, str(exc), error=True, ephemeral=True)
+        await send_interaction_response(
+            interaction,
             f"Current series score: Team 1 {match.team1_room_wins} - Team 2 {match.team2_room_wins}.",
             ephemeral=True,
         )
 
     async def _handle_room_win(self, interaction: discord.Interaction, winning_slot: int) -> None:
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-            return await interaction.response.send_message("This only works inside the server.", ephemeral=True)
+            return await send_interaction_response(interaction, "This only works inside the server.", error=True, ephemeral=True)
         try:
             match = await self.tournament_service.report_room_win(
                 interaction.guild,
@@ -118,10 +123,11 @@ class TournamentSeriesView(discord.ui.View):
                 winning_slot,
             )
         except HighlightError as exc:
-            return await interaction.response.send_message(str(exc), ephemeral=True)
+            return await send_interaction_response(interaction, str(exc), error=True, ephemeral=True)
         if match.status.value == "COMPLETED":
-            return await interaction.response.send_message("Series completed and bracket progression has been updated.", ephemeral=True)
-        await interaction.response.send_message(
+            return await send_interaction_response(interaction, "Series completed and bracket progression has been updated.", ephemeral=True)
+        await send_interaction_response(
+            interaction,
             f"Recorded room win. Team 1 {match.team1_room_wins} - Team 2 {match.team2_room_wins}.",
             ephemeral=True,
         )

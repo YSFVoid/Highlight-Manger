@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 import re
 from dataclasses import dataclass
 
@@ -24,9 +25,27 @@ class RankService:
         re.compile(r"^\s*rank\s+\d+\s*(?:\|\s*)?(?:high\s+)?", flags=re.IGNORECASE),
         re.compile(r"^\s*high\s+", flags=re.IGNORECASE),
     ]
+    LEGACY_RANK_ROLE_PATTERN = re.compile(r"^rank\s+[1-9]\d*$", flags=re.IGNORECASE)
 
     def __init__(self) -> None:
         self.logger = get_logger(__name__)
+
+    def live_rank_sort_key(self, profile: PlayerProfile) -> tuple[int, int, int, datetime, int]:
+        joined_at = profile.server_joined_at or datetime.max.replace(tzinfo=UTC)
+        return (
+            -profile.current_points,
+            -profile.season_stats.wins,
+            -profile.season_stats.mvp_wins,
+            joined_at,
+            profile.user_id,
+        )
+
+    def assign_live_ranks(self, profiles: list[PlayerProfile]) -> dict[int, int]:
+        ranked_profiles = sorted(
+            [profile for profile in profiles if not profile.rank0],
+            key=self.live_rank_sort_key,
+        )
+        return {profile.user_id: index for index, profile in enumerate(ranked_profiles, start=1)}
 
     def resolve_rank(self, points: int, thresholds: list[RankThreshold]) -> int:
         for threshold in sorted(
@@ -49,15 +68,16 @@ class RankService:
         result = RankSyncResult()
         if member.bot:
             return result
-        rank_role_ids = {int(role_id) for role_id in config.rank_role_map.values()}
-        if rank_role_ids:
-            if profile.rank0 and config.features.preserve_rank0:
-                target_role_id = config.rank_role_map.get("0")
-            else:
-                target_role_id = config.rank_role_map.get(str(profile.current_rank))
+        configured_role_ids = {int(role_id) for role_id in config.rank_role_map.values()}
+        target_role_id = config.rank_role_map.get("0") if profile.rank0 and config.features.preserve_rank0 else None
+        target_role = member.guild.get_role(int(target_role_id)) if target_role_id else None
 
-            target_role = member.guild.get_role(int(target_role_id)) if target_role_id else None
-            removable_roles = [role for role in member.roles if role.id in rank_role_ids and role != target_role]
+        removable_roles = [
+            role
+            for role in member.roles
+            if role != target_role and (role.id in configured_role_ids or self._is_legacy_rank_role(role.name))
+        ]
+        if removable_roles or target_role:
             needs_add = bool(target_role and target_role not in member.roles)
             try:
                 if removable_roles:
@@ -148,7 +168,10 @@ class RankService:
         return cleaned or "Player"
 
     def build_rank_nickname(self, rank: int, base_name: str) -> str:
-        prefix = f"Rank {rank} "
+        prefix = f"RANK {rank} | "
         remaining = 32 - len(prefix)
         truncated_base = base_name[:remaining].strip() or "Player"
         return f"{prefix}{truncated_base}"
+
+    def _is_legacy_rank_role(self, role_name: str) -> bool:
+        return bool(self.LEGACY_RANK_ROLE_PATTERN.match(role_name.strip()))

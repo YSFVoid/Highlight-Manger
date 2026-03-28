@@ -14,8 +14,9 @@ from highlight_manager.services.rank_service import RankService
 
 
 _RANK_NAME_SANITIZER = RankService()
-LATEST_UPDATE_KEY = "rank-match-stability"
+LATEST_UPDATE_KEY = "live-rank-overhaul"
 UPDATE_ANNOUNCEMENT_KEYS: tuple[tuple[str, str], ...] = (
+    ("live-rank-overhaul", "Live Rank Overhaul"),
     ("rank-match-stability", "Rank + Match Stability"),
     ("systems-expansion", "Shop + Coins + Tournament"),
 )
@@ -36,6 +37,12 @@ def _member_display_name(guild: discord.Guild | None, user_id: int) -> str:
         return f"User {user_id}"
     raw_name = member.nick or member.global_name or member.name
     return _RANK_NAME_SANITIZER.strip_rank_prefix(raw_name)
+
+
+def _rank_label(profile: PlayerProfile) -> str:
+    if profile.rank0:
+        return "RANK 0 | Override"
+    return f"RANK {profile.current_rank}"
 
 
 def _format_team(guild: discord.Guild | None, user_ids: Sequence[int], team_size: int) -> str:
@@ -123,7 +130,7 @@ def build_profile_embed(
     )
     embed.add_field(name="Current Points", value=str(profile.current_points), inline=True)
     embed.add_field(name="Lifetime Points", value=str(profile.lifetime_points), inline=True)
-    embed.add_field(name="Current Rank", value=f"Rank {profile.current_rank}", inline=True)
+    embed.add_field(name="Live Rank", value=_rank_label(profile), inline=True)
     embed.add_field(name="Coins", value=str(profile.coins_balance), inline=True)
     embed.add_field(name="Coins Earned", value=str(profile.lifetime_coins_earned), inline=True)
     embed.add_field(name="Coins Spent", value=str(profile.lifetime_coins_spent), inline=True)
@@ -167,10 +174,10 @@ def build_leaderboard_embed(
         embed.description = "No profiles found yet."
         return embed
     lines = []
-    for index, profile in enumerate(profiles, start=1):
+    for profile in profiles:
         lines.append(
-            f"**{index}.** {_member_display_name(guild, profile.user_id)} | "
-            f"{profile.current_points} pts | Rank {profile.current_rank}"
+            f"**{profile.current_rank}.** {_member_display_name(guild, profile.user_id)} | "
+            f"{profile.current_points} pts | {_rank_label(profile)}"
         )
     embed.description = "\n".join(lines)
     return embed
@@ -201,17 +208,26 @@ def build_config_embed(config: GuildConfig, guild: discord.Guild | None) -> disc
         ),
         inline=False,
     )
-    ranks = []
-    for threshold in config.rank_thresholds:
-        role_id = config.rank_role_map.get(str(threshold.rank))
-        role_label = f"<@&{role_id}>" if role_id else "Not mapped"
-        lower = threshold.min_points if threshold.min_points is not None else "-inf"
-        upper = threshold.max_points if threshold.max_points is not None else "+inf"
-        ranks.append(f"Rank {threshold.rank}: {lower} to {upper} -> {role_label}")
     rank0_role = config.rank_role_map.get("0")
-    if rank0_role:
-        ranks.insert(0, f"Rank 0: <@&{rank0_role}>")
-    embed.add_field(name="Rank Roles", value="\n".join(ranks) if ranks else "None", inline=False)
+    legacy_role_ids = [role_id for key, role_id in config.rank_role_map.items() if key != "0"]
+    embed.add_field(
+        name="Live Rank System",
+        value=(
+            "Rank is live leaderboard placement, not a Discord role.\n"
+            "Tie-breaks: points, wins, winner MVP count, older join date, user ID."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Rank 0 Override",
+        value=f"<@&{rank0_role}>" if rank0_role else "Not configured",
+        inline=True,
+    )
+    embed.add_field(
+        name="Legacy Rank Roles",
+        value=f"{len(legacy_role_ids)} configured but ignored" if legacy_role_ids else "None",
+        inline=True,
+    )
     embed.add_field(
         name="Result Behavior",
         value=f"{config.result_channel_behavior.value} after {config.result_channel_delete_delay_seconds}s",
@@ -220,7 +236,7 @@ def build_config_embed(config: GuildConfig, guild: discord.Guild | None) -> disc
     bootstrap_summary = config.bootstrap_last_summary
     if bootstrap_summary:
         rank_lines = [
-            f"Rank {rank}: {count}"
+            f"Seed Tier {rank}: {count}"
             for rank, count in sorted(bootstrap_summary.rank_counts.items(), key=lambda item: int(item[0]))
         ]
         embed.add_field(
@@ -230,7 +246,7 @@ def build_config_embed(config: GuildConfig, guild: discord.Guild | None) -> disc
                 f"Processed: {bootstrap_summary.processed_members}\n"
                 f"Renamed: {bootstrap_summary.rename_successes}\n"
                 f"Rename Failures: {bootstrap_summary.rename_failures}\n"
-                f"Ranks: {', '.join(rank_lines) if rank_lines else 'N/A'}"
+                f"Seed Tiers: {', '.join(rank_lines) if rank_lines else 'N/A'}"
             ),
             inline=False,
         )
@@ -277,6 +293,42 @@ def build_result_summary_embed(match: MatchRecord, guild: discord.Guild | None) 
 
 
 def build_latest_update_embed(update_key: str = LATEST_UPDATE_KEY) -> discord.Embed:
+    if update_key == "live-rank-overhaul":
+        embed = discord.Embed(
+            title="Latest Update | Live Rank Overhaul",
+            description="The rank system now uses live leaderboard placement and the new nickname format.",
+            colour=discord.Colour.from_rgb(68, 71, 76),
+        )
+        embed.add_field(
+            name="Live Placement",
+            value=(
+                "- Rank is now your real leaderboard position\n"
+                "- Tie-breaks use points, wins, winner MVP count, older join date, then user ID\n"
+                "- Rank 0 remains a manual override"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Nickname Format",
+            value=(
+                "- Nicknames now sync as `RANK X | USERNAME`\n"
+                "- Old prefixes like `RANK 621|HIGH ...` are cleaned automatically\n"
+                "- Startup now runs a full rank cleanup pass"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Staff Action",
+            value=(
+                "- Run `/rank sync-all` any time you want to force a full resync\n"
+                "- Use `/points ...` to affect placement\n"
+                "- Use `/rank0 grant` or `/rank0 revoke` for manual override"
+            ),
+            inline=False,
+        )
+        embed.set_footer(text="Highlight Manager update | live rank overhaul")
+        return embed
+
     if update_key == "systems-expansion":
         embed = discord.Embed(
             title="Latest Update | Shop + Coins + Tournament",

@@ -52,6 +52,7 @@ from highlight_manager.services.tournament_service import TournamentService
 from highlight_manager.services.voice_service import VoiceService
 from highlight_manager.services.vote_service import VoteService
 from highlight_manager.utils.exceptions import HighlightError
+from highlight_manager.utils.response_helpers import send_context_response, send_interaction_response
 
 
 async def dynamic_prefix(bot: "HighlightBot", message: discord.Message) -> list[str]:
@@ -89,6 +90,7 @@ class HighlightBot(commands.Bot):
         self.tournament_service: TournamentService | None = None
         self._play_channel_backfill_complete = False
         self._shop_reconcile_complete = False
+        self._rank_reconcile_complete = False
 
     async def setup_hook(self) -> None:
         self.mongo_client = AsyncMongoClient(self.settings.mongodb_uri)
@@ -196,6 +198,11 @@ class HighlightBot(commands.Bot):
             for guild in self.guilds:
                 await self.shop_service.reconcile_configured_sections(guild)
             self._shop_reconcile_complete = True
+        if not self._rank_reconcile_complete and self.config_service is not None and self.profile_service is not None:
+            for guild in self.guilds:
+                config = await self.config_service.get_or_create(guild.id)
+                await self.profile_service.sync_all_member_identities(guild, config)
+            self._rank_reconcile_complete = True
         self.logger.info("bot_ready", user=str(self.user), guilds=len(self.guilds))
 
     async def on_member_join(self, member: discord.Member) -> None:
@@ -270,26 +277,32 @@ class HighlightBot(commands.Bot):
         original = getattr(exception, "original", exception)
         if isinstance(original, commands.MissingRequiredArgument):
             if context.command and context.command.qualified_name == "play":
-                await context.reply(
+                await send_context_response(
+                    context,
                     await self._play_usage_message(
                         context.guild.id if context.guild else None,
                         missing=original.param.name,
-                    )
+                    ),
+                    error=True,
                 )
                 return
-            await context.reply(f"Missing required argument: `{original.param.name}`.")
+            await send_context_response(context, f"Missing required argument: `{original.param.name}`.", error=True)
             return
         if isinstance(original, commands.TooManyArguments):
             if context.command and context.command.qualified_name == "play":
-                await context.reply(await self._play_usage_message(context.guild.id if context.guild else None))
+                await send_context_response(
+                    context,
+                    await self._play_usage_message(context.guild.id if context.guild else None),
+                    error=True,
+                )
                 return
-            await context.reply("Too many arguments were provided.")
+            await send_context_response(context, "Too many arguments were provided.", error=True)
             return
         if isinstance(original, HighlightError):
-            await context.reply(str(original))
+            await send_context_response(context, str(original), error=True)
             return
         self.logger.exception("prefix_command_error", command=context.command.qualified_name if context.command else None, error=str(original))
-        await context.reply("Something went wrong while processing that command.")
+        await send_context_response(context, "Something went wrong while processing that command.", error=True)
 
     async def _get_prefix_for_guild(self, guild_id: int | None) -> str:
         if guild_id is None or self.config_service is None:
@@ -331,19 +344,18 @@ def main() -> None:
         original = getattr(error, "original", error)
         if isinstance(original, HighlightError):
             try:
-                if interaction.response.is_done():
-                    await interaction.followup.send(str(original), ephemeral=True)
-                else:
-                    await interaction.response.send_message(str(original), ephemeral=True)
+                await send_interaction_response(interaction, str(original), error=True, ephemeral=True)
             except discord.NotFound:
                 pass
             return
         bot.logger.exception("app_command_error", error=str(original))
         try:
-            if interaction.response.is_done():
-                await interaction.followup.send("Something went wrong while processing that command.", ephemeral=True)
-            else:
-                await interaction.response.send_message("Something went wrong while processing that command.", ephemeral=True)
+            await send_interaction_response(
+                interaction,
+                "Something went wrong while processing that command.",
+                error=True,
+                ephemeral=True,
+            )
         except discord.NotFound:
             pass
 

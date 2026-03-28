@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 import pytest
 
 from highlight_manager.models.enums import MatchMode, MatchStatus, MatchType, ResultSource
@@ -20,6 +22,9 @@ class FakeProfileRepository:
         self.storage[(profile.guild_id, profile.user_id)] = profile
         return profile
 
+    async def list_for_guild(self, guild_id: int) -> list[PlayerProfile]:
+        return [profile for (stored_guild_id, _), profile in self.storage.items() if stored_guild_id == guild_id]
+
     async def reset_for_new_season(self, guild_id: int, updated_at) -> None:
         return None
 
@@ -27,9 +32,16 @@ class FakeProfileRepository:
 class FakeGuild:
     def __init__(self, guild_id: int) -> None:
         self.id = guild_id
+        self._members: dict[int, object] = {}
 
     def get_member(self, user_id: int):
-        return None
+        return self._members.get(user_id)
+
+
+class FakeMember:
+    def __init__(self, user_id: int, joined_at: datetime | None) -> None:
+        self.id = user_id
+        self.joined_at = joined_at
 
 
 @pytest.mark.asyncio
@@ -68,3 +80,20 @@ async def test_apply_match_outcome_updates_points_and_summary() -> None:
     assert summary.winner_team == 1
     assert repository.storage[(1, 10)].current_points == 10
     assert repository.storage[(1, 20)].current_points == -8
+
+
+@pytest.mark.asyncio
+async def test_recalculate_live_ranks_uses_join_date_as_tiebreak() -> None:
+    repository = FakeProfileRepository()
+    service = ProfileService(repository, RankService())
+    guild = FakeGuild(1)
+    config = GuildConfig(guild_id=1)
+    guild._members[10] = FakeMember(10, datetime(2026, 1, 1, tzinfo=UTC))
+    guild._members[20] = FakeMember(20, datetime(2026, 1, 2, tzinfo=UTC))
+    await repository.upsert(PlayerProfile(guild_id=1, user_id=10, current_points=100))
+    await repository.upsert(PlayerProfile(guild_id=1, user_id=20, current_points=100))
+
+    profiles = await service.recalculate_live_ranks(guild, config, sync_members=False)
+
+    assert profiles[10].current_rank == 1
+    assert profiles[20].current_rank == 2

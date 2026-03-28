@@ -7,6 +7,7 @@ from discord import app_commands
 
 from highlight_manager.models.enums import AuditAction, ShopSection
 from highlight_manager.utils.exceptions import HighlightError
+from highlight_manager.utils.response_helpers import send_interaction_response
 
 if TYPE_CHECKING:
     from highlight_manager.bot import HighlightBot
@@ -18,10 +19,7 @@ def register_shop_commands(bot: "HighlightBot") -> None:
             await interaction.response.defer(ephemeral=True)
 
     async def send_ephemeral(interaction: discord.Interaction, message: str) -> None:
-        if interaction.response.is_done():
-            await interaction.followup.send(message, ephemeral=True)
-        else:
-            await interaction.response.send_message(message, ephemeral=True)
+        await send_interaction_response(interaction, message, ephemeral=True)
 
     async def publish_and_respond(
         interaction: discord.Interaction,
@@ -39,11 +37,11 @@ def register_shop_commands(bot: "HighlightBot") -> None:
     async def ensure_staff(interaction: discord.Interaction) -> bool:
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
             if not interaction.response.is_done():
-                await interaction.response.send_message("This command can only be used inside the server.", ephemeral=True)
+                await send_interaction_response(interaction, "This command can only be used inside the server.", error=True, ephemeral=True)
             return False
         if not await bot.config_service.is_staff(interaction.user):
             if not interaction.response.is_done():
-                await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+                await send_interaction_response(interaction, "You do not have permission to use this command.", error=True, ephemeral=True)
             return False
         return True
 
@@ -103,7 +101,8 @@ def register_shop_commands(bot: "HighlightBot") -> None:
         if not await ensure_staff(interaction):
             return
         await bot.shop_service.set_section_channel(interaction.guild.id, section, channel.id)
-        await interaction.response.send_message(
+        await send_interaction_response(
+            interaction,
             f"Bound **{section.label}** to {channel.mention}. Use `/shop post` to publish the showcase.",
             ephemeral=True,
         )
@@ -116,7 +115,8 @@ def register_shop_commands(bot: "HighlightBot") -> None:
         if not await ensure_staff(interaction):
             return
         await bot.shop_service.set_order_channel(interaction.guild.id, channel.id)
-        await interaction.response.send_message(
+        await send_interaction_response(
+            interaction,
             f"Order channel set to {channel.mention}.",
             ephemeral=True,
         )
@@ -129,7 +129,8 @@ def register_shop_commands(bot: "HighlightBot") -> None:
         if not await ensure_staff(interaction):
             return
         await bot.shop_service.set_ticket_category(interaction.guild.id, category.id)
-        await interaction.response.send_message(
+        await send_interaction_response(
+            interaction,
             f"Shop ticket category set to **{category.name}**.",
             ephemeral=True,
         )
@@ -145,7 +146,7 @@ def register_shop_commands(bot: "HighlightBot") -> None:
             return
         resolved_url = image.url if image else image_url
         if not resolved_url:
-            return await interaction.response.send_message("Provide an attachment or image URL.", ephemeral=True)
+            return await send_interaction_response(interaction, "Provide an attachment or image URL.", error=True, ephemeral=True)
         await bot.shop_service.set_section_image(interaction.guild.id, section, resolved_url)
         await publish_and_respond(interaction, section, success_message=f"Updated image for **{section.label}**.")
 

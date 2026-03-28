@@ -6,6 +6,7 @@ import discord
 from discord import app_commands
 
 from highlight_manager.models.enums import AuditAction
+from highlight_manager.utils.response_helpers import send_interaction_response
 
 if TYPE_CHECKING:
     from highlight_manager.bot import HighlightBot
@@ -15,11 +16,11 @@ def register_coins_commands(bot: "HighlightBot") -> None:
     async def ensure_staff(interaction: discord.Interaction) -> bool:
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
             if not interaction.response.is_done():
-                await interaction.response.send_message("This command can only be used inside the server.", ephemeral=True)
+                await send_interaction_response(interaction, "This command can only be used inside the server.", error=True, ephemeral=True)
             return False
         if not await bot.config_service.is_staff(interaction.user):
             if not interaction.response.is_done():
-                await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+                await send_interaction_response(interaction, "You do not have permission to use this command.", error=True, ephemeral=True)
             return False
         return True
 
@@ -37,7 +38,8 @@ def register_coins_commands(bot: "HighlightBot") -> None:
             actor_id=interaction.user.id,
             target_id=member.id,
         )
-        await interaction.response.send_message(
+        await send_interaction_response(
+            interaction,
             f"{member.mention}: {result.previous_balance} -> {result.new_balance} coins.",
             ephemeral=True,
         )
@@ -54,7 +56,8 @@ def register_coins_commands(bot: "HighlightBot") -> None:
             actor_id=interaction.user.id,
             target_id=member.id,
         )
-        await interaction.response.send_message(
+        await send_interaction_response(
+            interaction,
             f"{member.mention}: {result.previous_balance} -> {result.new_balance} coins.",
             ephemeral=True,
         )
@@ -71,7 +74,8 @@ def register_coins_commands(bot: "HighlightBot") -> None:
             actor_id=interaction.user.id,
             target_id=member.id,
         )
-        await interaction.response.send_message(
+        await send_interaction_response(
+            interaction,
             f"{member.mention}: {result.previous_balance} -> {result.new_balance} coins.",
             ephemeral=True,
         )
