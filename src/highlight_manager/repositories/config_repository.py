@@ -38,7 +38,19 @@ class ConfigRepository(BaseRepository[GuildConfig]):
             field_name: {"$ifNull": [f"${field_name}", value]}
             for field_name, value in insert_defaults.items()
         }
-        set_stage["next_match_number"] = {"$add": [{"$ifNull": ["$next_match_number", 1]}, 1]}
+        set_stage["next_match_number"] = {
+            "$add": [
+                {
+                    "$convert": {
+                        "input": "$next_match_number",
+                        "to": "int",
+                        "onError": 1,
+                        "onNull": 1,
+                    }
+                },
+                1,
+            ]
+        }
         previous = await self.collection.find_one_and_update(
             {"guild_id": guild_id},
             [{"$set": set_stage}],
@@ -47,4 +59,9 @@ class ConfigRepository(BaseRepository[GuildConfig]):
         )
         if previous is None:
             return 1
-        return int(previous.get("next_match_number", 1))
+        previous_value = previous.get("next_match_number", 1)
+        try:
+            reserved = int(previous_value)
+        except (TypeError, ValueError):
+            return 1
+        return reserved if reserved > 0 else 1

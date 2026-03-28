@@ -25,6 +25,20 @@ class GameplayCog(commands.Cog):
             result = await self.bot.match_service.create_match(ctx.channel, ctx.guild, ctx.author, mode, match_type)
         except HighlightError as exc:
             return await send_context_response(ctx, str(exc), error=True)
+        except Exception as exc:
+            self.bot.logger.exception(
+                "play_command_failed",
+                guild_id=ctx.guild.id,
+                user_id=ctx.author.id,
+                mode=mode,
+                match_type=match_type,
+                error=str(exc),
+            )
+            return await send_context_response(
+                ctx,
+                "I could not create that match right now. Staff should run `/setup action:repair` and retry.",
+                error=True,
+            )
         await send_context_response(ctx, result.message)
 
     @commands.command(name="profile")

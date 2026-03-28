@@ -36,13 +36,35 @@ async def test_reserve_next_match_number_uses_atomic_increment_without_conflicti
     assert collection.last_upsert is True
     assert collection.last_return_document == ReturnDocument.BEFORE
     set_stage = collection.last_update[0]["$set"]
-    assert set_stage["next_match_number"] == {"$add": [{"$ifNull": ["$next_match_number", 1]}, 1]}
+    assert set_stage["next_match_number"] == {
+        "$add": [
+            {
+                "$convert": {
+                    "input": "$next_match_number",
+                    "to": "int",
+                    "onError": 1,
+                    "onNull": 1,
+                }
+            },
+            1,
+        ]
+    }
     assert set_stage["guild_id"] == {"$ifNull": ["$guild_id", 1]}
 
 
 @pytest.mark.asyncio
 async def test_reserve_next_match_number_returns_one_for_first_match() -> None:
     collection = FakeCollection(previous_document=None)
+    repository = ConfigRepository(collection, GuildConfig)
+
+    match_number = await repository.reserve_next_match_number(1, GuildConfig(guild_id=1))
+
+    assert match_number == 1
+
+
+@pytest.mark.asyncio
+async def test_reserve_next_match_number_handles_null_previous_value() -> None:
+    collection = FakeCollection(previous_document={"guild_id": 1, "next_match_number": None})
     repository = ConfigRepository(collection, GuildConfig)
 
     match_number = await repository.reserve_next_match_number(1, GuildConfig(guild_id=1))
