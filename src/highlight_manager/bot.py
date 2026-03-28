@@ -258,17 +258,9 @@ class HighlightBot(commands.Bot):
 
     def _is_allowed_match_channel_message(self, content: str, config: GuildConfig, channel_id: int) -> bool:
         command_word, args = self._normalized_command_word(content, config.prefix)
-        if command_word != "play" or len(args) != 2:
+        if command_word != "play":
             return False
-        try:
-            MatchMode.from_input(args[0])
-            match_type = MatchType.from_input(args[1])
-        except HighlightError:
-            return False
-        expected_channel_id = (
-            config.apostado_channel_id if match_type == MatchType.APOSTADO else config.highlight_channel_id
-        )
-        return expected_channel_id is not None and channel_id == expected_channel_id
+        return True
 
     @staticmethod
     def _is_match_channel(channel_id: int, config: GuildConfig) -> bool:
@@ -278,19 +270,40 @@ class HighlightBot(commands.Bot):
         original = getattr(exception, "original", exception)
         if isinstance(original, commands.MissingRequiredArgument):
             if context.command and context.command.qualified_name == "play":
-                prefix = self.settings.default_prefix
-                if context.guild is not None and self.config_service is not None:
-                    config = await self.config_service.get_or_create(context.guild.id)
-                    prefix = config.prefix
-                await context.reply(f"Usage: `{prefix}play <mode> <type>`. Example: `{prefix}play 4v4 apos`.")
+                await context.reply(
+                    await self._play_usage_message(
+                        context.guild.id if context.guild else None,
+                        missing=original.param.name,
+                    )
+                )
                 return
             await context.reply(f"Missing required argument: `{original.param.name}`.")
+            return
+        if isinstance(original, commands.TooManyArguments):
+            if context.command and context.command.qualified_name == "play":
+                await context.reply(await self._play_usage_message(context.guild.id if context.guild else None))
+                return
+            await context.reply("Too many arguments were provided.")
             return
         if isinstance(original, HighlightError):
             await context.reply(str(original))
             return
         self.logger.exception("prefix_command_error", command=context.command.qualified_name if context.command else None, error=str(original))
         await context.reply("Something went wrong while processing that command.")
+
+    async def _get_prefix_for_guild(self, guild_id: int | None) -> str:
+        if guild_id is None or self.config_service is None:
+            return self.settings.default_prefix
+        config = await self.config_service.get_or_create(guild_id)
+        return config.prefix
+
+    async def _play_usage_message(self, guild_id: int | None, *, missing: str | None = None) -> str:
+        prefix = await self._get_prefix_for_guild(guild_id)
+        if missing == "match_type":
+            return f"Write match type after the mode. Use `{prefix}play 4v4 apos` or `{prefix}play 4v4 high`."
+        if missing == "mode":
+            return f"Write match mode first. Use `{prefix}play 1v1 apos`, `{prefix}play 2v2 apos`, `{prefix}play 3v3 high`, or `{prefix}play 4v4 high`."
+        return f"Use `{prefix}play <mode> <type>`. Match type must be `apos` or `high`."
 
     async def on_error(self, event_method: str, *args: Any, **kwargs: Any) -> None:
         self.logger.exception("discord_event_error", event=event_method)

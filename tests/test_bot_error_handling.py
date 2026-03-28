@@ -35,4 +35,17 @@ async def test_on_command_error_returns_usage_for_play_missing_argument() -> Non
 
     await HighlightBot.on_command_error(bot, context, error)
 
-    assert context.replies == ["Usage: `!play <mode> <type>`. Example: `!play 4v4 apos`."]
+    assert context.replies == ["Write match type after the mode. Use `!play 4v4 apos` or `!play 4v4 high`."]
+
+
+@pytest.mark.asyncio
+async def test_on_command_error_returns_generic_play_usage_for_too_many_arguments() -> None:
+    bot = HighlightBot.__new__(HighlightBot)
+    bot.settings = Settings(DISCORD_TOKEN="token", MONGODB_URI="mongodb://localhost")
+    bot.config_service = None
+    bot.logger = type("Logger", (), {"exception": lambda *args, **kwargs: None})()
+    context = FakeContext()
+
+    await HighlightBot.on_command_error(bot, context, commands.TooManyArguments())
+
+    assert context.replies == ["Use `!play <mode> <type>`. Match type must be `apos` or `high`."]

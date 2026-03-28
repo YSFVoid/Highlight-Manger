@@ -59,12 +59,12 @@ def test_match_channel_allowlist_accepts_only_valid_play_command() -> None:
 
     assert bot._is_allowed_match_channel_message("!play 3v3 apostado", config, 100) is True
     assert bot._is_allowed_match_channel_message("!play 3v3 highlight", config, 200) is True
+    assert bot._is_allowed_match_channel_message("!play 3v3", config, 200) is True
+    assert bot._is_allowed_match_channel_message("!play badmode highlight", config, 200) is True
+    assert bot._is_allowed_match_channel_message("!play 3v3 wrongtype", config, 200) is True
     assert bot._is_allowed_match_channel_message("w", config, 200) is False
     assert bot._is_allowed_match_channel_message("!profile", config, 200) is False
-    assert bot._is_allowed_match_channel_message("!play 3v3", config, 200) is False
-    assert bot._is_allowed_match_channel_message("!play badmode highlight", config, 200) is False
-    assert bot._is_allowed_match_channel_message("!play 3v3 highlight extra", config, 200) is False
-    assert bot._is_allowed_match_channel_message("!play 3v3 apostado", config, 200) is False
+    assert bot._is_allowed_match_channel_message("!play 3v3 highlight extra", config, 200) is True
 
 
 @pytest.mark.asyncio
