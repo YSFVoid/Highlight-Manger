@@ -20,7 +20,10 @@ class RankSyncResult:
 
 
 class RankService:
-    PREFIX_PATTERN = re.compile(r"^Rank\s+\d+\s+", flags=re.IGNORECASE)
+    PREFIX_PATTERNS = [
+        re.compile(r"^\s*rank\s+\d+\s*(?:\|\s*)?(?:high\s+)?", flags=re.IGNORECASE),
+        re.compile(r"^\s*high\s+", flags=re.IGNORECASE),
+    ]
 
     def __init__(self) -> None:
         self.logger = get_logger(__name__)
@@ -135,7 +138,13 @@ class RankService:
         return result
 
     def strip_rank_prefix(self, name: str) -> str:
-        cleaned = self.PREFIX_PATTERN.sub("", name).strip()
+        cleaned = name.strip()
+        while True:
+            original = cleaned
+            for pattern in self.PREFIX_PATTERNS:
+                cleaned = pattern.sub("", cleaned).strip()
+            if cleaned == original:
+                break
         return cleaned or "Player"
 
     def build_rank_nickname(self, rank: int, base_name: str) -> str:

@@ -16,3 +16,10 @@ def test_rank_prefix_is_replaced_cleanly() -> None:
     service = RankService()
     assert service.strip_rank_prefix("Rank 3 Shadow") == "Shadow"
     assert service.build_rank_nickname(5, service.strip_rank_prefix("Rank 3 Shadow")) == "Rank 5 Shadow"
+
+
+def test_rank_prefix_strips_legacy_high_format_cleanly() -> None:
+    service = RankService()
+    assert service.strip_rank_prefix("RANK 621|HIGH Asta") == "Asta"
+    assert service.strip_rank_prefix("Rank 1 HIGH SUNNLESS") == "SUNNLESS"
+    assert service.strip_rank_prefix("HIGH Ahmed") == "Ahmed"

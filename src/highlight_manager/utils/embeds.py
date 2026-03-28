@@ -10,6 +10,10 @@ from highlight_manager.models.match import MatchRecord
 from highlight_manager.models.profile import PlayerProfile
 from highlight_manager.models.vote import MatchVote
 from highlight_manager.utils.dates import format_dt, format_relative
+from highlight_manager.services.rank_service import RankService
+
+
+_RANK_NAME_SANITIZER = RankService()
 
 
 def _member_label(guild: discord.Guild | None, user_id: int) -> str:
@@ -17,6 +21,16 @@ def _member_label(guild: discord.Guild | None, user_id: int) -> str:
         return f"<@{user_id}>"
     member = guild.get_member(user_id)
     return member.mention if member else f"<@{user_id}>"
+
+
+def _member_display_name(guild: discord.Guild | None, user_id: int) -> str:
+    if guild is None:
+        return f"User {user_id}"
+    member = guild.get_member(user_id)
+    if member is None:
+        return f"User {user_id}"
+    raw_name = member.nick or member.global_name or member.name
+    return _RANK_NAME_SANITIZER.strip_rank_prefix(raw_name)
 
 
 def _format_team(guild: discord.Guild | None, user_ids: Sequence[int], team_size: int) -> str:
@@ -150,7 +164,7 @@ def build_leaderboard_embed(
     lines = []
     for index, profile in enumerate(profiles, start=1):
         lines.append(
-            f"**{index}.** {_member_label(guild, profile.user_id)} | "
+            f"**{index}.** {_member_display_name(guild, profile.user_id)} | "
             f"{profile.current_points} pts | Rank {profile.current_rank}"
         )
     embed.description = "\n".join(lines)
