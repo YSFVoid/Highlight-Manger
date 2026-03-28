@@ -134,8 +134,26 @@ class MatchService:
             match.vote_expires_at = minutes_from_now(config.vote_timeout_minutes)
             match = await self.repository.replace(match)
             await self.refresh_match_message(member.guild, match)
-            await self.start_full_match(member.guild, match, config)
-            return MatchActionResult(match=match, message=f"Match #{match.display_id} is now full.")
+            try:
+                match = await self.start_full_match(member.guild, match, config)
+            except UserFacingError as exc:
+                canceled = await self.cancel_match(
+                    member.guild,
+                    match.match_number,
+                    actor_id=None,
+                    force=True,
+                    reason=f"Automatic match start failed: {exc}",
+                )
+                await self.post_public_note(
+                    member.guild,
+                    canceled.match,
+                    f"Match #{canceled.match.display_id} was canceled because automatic start failed.\nReason: {exc}",
+                )
+                return MatchActionResult(
+                    match=canceled.match,
+                    message=f"Match #{canceled.match.display_id} was canceled because automatic start failed.",
+                )
+            return MatchActionResult(match=match, message=f"Match #{match.display_id} is now live.")
 
         await self.refresh_match_message(member.guild, match)
         return MatchActionResult(match=match, message=f"Joined Team {team_number} in Match #{match.display_id}.")
@@ -208,25 +226,54 @@ class MatchService:
         return MatchActionResult(match=match, message=f"Canceled Match #{match.display_id}.")
 
     async def start_full_match(self, guild: discord.Guild, match: MatchRecord, config) -> MatchRecord:
+        self._validate_players_ready_for_start(guild, match, config)
         warnings: list[str] = []
+        team1_channel: discord.VoiceChannel | None = None
+        team2_channel: discord.VoiceChannel | None = None
+        result_channel: discord.TextChannel | None = None
         try:
             team1_channel, team2_channel = await self.voice_service.create_match_voice_channels(guild, match, config)
+            result_channel = await self.result_channel_service.create_private_channel(guild, match, config)
             match.team1_voice_channel_id = team1_channel.id
             match.team2_voice_channel_id = team2_channel.id
+            match.result_channel_id = result_channel.id
             warnings.extend(
                 await self.voice_service.move_players_to_team_channels(guild, match, team1_channel, team2_channel)
             )
+        except UserFacingError:
+            if result_channel is not None:
+                await self.result_channel_service.delete_channel(guild, result_channel.id, match.match_number)
+            if team1_channel is not None:
+                await self.voice_service.cleanup_match_voices(
+                    guild,
+                    match.model_copy(
+                        update={
+                            "team1_voice_channel_id": team1_channel.id,
+                            "team2_voice_channel_id": team2_channel.id if team2_channel is not None else None,
+                        }
+                    ),
+                )
+            raise
         except Exception as exc:
-            warnings.append(str(exc))
-            self.logger.warning("full_match_voice_setup_failed", guild_id=guild.id, match_number=match.match_number, error=str(exc))
-
-        try:
-            result_channel = await self.result_channel_service.create_private_channel(guild, match, config)
-            match.result_channel_id = result_channel.id
-        except Exception as exc:
-            warnings.append(f"Could not create private result channel: {exc}")
-            self.logger.warning("result_channel_creation_failed", guild_id=guild.id, match_number=match.match_number, error=str(exc))
-            result_channel = None
+            if result_channel is not None:
+                await self.result_channel_service.delete_channel(guild, result_channel.id, match.match_number)
+            if team1_channel is not None:
+                await self.voice_service.cleanup_match_voices(
+                    guild,
+                    match.model_copy(
+                        update={
+                            "team1_voice_channel_id": team1_channel.id,
+                            "team2_voice_channel_id": team2_channel.id if team2_channel is not None else None,
+                        }
+                    ),
+                )
+            self.logger.warning(
+                "full_match_start_failed",
+                guild_id=guild.id,
+                match_number=match.match_number,
+                error=str(exc),
+            )
+            raise UserFacingError("I could not create the match voice/result channels. Check setup and bot permissions.") from exc
 
         match.status = MatchStatus.IN_PROGRESS
         match.vote_expires_at = match.vote_expires_at or minutes_from_now(config.vote_timeout_minutes)
@@ -234,22 +281,21 @@ class MatchService:
         self.register_views(match)
         await self.refresh_match_message(guild, match)
 
-        if result_channel is not None:
-            await result_channel.send(
-                embed=discord.Embed(
-                    title=f"Result Room | Match #{match.display_id}",
-                    description=(
-                        f"Mode: **{match.mode.value}**\n"
-                        f"Type: **{match.match_type.label}**\n"
-                        f"Vote deadline: <t:{int(match.vote_expires_at.timestamp())}:R>\n"
-                        "When the match ends, every player must submit a result vote here."
-                    ),
-                    colour=discord.Colour.orange(),
+        await result_channel.send(
+            embed=discord.Embed(
+                title=f"Result Room | Match #{match.display_id}",
+                description=(
+                    f"Mode: **{match.mode.value}**\n"
+                    f"Type: **{match.match_type.label}**\n"
+                    f"Vote deadline: <t:{int(match.vote_expires_at.timestamp())}:R>\n"
+                    "When the match ends, every player must submit a result vote here."
                 ),
-                view=self._build_result_view(match),
-            )
-            if warnings:
-                await result_channel.send("\n".join(warnings))
+                colour=discord.Colour.orange(),
+            ),
+            view=self._build_result_view(match),
+        )
+        if warnings:
+            await result_channel.send("\n".join(warnings))
         await self.audit_service.log(
             guild,
             AuditAction.MATCH_FULL,
@@ -446,10 +492,16 @@ class MatchService:
             config = await self.config_service.get_or_create(guild.id)
             self.register_views(match)
             if match.status == MatchStatus.FULL:
-                match.status = MatchStatus.IN_PROGRESS
-                match.vote_expires_at = match.vote_expires_at or minutes_from_now(config.vote_timeout_minutes)
-                match = await self.repository.replace(match)
-                await self.refresh_match_message(guild, match)
+                try:
+                    match = await self.start_full_match(guild, match, config)
+                except UserFacingError as exc:
+                    await self.cancel_match(
+                        guild,
+                        match.match_number,
+                        actor_id=None,
+                        force=True,
+                        reason=f"Restart recovery failed to start full match: {exc}",
+                    )
             if match.status in {MatchStatus.IN_PROGRESS, MatchStatus.VOTING} and match.result_channel_id:
                 channel = guild.get_channel(match.result_channel_id)
                 if isinstance(channel, discord.TextChannel):
@@ -583,3 +635,15 @@ class MatchService:
         if expected_channel_id and channel_id != expected_channel_id:
             label = match_type.label
             raise UserFacingError(f"{label} matches can only be created in <#{expected_channel_id}>.")
+
+    def _validate_players_ready_for_start(self, guild: discord.Guild, match: MatchRecord, config) -> None:
+        waiting_voice_id = config.waiting_voice_channel_id
+        if not waiting_voice_id:
+            raise UserFacingError("Waiting Voice channel is not configured.")
+        for user_id in match.all_player_ids:
+            member = guild.get_member(user_id)
+            if member is None:
+                raise UserFacingError(f"<@{user_id}> is no longer in the server.")
+            current_voice_id = member.voice.channel.id if member.voice and member.voice.channel else None
+            if current_voice_id != waiting_voice_id:
+                raise UserFacingError(f"{member.display_name} must stay in the Waiting Voice until the bot moves players.")

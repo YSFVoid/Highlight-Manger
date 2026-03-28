@@ -282,6 +282,37 @@ def register_admin_commands(bot: "HighlightBot") -> None:
         await bot.audit_service.log(interaction.guild, AuditAction.RANK_UPDATED, f"Set {member.mention} to Rank {rank_number}.", actor_id=interaction.user.id, target_id=member.id)
         await interaction.response.send_message(f"{member.mention} is now **Rank {profile.current_rank}**.", ephemeral=True)
 
+    @rank.command(name="sync-all", description="Resync rank roles and nicknames for all members")
+    async def rank_sync_all(interaction: discord.Interaction) -> None:
+        if not await ensure_staff(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        config = await bot.config_service.get_or_create(interaction.guild.id)
+        result = await bot.profile_service.sync_all_member_identities(interaction.guild, config)
+        await bot.audit_service.log(
+            interaction.guild,
+            AuditAction.RANK_UPDATED,
+            "Ran full rank identity sync for all members.",
+            actor_id=interaction.user.id,
+            metadata={
+                "processed_members": result.processed_members,
+                "role_updates": result.role_updates,
+                "nickname_updates": result.nickname_updates,
+                "nickname_failures": result.nickname_failures,
+                "skipped_members": result.skipped_members,
+            },
+        )
+        await interaction.followup.send(
+            (
+                f"Processed **{result.processed_members}** members.\n"
+                f"Role updates: **{result.role_updates}**\n"
+                f"Nickname updates: **{result.nickname_updates}**\n"
+                f"Nickname failures: **{result.nickname_failures}**\n"
+                f"Skipped: **{result.skipped_members}**"
+            ),
+            ephemeral=True,
+        )
+
     @rank0.command(name="grant", description="Grant manual Rank 0")
     async def rank0_grant(interaction: discord.Interaction, member: discord.Member) -> None:
         if not await ensure_staff(interaction):

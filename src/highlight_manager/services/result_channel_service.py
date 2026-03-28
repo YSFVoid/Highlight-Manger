@@ -6,6 +6,7 @@ from highlight_manager.config.logging import get_logger
 from highlight_manager.models.enums import ResultChannelBehavior
 from highlight_manager.models.guild_config import GuildConfig
 from highlight_manager.models.match import MatchRecord
+from highlight_manager.utils.permissions import bot_missing_permissions
 from highlight_manager.utils.exceptions import UserFacingError
 
 
@@ -19,6 +20,9 @@ class ResultChannelService:
         match: MatchRecord,
         config: GuildConfig,
     ) -> discord.TextChannel:
+        me = guild.me
+        if me is None or not me.guild_permissions.manage_channels:
+            raise UserFacingError("I am missing Manage Channels permission for private result rooms.")
         overwrites: dict[discord.Role | discord.Member, discord.PermissionOverwrite] = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
         }
@@ -50,6 +54,16 @@ class ResultChannelService:
         category = guild.get_channel(config.result_category_id) if config.result_category_id else None
         if category is not None and not isinstance(category, discord.CategoryChannel):
             raise UserFacingError("Configured result category no longer exists.")
+        if isinstance(category, discord.CategoryChannel):
+            missing_perms = bot_missing_permissions(
+                me,
+                category,
+                ["manage_channels", "view_channel", "send_messages", "read_message_history"],
+            )
+            if missing_perms:
+                raise UserFacingError(
+                    "I am missing permissions to create private result rooms: " + ", ".join(missing_perms)
+                )
 
         channel = await guild.create_text_channel(
             name=config.result_channel_name_template.format(match_id=match.display_id),

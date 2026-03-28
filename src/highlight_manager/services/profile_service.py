@@ -26,6 +26,15 @@ class PointsUpdateResult:
     rank_after: int
 
 
+@dataclass(slots=True)
+class IdentitySyncBatchResult:
+    processed_members: int = 0
+    role_updates: int = 0
+    nickname_updates: int = 0
+    nickname_failures: int = 0
+    skipped_members: int = 0
+
+
 class ProfileService:
     def __init__(self, repository: ProfileRepository, rank_service: RankService) -> None:
         self.repository = repository
@@ -292,3 +301,25 @@ class ProfileService:
         if profile.blacklisted:
             raise UserFacingError("You are blacklisted from match participation.")
         return profile
+
+    async def sync_all_member_identities(
+        self,
+        guild: discord.Guild,
+        config: GuildConfig,
+    ) -> IdentitySyncBatchResult:
+        result = IdentitySyncBatchResult()
+        for member in guild.members:
+            if member.bot:
+                continue
+            profile = await self.ensure_profile(member.guild, member.id, config, sync_identity=False)
+            sync_result = await self.rank_service.sync_member_roles(member, profile, config)
+            result.processed_members += 1
+            if sync_result.role_updated:
+                result.role_updates += 1
+            if sync_result.nickname_updated:
+                result.nickname_updates += 1
+            if sync_result.nickname_failed:
+                result.nickname_failures += 1
+            if sync_result.skipped_reason:
+                result.skipped_members += 1
+        return result
