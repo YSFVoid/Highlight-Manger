@@ -14,6 +14,11 @@ from highlight_manager.services.rank_service import RankService
 
 
 _RANK_NAME_SANITIZER = RankService()
+LATEST_UPDATE_KEY = "rank-match-stability"
+UPDATE_ANNOUNCEMENT_KEYS: tuple[tuple[str, str], ...] = (
+    ("rank-match-stability", "Rank + Match Stability"),
+    ("systems-expansion", "Shop + Coins + Tournament"),
+)
 
 
 def _member_label(guild: discord.Guild | None, user_id: int) -> str:
@@ -271,52 +276,88 @@ def build_result_summary_embed(match: MatchRecord, guild: discord.Guild | None) 
     return embed
 
 
-def build_latest_update_embed() -> discord.Embed:
+def build_latest_update_embed(update_key: str = LATEST_UPDATE_KEY) -> discord.Embed:
+    if update_key == "systems-expansion":
+        embed = discord.Embed(
+            title="Latest Update | Shop + Coins + Tournament",
+            description="A major expansion is now live with three new systems built into the bot.",
+            colour=discord.Colour.from_rgb(68, 71, 76),
+        )
+        embed.add_field(
+            name="Shop System",
+            value=(
+                "- Premium shop section channels\n"
+                "- One clean embed per section\n"
+                "- Buy here button opens a private ticket\n"
+                "- Supports admin-set product pricing"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Coins System",
+            value=(
+                "- Coins are now part of member profiles\n"
+                "- Coins are earned from match and tournament progress\n"
+                "- Coins can be used for shop items with coin prices\n"
+                "- Balance is visible with `!coins`, `!profile`, and `!rank`"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Tournament System",
+            value=(
+                "- Team registration with captain and player Discord IDs\n"
+                "- Random group stage generation\n"
+                "- BO3 result-room flow for series reporting\n"
+                "- Automatic advancement through knockout rounds to the final"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="What Staff Can Do",
+            value=(
+                "- Configure shop sections with `/shop setup`\n"
+                "- Set coin prices on shop items\n"
+                "- Create and manage tournaments with `/tournament ...` commands"
+            ),
+            inline=False,
+        )
+        embed.set_footer(text="Highlight Manager update | systems expansion")
+        return embed
+
     embed = discord.Embed(
-        title="Latest Update | Highlight Manager",
-        description="A major update is now live with three new systems built into the bot.",
+        title="Latest Update | Rank + Match Stability",
+        description="A stability update is now live for rank cleanup and automatic match startup.",
         colour=discord.Colour.from_rgb(68, 71, 76),
     )
     embed.add_field(
-        name="Shop System",
+        name="Rank Cleanup",
         value=(
-            "- Premium shop section channels\n"
-            "- One clean embed per section\n"
-            "- Buy here button opens a private ticket\n"
-            "- Supports admin-set product pricing"
+            "- Old nicknames like `RANK 621|HIGH ...` are now cleaned correctly\n"
+            "- Leaderboard lines now show clean player names\n"
+            "- Added `/rank sync-all` for full nickname and role resync"
         ),
         inline=False,
     )
     embed.add_field(
-        name="Coins System",
+        name="Match Startup Fixes",
         value=(
-            "- Coins are now part of member profiles\n"
-            "- Coins are earned from match and tournament progress\n"
-            "- Coins can be used for shop items with coin prices\n"
-            "- Balance is visible with `!coins`, `!profile`, and `!rank`"
+            "- Players must stay in Waiting Voice until the bot moves them\n"
+            "- Team voice and private result room startup is now transactional\n"
+            "- Broken full matches are canceled with a clear reason instead of silently failing"
         ),
         inline=False,
     )
     embed.add_field(
-        name="Tournament System",
+        name="Staff Action",
         value=(
-            "- Team registration with captain and player Discord IDs\n"
-            "- Random group stage generation\n"
-            "- BO3 result-room flow for series reporting\n"
-            "- Automatic advancement through knockout rounds to the final"
+            "- Run `/rank sync-all` once after updating\n"
+            "- Re-test a full match after restart\n"
+            "- Check bot permissions for `Manage Channels`, `Move Members`, and `Manage Nicknames`"
         ),
         inline=False,
     )
-    embed.add_field(
-        name="What Staff Can Do",
-        value=(
-            "- Configure shop sections with `/shop setup`\n"
-            "- Set coin prices on shop items\n"
-            "- Create and manage tournaments with `/tournament ...` commands"
-        ),
-        inline=False,
-    )
-    embed.set_footer(text="Highlight Manager update")
+    embed.set_footer(text="Highlight Manager update | rank and match stability")
     return embed
 
 
