@@ -276,6 +276,16 @@ class HighlightBot(commands.Bot):
 
     async def on_command_error(self, context: commands.Context, exception: commands.CommandError) -> None:
         original = getattr(exception, "original", exception)
+        if isinstance(original, commands.MissingRequiredArgument):
+            if context.command and context.command.qualified_name == "play":
+                prefix = self.settings.default_prefix
+                if context.guild is not None and self.config_service is not None:
+                    config = await self.config_service.get_or_create(context.guild.id)
+                    prefix = config.prefix
+                await context.reply(f"Usage: `{prefix}play <mode> <type>`. Example: `{prefix}play 4v4 apos`.")
+                return
+            await context.reply(f"Missing required argument: `{original.param.name}`.")
+            return
         if isinstance(original, HighlightError):
             await context.reply(str(original))
             return

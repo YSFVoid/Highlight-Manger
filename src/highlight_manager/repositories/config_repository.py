@@ -32,15 +32,19 @@ class ConfigRepository(BaseRepository[GuildConfig]):
         return self._to_model(updated)
 
     async def reserve_next_match_number(self, guild_id: int, defaults: GuildConfig) -> int:
-        updated = await self.collection.find_one_and_update(
+        insert_defaults = defaults.model_dump(mode="python")
+        insert_defaults.pop("next_match_number", None)
+        set_stage = {
+            field_name: {"$ifNull": [f"${field_name}", value]}
+            for field_name, value in insert_defaults.items()
+        }
+        set_stage["next_match_number"] = {"$add": [{"$ifNull": ["$next_match_number", 1]}, 1]}
+        previous = await self.collection.find_one_and_update(
             {"guild_id": guild_id},
-            {
-                "$setOnInsert": defaults.model_dump(mode="python"),
-                "$inc": {"next_match_number": 1},
-            },
+            [{"$set": set_stage}],
             upsert=True,
-            return_document=ReturnDocument.AFTER,
+            return_document=ReturnDocument.BEFORE,
         )
-        if updated is None:
+        if previous is None:
             return 1
-        return int(updated["next_match_number"]) - 1
+        return int(previous.get("next_match_number", 1))

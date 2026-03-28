@@ -48,6 +48,10 @@ class ShopPurchaseModal(discord.ui.Modal):
         shop_service = getattr(interaction.client, "shop_service", None)
         if shop_service is None:
             return await interaction.response.send_message("Shop service is not available right now.", ephemeral=True)
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except discord.NotFound:
+            return
         matched_item = await shop_service.resolve_requested_item(
             interaction.guild.id,
             self.section,
@@ -59,11 +63,11 @@ class ShopPurchaseModal(discord.ui.Modal):
         audit_service = getattr(interaction.client, "audit_service", None)
         if matched_item is not None and matched_item.coin_price is not None:
             if coins_service is None:
-                return await interaction.response.send_message("Coins service is not available right now.", ephemeral=True)
+                return await interaction.followup.send("Coins service is not available right now.", ephemeral=True)
             try:
                 purchase = await coins_service.purchase_shop_item(interaction.guild, interaction.user.id, matched_item)
             except HighlightError as exc:
-                return await interaction.response.send_message(str(exc), ephemeral=True)
+                return await interaction.followup.send(str(exc), ephemeral=True)
             balance_text = str(purchase.new_balance)
         try:
             ticket_channel = await shop_service.create_purchase_ticket(
@@ -78,11 +82,11 @@ class ShopPurchaseModal(discord.ui.Modal):
         except HighlightError as exc:
             if matched_item is not None and matched_item.coin_price is not None and coins_service is not None:
                 await coins_service.adjust_balance(interaction.guild, interaction.user.id, matched_item.coin_price)
-            return await interaction.response.send_message(str(exc), ephemeral=True)
+            return await interaction.followup.send(str(exc), ephemeral=True)
         except discord.HTTPException:
             if matched_item is not None and matched_item.coin_price is not None and coins_service is not None:
                 await coins_service.adjust_balance(interaction.guild, interaction.user.id, matched_item.coin_price)
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "I could not open a private shop ticket right now. Your coins were not kept.",
                 ephemeral=True,
             )
@@ -102,12 +106,12 @@ class ShopPurchaseModal(discord.ui.Modal):
                 },
             )
         if matched_item is not None and matched_item.coin_price is not None:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 f"Bought **{matched_item.title}** for **{matched_item.coin_price}** coins. "
                 f"Your private ticket is {ticket_channel.mention}. Remaining balance: **{balance_text}**.",
                 ephemeral=True,
             )
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"Your private ticket is {ticket_channel.mention}. Staff will continue there.",
             ephemeral=True,
         )
@@ -121,6 +125,8 @@ def build_order_view(
     label: str = "Buy here",
 ) -> discord.ui.View | None:
     return ShopOrderView(section=section, label=label)
+
+
 def _section_detail_prompt(section: ShopSection) -> dict[str, str]:
     prompts = {
         ShopSection.DEVELOPE: {
