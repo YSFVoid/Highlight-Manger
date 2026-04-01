@@ -12,6 +12,7 @@ from highlight_manager.utils.dates import utcnow
 class PlayerProfile(AppModel):
     guild_id: int
     user_id: int
+    server_joined_at: datetime | None = None
     current_points: int = 0
     lifetime_points: int = 0
     coins_balance: int = 0

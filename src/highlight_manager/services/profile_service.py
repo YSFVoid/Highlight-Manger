@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -12,7 +13,7 @@ from highlight_manager.models.guild_config import GuildConfig
 from highlight_manager.models.match import MatchRecord
 from highlight_manager.models.profile import PlayerProfile
 from highlight_manager.repositories.profile_repository import ProfileRepository
-from highlight_manager.services.rank_service import RankService
+from highlight_manager.services.rank_service import RankService, RankSyncResult
 from highlight_manager.utils.dates import utcnow
 from highlight_manager.utils.exceptions import UserFacingError
 
@@ -37,6 +38,8 @@ class IdentitySyncBatchResult:
 
 
 class ProfileService:
+    IDENTITY_SYNC_CONCURRENCY = 5
+
     def __init__(self, repository: ProfileRepository, rank_service: RankService) -> None:
         self.repository = repository
         self.rank_service = rank_service
@@ -306,13 +309,12 @@ class ProfileService:
                 continue
             await self.ensure_profile(member.guild, member.id, config, sync_identity=False)
         ranked_profiles = await self.recalculate_live_ranks(guild, config, sync_members=False)
-        for member in guild.members:
-            if member.bot:
-                continue
-            profile = ranked_profiles.get(member.id)
-            if profile is None:
-                continue
-            sync_result = await self.rank_service.sync_member_roles(member, profile, config)
+        sync_targets = [
+            (member, profile)
+            for member in guild.members
+            if not member.bot and (profile := ranked_profiles.get(member.id)) is not None
+        ]
+        for sync_result in await self._sync_member_batch(sync_targets, config):
             result.processed_members += 1
             if sync_result.role_updated:
                 result.role_updates += 1
@@ -349,12 +351,26 @@ class ProfileService:
             updated_profiles[profile.user_id] = profile
 
         if sync_members:
-            for profile in updated_profiles.values():
-                member = guild.get_member(profile.user_id)
-                if member is None:
-                    continue
-                await self.rank_service.sync_member_roles(member, profile, config)
+            sync_targets = [
+                (member, profile)
+                for profile in updated_profiles.values()
+                if (member := guild.get_member(profile.user_id)) is not None
+            ]
+            await self._sync_member_batch(sync_targets, config)
         return updated_profiles
+
+    async def _sync_member_batch(
+        self,
+        sync_targets: list[tuple[discord.Member, PlayerProfile]],
+        config: GuildConfig,
+    ) -> list[RankSyncResult]:
+        semaphore = asyncio.Semaphore(self.IDENTITY_SYNC_CONCURRENCY)
+
+        async def run_one(member: discord.Member, profile: PlayerProfile) -> RankSyncResult:
+            async with semaphore:
+                return await self.rank_service.sync_member_roles(member, profile, config)
+
+        return await asyncio.gather(*(run_one(member, profile) for member, profile in sync_targets))
 
     def _resolve_member_joined_at(self, guild: discord.Guild, user_id: int) -> datetime | None:
         member = guild.get_member(user_id)

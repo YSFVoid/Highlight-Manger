@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from highlight_manager.models.guild_config import GuildConfig
@@ -40,6 +42,21 @@ class FakeRankService:
         return RankSyncResult(skipped_reason="no change")
 
 
+class FakeConcurrentRankService(FakeRankService):
+    def __init__(self) -> None:
+        super().__init__()
+        self.current = 0
+        self.max_seen = 0
+
+    async def sync_member_roles(self, member, profile, config) -> RankSyncResult:
+        self.calls += 1
+        self.current += 1
+        self.max_seen = max(self.max_seen, self.current)
+        await asyncio.sleep(0.01)
+        self.current -= 1
+        return RankSyncResult()
+
+
 class FakeMember:
     def __init__(self, user_id: int, *, bot: bool = False) -> None:
         self.id = user_id
@@ -78,3 +95,19 @@ async def test_sync_all_member_identities_counts_results() -> None:
         nickname_failures=1,
         skipped_members=2,
     )
+
+
+@pytest.mark.asyncio
+async def test_sync_all_member_identities_uses_bounded_concurrency() -> None:
+    repository = FakeProfileRepository()
+    rank_service = FakeConcurrentRankService()
+    service = ProfileService(repository, rank_service)  # type: ignore[arg-type]
+    guild = FakeGuild([FakeMember(10), FakeMember(20), FakeMember(30), FakeMember(40), FakeMember(50)])
+    for member in guild.members:
+        member.guild = guild
+
+    result = await service.sync_all_member_identities(guild, GuildConfig(guild_id=1))  # type: ignore[arg-type]
+
+    assert result.processed_members == 5
+    assert rank_service.calls == 5
+    assert rank_service.max_seen > 1

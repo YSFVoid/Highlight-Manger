@@ -13,6 +13,7 @@ class ProfileRepository(BaseRepository[PlayerProfile]):
         await self.collection.create_index([("guild_id", 1), ("user_id", 1)], unique=True)
         await self.collection.create_index([("guild_id", 1), ("current_points", -1)])
         await self.collection.create_index([("guild_id", 1), ("blacklisted", 1)])
+        await self.collection.create_index([("guild_id", 1), ("rank0", 1), ("current_rank", 1)])
 
     async def get(self, guild_id: int, user_id: int) -> PlayerProfile | None:
         return self._to_model(await self.collection.find_one({"guild_id": guild_id, "user_id": user_id}))
@@ -34,13 +35,17 @@ class ProfileRepository(BaseRepository[PlayerProfile]):
         )
         return self._to_model(updated)
 
+    async def list_for_guild(self, guild_id: int) -> list[PlayerProfile]:
+        cursor = self.collection.find({"guild_id": guild_id})
+        return self._to_models(await cursor.to_list(length=None))
+
     async def list_leaderboard(self, guild_id: int, limit: int = 10) -> list[PlayerProfile]:
-        cursor = self.collection.find({"guild_id": guild_id}).sort("current_points", -1).limit(limit)
+        cursor = self.collection.find({"guild_id": guild_id, "rank0": False}).sort("current_rank", 1).limit(limit)
         return self._to_models(await cursor.to_list(length=limit))
 
     async def reset_for_new_season(self, guild_id: int, updated_at: datetime) -> None:
         await self.collection.update_many(
-            {"guild_id": guild_id, "rank0": False},
+            {"guild_id": guild_id},
             {
                 "$set": {
                     "current_points": 0,
