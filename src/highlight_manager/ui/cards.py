@@ -8,19 +8,24 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 
+ASSET_FONT_DIR = Path(__file__).resolve().parent / "assets" / "fonts"
 FONT_REGULAR_CANDIDATES = (
+    str(ASSET_FONT_DIR / "Rajdhani-Regular.ttf"),
     "C:/Windows/Fonts/segoeui.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
     "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
 )
 FONT_BOLD_CANDIDATES = (
+    str(ASSET_FONT_DIR / "Rajdhani-Bold.ttf"),
     "C:/Windows/Fonts/segoeuib.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
     "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
 )
 FONT_TITLE_CANDIDATES = (
+    str(ASSET_FONT_DIR / "Rajdhani-SemiBold.ttf"),
+    str(ASSET_FONT_DIR / "Rajdhani-Bold.ttf"),
     "C:/Windows/Fonts/bahnschrift.ttf",
     "C:/Windows/Fonts/segoeuib.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",

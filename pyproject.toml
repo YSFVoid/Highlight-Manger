@@ -45,3 +45,6 @@ target-version = "py311"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+highlight_manager = ["ui/assets/fonts/*.ttf"]
