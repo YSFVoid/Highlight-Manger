@@ -8,10 +8,25 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 
-FONT_DIR = Path("C:/Windows/Fonts")
-FONT_REGULAR = FONT_DIR / "segoeui.ttf"
-FONT_BOLD = FONT_DIR / "segoeuib.ttf"
-FONT_TITLE = FONT_DIR / "bahnschrift.ttf"
+FONT_REGULAR_CANDIDATES = (
+    "C:/Windows/Fonts/segoeui.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+)
+FONT_BOLD_CANDIDATES = (
+    "C:/Windows/Fonts/segoeuib.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+)
+FONT_TITLE_CANDIDATES = (
+    "C:/Windows/Fonts/bahnschrift.ttf",
+    "C:/Windows/Fonts/segoeuib.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+)
 
 BG = (9, 10, 14, 255)
 PANEL = (24, 26, 34, 235)
@@ -60,9 +75,20 @@ def _buffer_from_image(image: Image.Image) -> BytesIO:
     return buffer
 
 
+@lru_cache(maxsize=8)
+def _resolve_font_path(candidates: tuple[str, ...]) -> str | None:
+    for candidate in candidates:
+        if Path(candidate).exists():
+            return candidate
+    return None
+
+
 @lru_cache(maxsize=32)
-def _font(path: str, size: int) -> ImageFont.FreeTypeFont:
-    return ImageFont.truetype(path, size=size)
+def _font(candidates: tuple[str, ...], size: int) -> ImageFont.ImageFont | ImageFont.FreeTypeFont:
+    font_path = _resolve_font_path(candidates)
+    if font_path is None:
+        return ImageFont.load_default()
+    return ImageFont.truetype(font_path, size=size)
 
 
 def _base_canvas(width: int, height: int) -> Image.Image:
@@ -106,7 +132,7 @@ def _avatar_circle(size: int, avatar_bytes: bytes | None, fallback_text: str) ->
         avatar_draw.text(
             (size // 2, size // 2),
             initials,
-            font=_font(str(FONT_BOLD), max(28, size // 3)),
+            font=_font(FONT_BOLD_CANDIDATES, max(28, size // 3)),
             fill=TEXT,
             anchor="mm",
         )
@@ -125,9 +151,9 @@ def render_help_banner(prefix: str) -> BytesIO:
     image = _base_canvas(1280, 360)
     _rounded_panel(image, (42, 36, 1238, 324), fill=(22, 24, 32, 220), radius=36)
     draw = ImageDraw.Draw(image)
-    draw.text((86, 92), "HIGHLIGHT MANGER", font=_font(str(FONT_TITLE), 54), fill=TEXT)
-    draw.text((88, 152), "Competitive Discord match management", font=_font(str(FONT_REGULAR), 24), fill=MUTED)
-    draw.text((88, 192), f"Prefix: {prefix}", font=_font(str(FONT_BOLD), 24), fill=PRIMARY)
+    draw.text((86, 92), "HIGHLIGHT MANGER", font=_font(FONT_TITLE_CANDIDATES, 54), fill=TEXT)
+    draw.text((88, 152), "Competitive Discord match management", font=_font(FONT_REGULAR_CANDIDATES, 24), fill=MUTED)
+    draw.text((88, 192), f"Prefix: {prefix}", font=_font(FONT_BOLD_CANDIDATES, 24), fill=PRIMARY)
     pills = [
         f"{prefix}play 4v4 esport",
         f"{prefix}profile",
@@ -139,10 +165,10 @@ def render_help_banner(prefix: str) -> BytesIO:
     for pill in pills:
         width = 250 if len(pill) < 14 else 300
         draw.rounded_rectangle((x, y, x + width, y + 48), radius=22, fill=(35, 39, 52, 240), outline=(255, 255, 255, 18), width=2)
-        draw.text((x + 20, y + 24), pill, font=_font(str(FONT_BOLD), 22), fill=TEXT, anchor="lm")
+        draw.text((x + 20, y + 24), pill, font=_font(FONT_BOLD_CANDIDATES, 22), fill=TEXT, anchor="lm")
         y += 58
     _divider(draw, 86, 248, 650)
-    draw.text((88, 270), "Fast queues. Clean rank cards. Premium competitive flow.", font=_font(str(FONT_REGULAR), 22), fill=MUTED)
+    draw.text((88, 270), "Fast queues. Clean rank cards. Premium competitive flow.", font=_font(FONT_REGULAR_CANDIDATES, 22), fill=MUTED)
     return _buffer_from_image(image)
 
 
@@ -152,9 +178,9 @@ def render_profile_card(data: ProfileCardData) -> BytesIO:
     draw = ImageDraw.Draw(image)
     avatar = _avatar_circle(152, data.avatar_bytes, data.display_name)
     image.alpha_composite(avatar, (84, 92))
-    draw.text((94, 282), data.display_name, font=_font(str(FONT_BOLD), 46), fill=TEXT)
-    draw.text((96, 338), data.rank_text, font=_font(str(FONT_REGULAR), 24), fill=MUTED)
-    draw.text((894, 110), data.season_name.upper(), font=_font(str(FONT_BOLD), 24), fill=ACCENT)
+    draw.text((94, 282), data.display_name, font=_font(FONT_BOLD_CANDIDATES, 46), fill=TEXT)
+    draw.text((96, 338), data.rank_text, font=_font(FONT_REGULAR_CANDIDATES, 24), fill=MUTED)
+    draw.text((894, 110), data.season_name.upper(), font=_font(FONT_BOLD_CANDIDATES, 24), fill=ACCENT)
     _divider(draw, 94, 388, 1100)
 
     stats = [
@@ -181,8 +207,8 @@ def render_profile_card(data: ProfileCardData) -> BytesIO:
         x2 = x1 + box_w
         y2 = y1 + box_h
         draw.rounded_rectangle((x1, y1, x2, y2), radius=24, fill=PANEL_ALT, outline=(255, 255, 255, 14), width=2)
-        draw.text((x1 + 22, y1 + 26), label, font=_font(str(FONT_REGULAR), 18), fill=MUTED)
-        draw.text((x1 + 22, y1 + 70), value, font=_font(str(FONT_BOLD), 34), fill=TEXT)
+        draw.text((x1 + 22, y1 + 26), label, font=_font(FONT_REGULAR_CANDIDATES, 18), fill=MUTED)
+        draw.text((x1 + 22, y1 + 70), value, font=_font(FONT_BOLD_CANDIDATES, 34), fill=TEXT)
     return _buffer_from_image(image)
 
 
@@ -192,14 +218,14 @@ def render_leaderboard_card(season_name: str, total_players: int, entries: list[
     image = _base_canvas(width, height)
     _rounded_panel(image, (36, 32, width - 36, height - 36), radius=40)
     draw = ImageDraw.Draw(image)
-    draw.text((640, 74), "PLAYER LEADERBOARD", font=_font(str(FONT_TITLE), 46), fill=TEXT, anchor="mm")
-    draw.text((640, 120), f"{season_name} | Top {len(entries)} / {total_players} players", font=_font(str(FONT_REGULAR), 22), fill=MUTED, anchor="mm")
+    draw.text((640, 74), "PLAYER LEADERBOARD", font=_font(FONT_TITLE_CANDIDATES, 46), fill=TEXT, anchor="mm")
+    draw.text((640, 120), f"{season_name} | Top {len(entries)} / {total_players} players", font=_font(FONT_REGULAR_CANDIDATES, 22), fill=MUTED, anchor="mm")
     _divider(draw, 88, 152, width - 88)
-    draw.text((92, 168), "RANK", font=_font(str(FONT_REGULAR), 18), fill=MUTED)
-    draw.text((214, 168), "PLAYER", font=_font(str(FONT_REGULAR), 18), fill=MUTED)
-    draw.text((735, 168), "W/L", font=_font(str(FONT_REGULAR), 18), fill=MUTED)
-    draw.text((865, 168), "WINRATE", font=_font(str(FONT_REGULAR), 18), fill=MUTED)
-    draw.text((1048, 168), "POINTS", font=_font(str(FONT_REGULAR), 18), fill=MUTED)
+    draw.text((92, 168), "RANK", font=_font(FONT_REGULAR_CANDIDATES, 18), fill=MUTED)
+    draw.text((214, 168), "PLAYER", font=_font(FONT_REGULAR_CANDIDATES, 18), fill=MUTED)
+    draw.text((735, 168), "W/L", font=_font(FONT_REGULAR_CANDIDATES, 18), fill=MUTED)
+    draw.text((865, 168), "WINRATE", font=_font(FONT_REGULAR_CANDIDATES, 18), fill=MUTED)
+    draw.text((1048, 168), "POINTS", font=_font(FONT_REGULAR_CANDIDATES, 18), fill=MUTED)
 
     start_y = 198
     for index, entry in enumerate(entries):
@@ -213,14 +239,14 @@ def render_leaderboard_card(season_name: str, total_players: int, entries: list[
             badge_color = SILVER
         elif entry.rank == 3:
             badge_color = BRONZE
-        draw.text((120, y + 29), f"#{entry.rank}", font=_font(str(FONT_BOLD), 26), fill=badge_color, anchor="mm")
+        draw.text((120, y + 29), f"#{entry.rank}", font=_font(FONT_BOLD_CANDIDATES, 26), fill=badge_color, anchor="mm")
         avatar = _avatar_circle(42, entry.avatar_bytes, entry.display_name)
         image.alpha_composite(avatar, (166, y + 8))
-        draw.text((228, y + 28), entry.display_name, font=_font(str(FONT_BOLD), 24), fill=TEXT)
-        draw.text((738, y + 28), f"{entry.wins}/{entry.losses}", font=_font(str(FONT_BOLD), 22), fill=TEXT)
-        draw.text((872, y + 28), entry.winrate_text, font=_font(str(FONT_BOLD), 22), fill=PRIMARY)
+        draw.text((228, y + 28), entry.display_name, font=_font(FONT_BOLD_CANDIDATES, 24), fill=TEXT)
+        draw.text((738, y + 28), f"{entry.wins}/{entry.losses}", font=_font(FONT_BOLD_CANDIDATES, 22), fill=TEXT)
+        draw.text((872, y + 28), entry.winrate_text, font=_font(FONT_BOLD_CANDIDATES, 22), fill=PRIMARY)
         pill_left = width - 246
         draw.rounded_rectangle((pill_left, y + 10, width - 100, y + 48), radius=18, fill=(105, 74, 160, 255))
-        draw.text((pill_left + 72, y + 29), f"{entry.points:,}", font=_font(str(FONT_BOLD), 24), fill=TEXT, anchor="mm")
-    draw.text((width // 2, height - 60), "Highlight Manger competitive standings", font=_font(str(FONT_REGULAR), 18), fill=MUTED, anchor="mm")
+        draw.text((pill_left + 72, y + 29), f"{entry.points:,}", font=_font(FONT_BOLD_CANDIDATES, 24), fill=TEXT, anchor="mm")
+    draw.text((width // 2, height - 60), "Highlight Manger competitive standings", font=_font(FONT_REGULAR_CANDIDATES, 18), fill=MUTED, anchor="mm")
     return _buffer_from_image(image)

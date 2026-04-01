@@ -100,12 +100,16 @@ async def dynamic_prefix(bot: "HighlightBot", message: discord.Message) -> list[
     cached_prefix = bot.prefix_cache.get(str(message.guild.id))
     if isinstance(cached_prefix, str):
         return [cached_prefix]
-    async with bot.runtime.session() as repos:
-        bundle = await bot.runtime.services.guilds.get_bundle(repos.guilds, message.guild.id)
-        if bundle is None:
-            return [bot.settings.default_prefix]
-        bot.prefix_cache.set(str(message.guild.id), bundle.settings.prefix)
-        return [bundle.settings.prefix]
+    try:
+        async with bot.runtime.session() as repos:
+            bundle = await bot.runtime.services.guilds.get_bundle(repos.guilds, message.guild.id)
+            if bundle is None:
+                return [bot.settings.default_prefix]
+            bot.prefix_cache.set(str(message.guild.id), bundle.settings.prefix)
+            return [bundle.settings.prefix]
+    except Exception as exc:
+        bot.logger.warning("prefix_lookup_failed", guild_id=message.guild.id, error=str(exc))
+        return [bot.settings.default_prefix]
 
 
 class RoomInfoModal(discord.ui.Modal, title="Submit Match Room"):
@@ -243,7 +247,10 @@ class PlayerCommands(commands.Cog):
         if ctx.guild is None:
             return
         embed, file = self.bot.build_help_response(ctx.clean_prefix)
-        await ctx.reply(embed=embed, file=file)
+        if file is None:
+            await ctx.reply(embed=embed)
+        else:
+            await ctx.reply(embed=embed, file=file)
 
     @commands.command(name="latestupdate", aliases=["latest", "patchnotes", "updates"])
     async def latest_update(self, ctx: commands.Context) -> None:
@@ -271,7 +278,10 @@ class PlayerCommands(commands.Cog):
             return
         assert isinstance(ctx.author, discord.Member)
         embed, file = await self.bot.build_profile_command_response(ctx.guild, ctx.author)
-        await ctx.reply(embed=embed, file=file)
+        if file is None:
+            await ctx.reply(embed=embed)
+        else:
+            await ctx.reply(embed=embed, file=file)
 
     @commands.command(name="rank")
     async def rank(self, ctx: commands.Context) -> None:
@@ -282,7 +292,10 @@ class PlayerCommands(commands.Cog):
         if ctx.guild is None:
             return
         embed, file = await self.bot.build_leaderboard_command_response(ctx.guild)
-        await ctx.reply(embed=embed, file=file)
+        if file is None:
+            await ctx.reply(embed=embed)
+        else:
+            await ctx.reply(embed=embed, file=file)
 
     @commands.command(name="coins")
     async def coins(self, ctx: commands.Context) -> None:
@@ -333,6 +346,7 @@ class HighlightBot(commands.Bot):
         self.prefix_cache = SimpleTTLCache(maxsize=256, ttl=300)
         self.avatar_cache = SimpleTTLCache(maxsize=1024, ttl=1800)
         self.help_banner_cache = SimpleTTLCache(maxsize=32, ttl=3600)
+        self._guild_commands_synced = False
 
     def build_notice_embed(self, title: str, description: str, *, error: bool = False) -> discord.Embed:
         return build_notice_embed(title, description, error=error)
@@ -381,15 +395,19 @@ class HighlightBot(commands.Bot):
         embed.set_footer(text=f"Prefix in this server: {prefix}")
         return embed
 
-    def build_help_response(self, prefix: str) -> tuple[discord.Embed, discord.File]:
+    def build_help_response(self, prefix: str) -> tuple[discord.Embed, discord.File | None]:
         embed = self.build_help_embed(prefix)
-        cached_banner = self.help_banner_cache.get(prefix)
-        banner_bytes = cached_banner if isinstance(cached_banner, bytes) else render_help_banner(prefix).getvalue()
-        if cached_banner is None:
-            self.help_banner_cache.set(prefix, banner_bytes)
-        file = discord.File(BytesIO(banner_bytes), filename="help-banner.png")
-        embed.set_image(url="attachment://help-banner.png")
-        return embed, file
+        try:
+            cached_banner = self.help_banner_cache.get(prefix)
+            banner_bytes = cached_banner if isinstance(cached_banner, bytes) else render_help_banner(prefix).getvalue()
+            if cached_banner is None:
+                self.help_banner_cache.set(prefix, banner_bytes)
+            file = discord.File(BytesIO(banner_bytes), filename="help-banner.png")
+            embed.set_image(url="attachment://help-banner.png")
+            return embed, file
+        except Exception as exc:
+            self.logger.warning("help_banner_render_failed", error=str(exc))
+            return embed, None
 
     def build_latest_update_embed(self, prefix: str) -> discord.Embed:
         embed = discord.Embed(
@@ -493,9 +511,11 @@ class HighlightBot(commands.Bot):
         if self.settings.discord_guild_id:
             guild_object = discord.Object(id=self.settings.discord_guild_id)
             self.tree.copy_global_to(guild=guild_object)
-            await self.tree.sync(guild=guild_object)
+            synced = await self.tree.sync(guild=guild_object)
+            self.logger.info("app_commands_synced", scope="guild", guild_id=self.settings.discord_guild_id, count=len(synced))
         else:
-            await self.tree.sync()
+            synced = await self.tree.sync()
+            self.logger.info("app_commands_synced", scope="global", count=len(synced))
         await self.recovery.restore_views(self)
         self.deadline_loop.change_interval(seconds=self.settings.recovery_interval_seconds)
         self.cleanup_loop.change_interval(seconds=self.settings.cleanup_interval_seconds)
@@ -505,6 +525,16 @@ class HighlightBot(commands.Bot):
         self.voice_anchor_loop.start()
 
     async def on_ready(self) -> None:
+        if not self.settings.discord_guild_id and not self._guild_commands_synced and self.guilds:
+            synced_guilds = 0
+            for guild in self.guilds:
+                guild_object = discord.Object(id=guild.id)
+                self.tree.copy_global_to(guild=guild_object)
+                synced = await self.tree.sync(guild=guild_object)
+                self.logger.info("app_commands_synced", scope="guild", guild_id=guild.id, count=len(synced))
+                synced_guilds += 1
+            self._guild_commands_synced = True
+            self.logger.info("connected_guild_commands_synced", guilds=synced_guilds)
         await self.recovery.restore_persistent_voice(self)
         self.logger.info("bot_ready", user=str(self.user), guilds=len(self.guilds))
 
@@ -653,7 +683,7 @@ class HighlightBot(commands.Bot):
             self.avatar_cache.set(cache_key, b"")
             return None
 
-    async def build_profile_command_response(self, guild: discord.Guild, member: discord.Member) -> tuple[discord.Embed, discord.File]:
+    async def build_profile_command_response(self, guild: discord.Guild, member: discord.Member) -> tuple[discord.Embed, discord.File | None]:
         async with self.runtime.session() as repos:
             bundle = await self.runtime.services.guilds.ensure_guild(repos.guilds, guild.id, guild.name)
             season = await self.runtime.services.seasons.ensure_active(repos.seasons, bundle.guild.id, bundle.settings)
@@ -688,26 +718,30 @@ class HighlightBot(commands.Bot):
             avatar_url=None,
         )
         avatar_bytes = await self.fetch_avatar_bytes(member, size=256)
-        card = render_profile_card(
-            ProfileCardData(
-                display_name=member.display_name,
-                season_name=season.name,
-                points=season_player.rating,
-                wins=season_player.wins,
-                losses=season_player.losses,
-                matches=matches_played,
-                winrate_text=f"{winrate:.1f}%" if not winrate.is_integer() else f"{int(winrate)}%",
-                rank_text=f"Rank #{leaderboard_rank}" if leaderboard_rank is not None else "Unranked",
-                coins=wallet.balance,
-                peak=season_player.peak_rating,
-                avatar_bytes=avatar_bytes,
+        try:
+            card = render_profile_card(
+                ProfileCardData(
+                    display_name=member.display_name,
+                    season_name=season.name,
+                    points=season_player.rating,
+                    wins=season_player.wins,
+                    losses=season_player.losses,
+                    matches=matches_played,
+                    winrate_text=f"{winrate:.1f}%" if not winrate.is_integer() else f"{int(winrate)}%",
+                    rank_text=f"Rank #{leaderboard_rank}" if leaderboard_rank is not None else "Unranked",
+                    coins=wallet.balance,
+                    peak=season_player.peak_rating,
+                    avatar_bytes=avatar_bytes,
+                )
             )
-        )
-        file = discord.File(card, filename="profile-card.png")
-        embed.set_image(url="attachment://profile-card.png")
-        return embed, file
+            file = discord.File(card, filename="profile-card.png")
+            embed.set_image(url="attachment://profile-card.png")
+            return embed, file
+        except Exception as exc:
+            self.logger.warning("profile_card_render_failed", guild_id=guild.id, member_id=member.id, error=str(exc))
+            return embed, None
 
-    async def build_leaderboard_command_response(self, guild: discord.Guild) -> tuple[discord.Embed, discord.File]:
+    async def build_leaderboard_command_response(self, guild: discord.Guild) -> tuple[discord.Embed, discord.File | None]:
         async with self.runtime.session() as repos:
             bundle = await self.runtime.services.guilds.ensure_guild(repos.guilds, guild.id, guild.name)
             season = await self.runtime.services.seasons.ensure_active(repos.seasons, bundle.guild.id, bundle.settings)
@@ -740,12 +774,16 @@ class HighlightBot(commands.Bot):
                     avatar_bytes=avatar_bytes[index - 1],
                 )
             )
-        file = discord.File(
-            render_leaderboard_card(season.name, len(rows), entries),
-            filename="leaderboard-card.png",
-        )
-        embed.set_image(url="attachment://leaderboard-card.png")
-        return embed, file
+        try:
+            file = discord.File(
+                render_leaderboard_card(season.name, len(rows), entries),
+                filename="leaderboard-card.png",
+            )
+            embed.set_image(url="attachment://leaderboard-card.png")
+            return embed, file
+        except Exception as exc:
+            self.logger.warning("leaderboard_card_render_failed", guild_id=guild.id, error=str(exc))
+            return embed, None
 
     async def build_coins_embed(self, guild: discord.Guild, member: discord.Member) -> discord.Embed:
         async with self.runtime.session() as repos:
