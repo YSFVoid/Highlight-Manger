@@ -1,0 +1,432 @@
+from __future__ import annotations
+
+from collections.abc import Sequence
+
+import discord
+
+from highlight_manager.models.enums import MatchStatus
+from highlight_manager.models.guild_config import GuildConfig
+from highlight_manager.models.match import MatchRecord
+from highlight_manager.models.profile import PlayerProfile
+from highlight_manager.models.vote import MatchVote
+from highlight_manager.utils.dates import format_dt, format_relative
+from highlight_manager.services.rank_service import RankService
+
+
+_RANK_NAME_SANITIZER = RankService()
+LATEST_UPDATE_KEY = "live-rank-overhaul"
+UPDATE_ANNOUNCEMENT_KEYS: tuple[tuple[str, str], ...] = (
+    ("live-rank-overhaul", "Live Rank Overhaul"),
+    ("rank-match-stability", "Rank + Match Stability"),
+    ("systems-expansion", "Shop + Coins + Tournament"),
+)
+
+
+def _member_label(guild: discord.Guild | None, user_id: int) -> str:
+    if guild is None:
+        return f"<@{user_id}>"
+    member = guild.get_member(user_id)
+    return member.mention if member else f"<@{user_id}>"
+
+
+def _member_display_name(guild: discord.Guild | None, user_id: int) -> str:
+    if guild is None:
+        return f"User {user_id}"
+    member = guild.get_member(user_id)
+    if member is None:
+        return f"User {user_id}"
+    raw_name = member.nick or member.global_name or member.name
+    return _RANK_NAME_SANITIZER.strip_rank_prefix(raw_name)
+
+
+def _rank_label(profile: PlayerProfile) -> str:
+    if profile.rank0:
+        return "RANK 0 | Override"
+    return f"RANK {profile.current_rank}"
+
+
+def _format_team(guild: discord.Guild | None, user_ids: Sequence[int], team_size: int) -> str:
+    lines = [_member_label(guild, user_id) for user_id in user_ids]
+    for _ in range(len(user_ids), team_size):
+        lines.append("`[open slot]`")
+    return "\n".join(lines) if lines else "`[open slot]`"
+
+
+def build_match_embed(match: MatchRecord, guild: discord.Guild | None) -> discord.Embed:
+    embed = discord.Embed(
+        title=f"Match #{match.display_id} | {match.match_type.label}",
+        colour=discord.Colour.blurple(),
+    )
+    embed.add_field(name="Mode", value=match.mode.value, inline=True)
+    embed.add_field(name="Status", value=match.status.value, inline=True)
+    embed.add_field(name="Creator", value=_member_label(guild, match.creator_id), inline=True)
+    embed.add_field(name="Created", value=format_dt(match.created_at), inline=True)
+    embed.add_field(
+        name="Queue Expires",
+        value=format_relative(match.queue_expires_at) if match.queue_expires_at else "Not scheduled",
+        inline=True,
+    )
+    embed.add_field(
+        name="Vote Deadline",
+        value=format_relative(match.vote_expires_at) if match.vote_expires_at else "Not started",
+        inline=True,
+    )
+    embed.add_field(
+        name=f"Team 1 ({len(match.team1_player_ids)}/{match.team_size})",
+        value=_format_team(guild, match.team1_player_ids, match.team_size),
+        inline=True,
+    )
+    embed.add_field(
+        name=f"Team 2 ({len(match.team2_player_ids)}/{match.team_size})",
+        value=_format_team(guild, match.team2_player_ids, match.team_size),
+        inline=True,
+    )
+    return embed
+
+
+def build_vote_status_embed(
+    match: MatchRecord,
+    guild: discord.Guild | None,
+    votes: Sequence[MatchVote],
+) -> discord.Embed:
+    embed = discord.Embed(
+        title=f"Voting Status | Match #{match.display_id}",
+        colour=discord.Colour.orange(),
+    )
+    players = set(match.all_player_ids)
+    submitted = {vote.user_id for vote in votes}
+    embed.description = (
+        f"Submitted: **{len(votes)}/{len(players)}**\n"
+        f"Deadline: {format_relative(match.vote_expires_at)}"
+    )
+    pending = [_member_label(guild, user_id) for user_id in players - submitted]
+    embed.add_field(
+        name="Pending Players",
+        value="\n".join(pending) if pending else "All votes submitted",
+        inline=False,
+    )
+    if votes:
+        lines = []
+        for vote in votes:
+            winner = "Team 1" if vote.winner_team == 1 else "Team 2"
+            line = f"{_member_label(guild, vote.user_id)} -> {winner}"
+            if vote.winner_mvp_id:
+                line += f" | Winner MVP: {_member_label(guild, vote.winner_mvp_id)}"
+            if vote.loser_mvp_id:
+                line += f" | Loser MVP: {_member_label(guild, vote.loser_mvp_id)}"
+            lines.append(line)
+        embed.add_field(name="Votes", value="\n".join(lines), inline=False)
+    return embed
+
+
+def build_profile_embed(
+    guild: discord.Guild | None,
+    profile: PlayerProfile,
+    season_name: str | None = None,
+) -> discord.Embed:
+    embed = discord.Embed(
+        title=f"Profile | {_member_label(guild, profile.user_id)}",
+        colour=discord.Colour.green(),
+    )
+    embed.add_field(name="Current Points", value=str(profile.current_points), inline=True)
+    embed.add_field(name="Lifetime Points", value=str(profile.lifetime_points), inline=True)
+    embed.add_field(name="Live Rank", value=_rank_label(profile), inline=True)
+    embed.add_field(name="Coins", value=str(profile.coins_balance), inline=True)
+    embed.add_field(name="Coins Earned", value=str(profile.lifetime_coins_earned), inline=True)
+    embed.add_field(name="Coins Spent", value=str(profile.lifetime_coins_spent), inline=True)
+    embed.add_field(
+        name="Season",
+        value=season_name or "Active season",
+        inline=False,
+    )
+    embed.add_field(
+        name="Season Stats",
+        value=(
+            f"Matches: {profile.season_stats.matches_played}\n"
+            f"Wins: {profile.season_stats.wins}\n"
+            f"Losses: {profile.season_stats.losses}\n"
+            f"MVP Wins: {profile.season_stats.mvp_wins}\n"
+            f"MVP Losses: {profile.season_stats.mvp_losses}"
+        ),
+        inline=True,
+    )
+    embed.add_field(
+        name="Lifetime Stats",
+        value=(
+            f"Matches: {profile.lifetime_stats.matches_played}\n"
+            f"Wins: {profile.lifetime_stats.wins}\n"
+            f"Losses: {profile.lifetime_stats.losses}\n"
+            f"MVP Wins: {profile.lifetime_stats.mvp_wins}\n"
+            f"MVP Losses: {profile.lifetime_stats.mvp_losses}"
+        ),
+        inline=True,
+    )
+    return embed
+
+
+def build_leaderboard_embed(
+    guild: discord.Guild | None,
+    profiles: Sequence[PlayerProfile],
+    title: str = "Leaderboard",
+) -> discord.Embed:
+    embed = discord.Embed(title=title, colour=discord.Colour.gold())
+    if not profiles:
+        embed.description = "No profiles found yet."
+        return embed
+    lines = []
+    for profile in profiles:
+        lines.append(
+            f"**{profile.current_rank}.** {_member_display_name(guild, profile.user_id)} | "
+            f"{profile.current_points} pts | {_rank_label(profile)}"
+        )
+    embed.description = "\n".join(lines)
+    return embed
+
+
+def build_config_embed(config: GuildConfig, guild: discord.Guild | None) -> discord.Embed:
+    embed = discord.Embed(title="Guild Configuration", colour=discord.Colour.blue())
+    embed.add_field(name="Prefix", value=config.prefix, inline=True)
+    embed.add_field(name="Apostado Play", value=_channel_label(guild, config.apostado_channel_id), inline=True)
+    embed.add_field(name="Highlight Play", value=_channel_label(guild, config.highlight_channel_id), inline=True)
+    embed.add_field(name="Waiting Voice", value=_channel_label(guild, config.waiting_voice_channel_id), inline=True)
+    embed.add_field(
+        name="Temp Voice Category",
+        value=_channel_label(guild, config.temp_voice_category_id),
+        inline=True,
+    )
+    embed.add_field(
+        name="Results Parent",
+        value=_channel_label(guild, config.result_category_id),
+        inline=True,
+    )
+    embed.add_field(name="Log Channel", value=_channel_label(guild, config.log_channel_id), inline=True)
+    embed.add_field(
+        name="Admins / Staff",
+        value=(
+            f"Admins: {_roles_label(guild, config.admin_role_ids)}\n"
+            f"Staff: {_roles_label(guild, config.staff_role_ids)}"
+        ),
+        inline=False,
+    )
+    rank0_role = config.rank_role_map.get("0")
+    legacy_role_ids = [role_id for key, role_id in config.rank_role_map.items() if key != "0"]
+    embed.add_field(
+        name="Live Rank System",
+        value=(
+            "Rank is live leaderboard placement, not a Discord role.\n"
+            "Tie-breaks: points, wins, winner MVP count, older join date, user ID."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Rank 0 Override",
+        value=f"<@&{rank0_role}>" if rank0_role else "Not configured",
+        inline=True,
+    )
+    embed.add_field(
+        name="Legacy Rank Roles",
+        value=f"{len(legacy_role_ids)} configured but ignored" if legacy_role_ids else "None",
+        inline=True,
+    )
+    embed.add_field(
+        name="Result Behavior",
+        value=f"{config.result_channel_behavior.value} after {config.result_channel_delete_delay_seconds}s",
+        inline=False,
+    )
+    bootstrap_summary = config.bootstrap_last_summary
+    if bootstrap_summary:
+        rank_lines = [
+            f"Seed Tier {rank}: {count}"
+            for rank, count in sorted(bootstrap_summary.rank_counts.items(), key=lambda item: int(item[0]))
+        ]
+        embed.add_field(
+            name="Bootstrap",
+            value=(
+                f"Completed: {'Yes' if config.bootstrap_completed else 'No'}\n"
+                f"Processed: {bootstrap_summary.processed_members}\n"
+                f"Renamed: {bootstrap_summary.rename_successes}\n"
+                f"Rename Failures: {bootstrap_summary.rename_failures}\n"
+                f"Seed Tiers: {', '.join(rank_lines) if rank_lines else 'N/A'}"
+            ),
+            inline=False,
+        )
+    else:
+        embed.add_field(name="Bootstrap", value=f"Completed: {'Yes' if config.bootstrap_completed else 'No'}", inline=False)
+    return embed
+
+
+def build_result_summary_embed(match: MatchRecord, guild: discord.Guild | None) -> discord.Embed:
+    summary = match.result_summary
+    embed = discord.Embed(
+        title=f"Match #{match.display_id} Final Summary",
+        colour=discord.Colour.green() if match.status == MatchStatus.FINALIZED else discord.Colour.red(),
+    )
+    embed.add_field(name="Mode", value=match.mode.value, inline=True)
+    embed.add_field(name="Type", value=match.match_type.label, inline=True)
+    embed.add_field(name="Status", value=match.status.value, inline=True)
+    if summary is None:
+        embed.description = "No result summary available."
+        return embed
+    winner = "Timeout / Failed Report" if summary.winner_team is None else f"Team {summary.winner_team}"
+    embed.add_field(name="Winner", value=winner, inline=True)
+    embed.add_field(
+        name="Winner MVP",
+        value=_member_label(guild, summary.winner_mvp_id) if summary.winner_mvp_id else "N/A",
+        inline=True,
+    )
+    embed.add_field(
+        name="Loser MVP",
+        value=_member_label(guild, summary.loser_mvp_id) if summary.loser_mvp_id else "N/A",
+        inline=True,
+    )
+    lines = []
+    for delta in summary.point_deltas:
+        prefix = "+" if delta.delta >= 0 else ""
+        lines.append(
+            f"{_member_label(guild, delta.user_id)} | "
+            f"{delta.previous_points} -> {delta.new_points} ({prefix}{delta.delta})"
+        )
+    embed.add_field(name="Point Changes", value="\n".join(lines) if lines else "None", inline=False)
+    if summary.notes:
+        embed.add_field(name="Notes", value=summary.notes, inline=False)
+    return embed
+
+
+def build_latest_update_embed(update_key: str = LATEST_UPDATE_KEY) -> discord.Embed:
+    if update_key == "live-rank-overhaul":
+        embed = discord.Embed(
+            title="Latest Update | Live Rank Overhaul",
+            description="The rank system now uses live leaderboard placement and the new nickname format.",
+            colour=discord.Colour.from_rgb(68, 71, 76),
+        )
+        embed.add_field(
+            name="Live Placement",
+            value=(
+                "- Rank is now your real leaderboard position\n"
+                "- Tie-breaks use points, wins, winner MVP count, older join date, then user ID\n"
+                "- Rank 0 remains a manual override"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Nickname Format",
+            value=(
+                "- Nicknames now sync as `RANK X | USERNAME`\n"
+                "- Old prefixes like `RANK 621|HIGH ...` are cleaned automatically\n"
+                "- Startup now runs a full rank cleanup pass"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Staff Action",
+            value=(
+                "- Run `/rank sync-all` any time you want to force a full resync\n"
+                "- Use `/points ...` to affect placement\n"
+                "- Use `/rank0 grant` or `/rank0 revoke` for manual override"
+            ),
+            inline=False,
+        )
+        embed.set_footer(text="Highlight Manager update | live rank overhaul")
+        return embed
+
+    if update_key == "systems-expansion":
+        embed = discord.Embed(
+            title="Latest Update | Shop + Coins + Tournament",
+            description="A major expansion is now live with three new systems built into the bot.",
+            colour=discord.Colour.from_rgb(68, 71, 76),
+        )
+        embed.add_field(
+            name="Shop System",
+            value=(
+                "- Premium shop section channels\n"
+                "- One clean embed per section\n"
+                "- Buy here button opens a private ticket\n"
+                "- Supports admin-set product pricing"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Coins System",
+            value=(
+                "- Coins are now part of member profiles\n"
+                "- Coins are earned from match and tournament progress\n"
+                "- Coins can be used for shop items with coin prices\n"
+                "- Balance is visible with `!coins`, `!profile`, and `!rank`"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Tournament System",
+            value=(
+                "- Team registration with captain and player Discord IDs\n"
+                "- Random group stage generation\n"
+                "- BO3 result-room flow for series reporting\n"
+                "- Automatic advancement through knockout rounds to the final"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="What Staff Can Do",
+            value=(
+                "- Configure shop sections with `/shop setup`\n"
+                "- Set coin prices on shop items\n"
+                "- Create and manage tournaments with `/tournament ...` commands"
+            ),
+            inline=False,
+        )
+        embed.set_footer(text="Highlight Manager update | systems expansion")
+        return embed
+
+    embed = discord.Embed(
+        title="Latest Update | Rank + Match Stability",
+        description="A stability update is now live for rank cleanup and automatic match startup.",
+        colour=discord.Colour.from_rgb(68, 71, 76),
+    )
+    embed.add_field(
+        name="Rank Cleanup",
+        value=(
+            "- Old nicknames like `RANK 621|HIGH ...` are now cleaned correctly\n"
+            "- Leaderboard lines now show clean player names\n"
+            "- Added `/rank sync-all` for full nickname and role resync"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Match Startup Fixes",
+        value=(
+            "- Players must stay in Waiting Voice until the bot moves them\n"
+            "- Team voice and private result room startup is now transactional\n"
+            "- Broken full matches are canceled with a clear reason instead of silently failing"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Staff Action",
+        value=(
+            "- Run `/rank sync-all` once after updating\n"
+            "- Re-test a full match after restart\n"
+            "- Check bot permissions for `Manage Channels`, `Move Members`, and `Manage Nicknames`"
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="Highlight Manager update | rank and match stability")
+    return embed
+
+
+def _channel_label(guild: discord.Guild | None, channel_id: int | None) -> str:
+    if not channel_id:
+        return "Not configured"
+    channel = guild.get_channel(channel_id) if guild else None
+    return f"{channel.mention} (`{channel_id}`)" if isinstance(channel, discord.abc.GuildChannel) else f"`{channel_id}`"
+
+
+def _roles_label(guild: discord.Guild | None, role_ids: Sequence[int]) -> str:
+    if not role_ids:
+        return "Not configured"
+    if guild is None:
+        return ", ".join(str(role_id) for role_id in role_ids)
+    labels = []
+    for role_id in role_ids:
+        role = guild.get_role(role_id)
+        labels.append(role.mention if role else f"`{role_id}`")
+    return ", ".join(labels)

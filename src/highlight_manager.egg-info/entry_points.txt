@@ -1,0 +1,2 @@
+[console_scripts]
+highlight-manager = highlight_manager.bot:main

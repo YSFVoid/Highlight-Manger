@@ -1,0 +1,437 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+import discord
+from discord import app_commands
+
+from highlight_manager.models.enums import AuditAction, ResultSource
+from highlight_manager.utils.embeds import (
+    LATEST_UPDATE_KEY,
+    UPDATE_ANNOUNCEMENT_KEYS,
+    build_config_embed,
+    build_latest_update_embed,
+)
+from highlight_manager.utils.response_helpers import send_interaction_response
+if TYPE_CHECKING:
+    from highlight_manager.bot import HighlightBot
+
+
+def register_admin_commands(bot: "HighlightBot") -> None:
+    async def ensure_staff(interaction: discord.Interaction) -> bool:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            if not interaction.response.is_done():
+                await send_interaction_response(interaction, "This command can only be used inside the server.", error=True, ephemeral=True)
+            return False
+        if not await bot.config_service.is_staff(interaction.user):
+            if not interaction.response.is_done():
+                await send_interaction_response(interaction, "You do not have permission to use this command.", error=True, ephemeral=True)
+            return False
+        return True
+
+    async def ensure_setup_admin(interaction: discord.Interaction) -> bool:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            if not interaction.response.is_done():
+                await send_interaction_response(interaction, "This command can only be used inside the server.", error=True, ephemeral=True)
+            return False
+        if interaction.user.guild_permissions.administrator or interaction.user.guild_permissions.manage_guild:
+            return True
+        existing_config = await bot.config_service.get(interaction.guild.id)
+        if existing_config and await bot.config_service.is_staff(interaction.user):
+            return True
+        if not interaction.response.is_done():
+            await send_interaction_response(
+                interaction,
+                "You need Manage Guild, Administrator, or a configured staff role to use setup commands.",
+                error=True,
+                ephemeral=True,
+            )
+        return False
+
+    def build_setup_embed(result, guild: discord.Guild) -> discord.Embed:
+        embed = build_config_embed(result.config, guild)
+        embed.title = "Setup Summary"
+        embed.add_field(
+            name="Resources",
+            value=(
+                f"Created:\n{chr(10).join(result.created_resources) if result.created_resources else 'None'}\n\n"
+                f"Reused:\n{chr(10).join(result.reused_resources) if result.reused_resources else 'None'}"
+            )[:1024],
+            inline=False,
+        )
+        if result.bootstrap_summary:
+            rank_lines = [
+                f"Seed Tier {rank}: {count}"
+                for rank, count in sorted(result.bootstrap_summary.rank_counts.items(), key=lambda item: int(item[0]))
+            ]
+            embed.add_field(
+                name="Bootstrap",
+                value=(
+                    f"Processed: {result.bootstrap_summary.processed_members}\n"
+                    f"Seed Tiers: {', '.join(rank_lines) if rank_lines else 'N/A'}\n"
+                    f"Rename Successes: {result.bootstrap_summary.rename_successes}\n"
+                    f"Rename Failures: {result.bootstrap_summary.rename_failures}\n"
+                    f"Skipped: {len(result.bootstrap_summary.skipped_members)}"
+                ),
+                inline=False,
+            )
+        return embed
+
+    @bot.tree.command(name="setup", description="Initial guild setup for Highlight Manager")
+    @app_commands.choices(
+        action=[
+            app_commands.Choice(name="Run setup", value="run"),
+            app_commands.Choice(name="Show setup status", value="status"),
+            app_commands.Choice(name="Repair missing resources", value="repair"),
+        ],
+    )
+    async def setup(
+        interaction: discord.Interaction,
+        action: app_commands.Choice[str] | None = None,
+        prefix: str | None = None,
+    ) -> None:
+        if not await ensure_setup_admin(interaction):
+            return
+        selected_action = action.value if action else "run"
+        if selected_action == "status":
+            config = await bot.config_service.get_or_create(interaction.guild.id)
+            return await send_interaction_response(interaction, embed=build_config_embed(config, interaction.guild), ephemeral=True)
+
+        if selected_action == "repair":
+            result = await bot.setup_service.repair(interaction.guild)
+            await bot.audit_service.log(
+                interaction.guild,
+                AuditAction.SETUP,
+                "Setup repair completed.",
+                actor_id=interaction.user.id,
+                metadata={"created": result.created_resources, "reused": result.reused_resources},
+            )
+            return await send_interaction_response(interaction, embed=build_setup_embed(result, interaction.guild), ephemeral=True)
+
+        result = await bot.setup_service.run(interaction.guild, prefix=prefix)
+        await bot.audit_service.log(
+            interaction.guild,
+            AuditAction.SETUP,
+            "Automatic setup completed.",
+            actor_id=interaction.user.id,
+            metadata={
+                "created": result.created_resources,
+                "reused": result.reused_resources,
+                "bootstrap_ran": result.first_bootstrap_ran,
+            },
+        )
+        await send_interaction_response(interaction, embed=build_setup_embed(result, interaction.guild), ephemeral=True)
+
+    @bot.tree.command(name="config", description="View or update guild configuration")
+    @app_commands.choices(
+        result_behavior=[
+            app_commands.Choice(name="Delete after delay", value="DELETE"),
+            app_commands.Choice(name="Archive and lock", value="ARCHIVE_LOCK"),
+        ],
+    )
+    async def config(
+        interaction: discord.Interaction,
+        prefix: str | None = None,
+        apostado_channel: discord.TextChannel | None = None,
+        highlight_channel: discord.TextChannel | None = None,
+        waiting_voice: discord.VoiceChannel | None = None,
+        temp_voice_category: discord.CategoryChannel | None = None,
+        result_category: discord.CategoryChannel | None = None,
+        log_channel: discord.TextChannel | None = None,
+        admin_role: discord.Role | None = None,
+        staff_role: discord.Role | None = None,
+        rank0_role: discord.Role | None = None,
+        rank1_role: discord.Role | None = None,
+        rank2_role: discord.Role | None = None,
+        rank3_role: discord.Role | None = None,
+        rank4_role: discord.Role | None = None,
+        rank5_role: discord.Role | None = None,
+        result_behavior: app_commands.Choice[str] | None = None,
+    ) -> None:
+        if not await ensure_staff(interaction):
+            return
+        config = await bot.config_service.get_or_create(interaction.guild.id)
+        if not any([prefix, apostado_channel, highlight_channel, waiting_voice, temp_voice_category, result_category, log_channel, admin_role, staff_role, rank0_role, rank1_role, rank2_role, rank3_role, rank4_role, rank5_role, result_behavior]):
+            return await send_interaction_response(interaction, embed=build_config_embed(config, interaction.guild), ephemeral=True)
+        config, _ = await bot.config_service.run_setup(
+            interaction.guild,
+            prefix=prefix,
+            apostado_channel=apostado_channel,
+            highlight_channel=highlight_channel,
+            waiting_voice=waiting_voice,
+            temp_voice_category=temp_voice_category,
+            result_category=result_category,
+            log_channel=log_channel,
+            admin_role=admin_role,
+            staff_role=staff_role,
+            rank0_role=rank0_role,
+            rank1_role=rank1_role,
+            rank2_role=rank2_role,
+            rank3_role=rank3_role,
+            rank4_role=rank4_role,
+            rank5_role=rank5_role,
+            create_missing=False,
+            result_behavior=result_behavior.value if result_behavior else None,
+        )
+        await bot.audit_service.log(interaction.guild, AuditAction.CONFIG_UPDATED, "Guild config updated.", actor_id=interaction.user.id)
+        await send_interaction_response(interaction, embed=build_config_embed(config, interaction.guild), ephemeral=True)
+
+    @bot.tree.command(name="announce-update", description="Post the latest Highlight Manager update announcement")
+    @app_commands.choices(
+        update=[
+            app_commands.Choice(name=label, value=value)
+            for value, label in UPDATE_ANNOUNCEMENT_KEYS
+        ],
+    )
+    async def announce_update(
+        interaction: discord.Interaction,
+        channel: discord.TextChannel | None = None,
+        update: app_commands.Choice[str] | None = None,
+    ) -> None:
+        if not await ensure_staff(interaction):
+            return
+        target_channel = channel or interaction.channel
+        if not isinstance(target_channel, discord.TextChannel):
+            return await send_interaction_response(interaction, "Choose a text channel for the update announcement.", error=True, ephemeral=True)
+        update_key = update.value if update else LATEST_UPDATE_KEY
+        await target_channel.send(
+            "@everyone",
+            embed=build_latest_update_embed(update_key),
+            allowed_mentions=discord.AllowedMentions(everyone=True),
+        )
+        await bot.audit_service.log(
+            interaction.guild,
+            AuditAction.ANNOUNCEMENT_POSTED,
+            f"Posted latest update announcement in {target_channel.mention}.",
+            actor_id=interaction.user.id,
+            metadata={"channel_id": target_channel.id, "type": update_key},
+        )
+        await send_interaction_response(interaction, f"Posted the latest update announcement in {target_channel.mention}.", ephemeral=True)
+
+    season = app_commands.Group(name="season", description="Season management")
+    bootstrap = app_commands.Group(name="bootstrap", description="Bootstrap preview and rerun")
+    rank = app_commands.Group(name="rank", description="Rank management")
+    rank0 = app_commands.Group(name="rank0", description="Manual Rank 0 management")
+    points = app_commands.Group(name="points", description="Point adjustments")
+    match = app_commands.Group(name="match", description="Match moderation")
+    blacklist = app_commands.Group(name="blacklist", description="Blacklist management")
+
+    @season.command(name="start", description="Start a new season")
+    async def season_start(interaction: discord.Interaction, name: str | None = None) -> None:
+        if not await ensure_staff(interaction):
+            return
+        config = await bot.config_service.get_or_create(interaction.guild.id)
+        season_record = await bot.season_service.start_new_season(interaction.guild, config, name=name)
+        await bot.audit_service.log(interaction.guild, AuditAction.SEASON_STARTED, f"Started {season_record.name}.", actor_id=interaction.user.id)
+        await send_interaction_response(interaction, f"Started **{season_record.name}**.", ephemeral=True)
+
+    @season.command(name="end", description="End the current season")
+    async def season_end(interaction: discord.Interaction) -> None:
+        if not await ensure_staff(interaction):
+            return
+        ended = await bot.season_service.end_active(interaction.guild.id)
+        if ended is None:
+            return await send_interaction_response(interaction, "There is no active season to end.", error=True, ephemeral=True)
+        await bot.audit_service.log(interaction.guild, AuditAction.SEASON_ENDED, f"Ended {ended.name}.", actor_id=interaction.user.id)
+        await send_interaction_response(interaction, f"Ended **{ended.name}**.", ephemeral=True)
+
+    @bootstrap.command(name="preview", description="Preview server-age bootstrap assignments")
+    async def bootstrap_preview(interaction: discord.Interaction) -> None:
+        if not await ensure_setup_admin(interaction):
+            return
+        config = await bot.config_service.get_or_create(interaction.guild.id)
+        summary, preview_entries = await bot.bootstrap_service.preview(interaction.guild, config)
+        lines = [
+            f"{entry.display_name} -> Seed Tier {entry.rank} ({entry.starting_points} pts, {entry.age_days}d)"
+            for entry in preview_entries[:20]
+        ]
+        embed = discord.Embed(title="Bootstrap Preview", colour=discord.Colour.orange())
+        embed.description = "\n".join(lines) if lines else "No members found."
+        embed.add_field(name="Members Processed", value=str(summary.processed_members), inline=True)
+        embed.add_field(
+            name="Seed Tier Counts",
+            value=", ".join(
+                f"Seed Tier {rank}: {count}" for rank, count in sorted(summary.rank_counts.items(), key=lambda item: int(item[0]))
+            ) or "N/A",
+            inline=False,
+        )
+        if len(preview_entries) > 20:
+            embed.set_footer(text=f"Showing 20 of {len(preview_entries)} members.")
+        await send_interaction_response(interaction, embed=embed, ephemeral=True)
+
+    @bootstrap.command(name="rerun", description="Explicitly rerun server-age bootstrap")
+    async def bootstrap_rerun(interaction: discord.Interaction) -> None:
+        if not await ensure_setup_admin(interaction):
+            return
+        config = await bot.config_service.get_or_create(interaction.guild.id)
+        summary = await bot.bootstrap_service.run(interaction.guild, config)
+        await bot.config_service.update(
+            interaction.guild.id,
+            {
+                "bootstrap_completed": True,
+                "bootstrap_completed_at": summary.completed_at,
+                "bootstrap_last_summary": summary.model_dump(mode="python"),
+            },
+        )
+        await bot.audit_service.log(interaction.guild, AuditAction.SETUP, "Bootstrap rerun completed.", actor_id=interaction.user.id)
+        embed = discord.Embed(title="Bootstrap Rerun Complete", colour=discord.Colour.green())
+        embed.add_field(name="Processed Members", value=str(summary.processed_members), inline=True)
+        embed.add_field(name="Rename Successes", value=str(summary.rename_successes), inline=True)
+        embed.add_field(name="Rename Failures", value=str(summary.rename_failures), inline=True)
+        embed.add_field(
+            name="Seed Tier Counts",
+            value=", ".join(
+                f"Seed Tier {rank}: {count}" for rank, count in sorted(summary.rank_counts.items(), key=lambda item: int(item[0]))
+            ) or "N/A",
+            inline=False,
+        )
+        if summary.skipped_members:
+            embed.add_field(name="Skipped Members", value="\n".join(summary.skipped_members[:10])[:1024], inline=False)
+        await send_interaction_response(interaction, embed=embed, ephemeral=True)
+
+    @rank.command(name="set", description="Manually set a player's rank")
+    async def rank_set(interaction: discord.Interaction, member: discord.Member, rank_number: app_commands.Range[int, 1, 5]) -> None:
+        if not await ensure_staff(interaction):
+            return
+        await send_interaction_response(
+            interaction,
+            "Manual rank set is disabled. Rank is now live placement. Use `/points ...` or `/rank0 grant`.",
+            ephemeral=True,
+            error=True,
+        )
+
+    @rank.command(name="sync-all", description="Resync live ranks, cleanup nicknames, and apply Rank 0 overrides")
+    async def rank_sync_all(interaction: discord.Interaction) -> None:
+        if not await ensure_staff(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        config = await bot.config_service.get_or_create(interaction.guild.id)
+        result = await bot.profile_service.sync_all_member_identities(interaction.guild, config)
+        await bot.audit_service.log(
+            interaction.guild,
+            AuditAction.RANK_UPDATED,
+            "Ran full rank identity sync for all members.",
+            actor_id=interaction.user.id,
+            metadata={
+                "processed_members": result.processed_members,
+                "role_updates": result.role_updates,
+                "nickname_updates": result.nickname_updates,
+                "nickname_failures": result.nickname_failures,
+                "skipped_members": result.skipped_members,
+            },
+        )
+        await send_interaction_response(
+            interaction,
+            (
+                f"Processed **{result.processed_members}** members.\n"
+                f"Role updates: **{result.role_updates}**\n"
+                f"Nickname updates: **{result.nickname_updates}**\n"
+                f"Nickname failures: **{result.nickname_failures}**\n"
+                f"Skipped: **{result.skipped_members}**"
+            ),
+            ephemeral=True,
+        )
+
+    @rank0.command(name="grant", description="Grant manual Rank 0")
+    async def rank0_grant(interaction: discord.Interaction, member: discord.Member) -> None:
+        if not await ensure_staff(interaction):
+            return
+        config = await bot.config_service.get_or_create(interaction.guild.id)
+        await bot.profile_service.set_rank0(interaction.guild, member.id, config, True)
+        await bot.audit_service.log(interaction.guild, AuditAction.RANK_UPDATED, f"Granted Rank 0 to {member.mention}.", actor_id=interaction.user.id, target_id=member.id)
+        await send_interaction_response(interaction, f"Granted Rank 0 to {member.mention}.", ephemeral=True)
+
+    @rank0.command(name="revoke", description="Revoke manual Rank 0")
+    async def rank0_revoke(interaction: discord.Interaction, member: discord.Member) -> None:
+        if not await ensure_staff(interaction):
+            return
+        config = await bot.config_service.get_or_create(interaction.guild.id)
+        profile = await bot.profile_service.set_rank0(interaction.guild, member.id, config, False)
+        await bot.audit_service.log(interaction.guild, AuditAction.RANK_UPDATED, f"Revoked Rank 0 from {member.mention}.", actor_id=interaction.user.id, target_id=member.id)
+        await send_interaction_response(interaction, f"Revoked Rank 0 from {member.mention}. They are now RANK {profile.current_rank}.", ephemeral=True)
+
+    @points.command(name="add", description="Add points to a player")
+    async def points_add(interaction: discord.Interaction, member: discord.Member, amount: int) -> None:
+        if not await ensure_staff(interaction):
+            return
+        config = await bot.config_service.get_or_create(interaction.guild.id)
+        result = await bot.profile_service.adjust_points(interaction.guild, member.id, config, abs(amount))
+        await bot.audit_service.log(interaction.guild, AuditAction.POINTS_UPDATED, f"Added {abs(amount)} points to {member.mention}.", actor_id=interaction.user.id, target_id=member.id)
+        await send_interaction_response(interaction, f"{member.mention}: {result.previous_points} -> {result.new_points} points.", ephemeral=True)
+
+    @points.command(name="remove", description="Remove points from a player")
+    async def points_remove(interaction: discord.Interaction, member: discord.Member, amount: int) -> None:
+        if not await ensure_staff(interaction):
+            return
+        config = await bot.config_service.get_or_create(interaction.guild.id)
+        result = await bot.profile_service.adjust_points(interaction.guild, member.id, config, -abs(amount))
+        await bot.audit_service.log(interaction.guild, AuditAction.POINTS_UPDATED, f"Removed {abs(amount)} points from {member.mention}.", actor_id=interaction.user.id, target_id=member.id)
+        await send_interaction_response(interaction, f"{member.mention}: {result.previous_points} -> {result.new_points} points.", ephemeral=True)
+
+    @points.command(name="set", description="Set a player's points exactly")
+    async def points_set(interaction: discord.Interaction, member: discord.Member, amount: int) -> None:
+        if not await ensure_staff(interaction):
+            return
+        config = await bot.config_service.get_or_create(interaction.guild.id)
+        result = await bot.profile_service.set_points(interaction.guild, member.id, config, amount)
+        await bot.audit_service.log(interaction.guild, AuditAction.POINTS_UPDATED, f"Set {member.mention} to {amount} points.", actor_id=interaction.user.id, target_id=member.id)
+        await send_interaction_response(interaction, f"{member.mention}: {result.previous_points} -> {result.new_points} points.", ephemeral=True)
+
+    @match.command(name="cancel", description="Cancel a match")
+    async def match_cancel(interaction: discord.Interaction, match_number: int, reason: str | None = None) -> None:
+        if not await ensure_staff(interaction):
+            return
+        result = await bot.match_service.cancel_match(interaction.guild, match_number, actor_id=interaction.user.id, force=True, reason=reason or "Canceled by staff.")
+        await send_interaction_response(interaction, result.message, ephemeral=True)
+
+    @match.command(name="force-result", description="Force a result for a match")
+    async def match_force_result(
+        interaction: discord.Interaction,
+        match_number: int,
+        winner_team: app_commands.Range[int, 1, 2],
+        winner_mvp: discord.Member | None = None,
+        loser_mvp: discord.Member | None = None,
+        notes: str | None = None,
+    ) -> None:
+        if not await ensure_staff(interaction):
+            return
+        current_match = await bot.match_service.require_match(interaction.guild.id, match_number)
+        if current_match.mode.team_size > 1 and (winner_mvp is None or loser_mvp is None):
+            return await send_interaction_response(interaction, "Team matches require both winner MVP and loser MVP.", error=True, ephemeral=True)
+        finalized = await bot.match_service.finalize_match(
+            interaction.guild,
+            match_number,
+            winner_team=winner_team,
+            winner_mvp_id=winner_mvp.id if winner_mvp else None,
+            loser_mvp_id=loser_mvp.id if loser_mvp else None,
+            source=ResultSource.FORCE_RESULT,
+            actor_id=interaction.user.id,
+            notes=notes or "Forced by staff command.",
+        )
+        await send_interaction_response(interaction, f"Forced result for Match #{finalized.display_id}.", ephemeral=True)
+
+    @match.command(name="force-close", description="Force close a match")
+    async def match_force_close(interaction: discord.Interaction, match_number: int, reason: str | None = None) -> None:
+        if not await ensure_staff(interaction):
+            return
+        result = await bot.match_service.force_close(interaction.guild, match_number, interaction.user.id, reason or "Force closed by staff.")
+        await send_interaction_response(interaction, result.message, ephemeral=True)
+
+    @blacklist.command(name="add", description="Blacklist a player from matches")
+    async def blacklist_add(interaction: discord.Interaction, member: discord.Member) -> None:
+        if not await ensure_staff(interaction):
+            return
+        profile = await bot.profile_service.set_blacklist(interaction.guild, member.id, True)
+        await bot.audit_service.log(interaction.guild, AuditAction.BLACKLIST_UPDATED, f"Blacklisted {member.mention}.", actor_id=interaction.user.id, target_id=member.id)
+        await send_interaction_response(interaction, f"{member.mention} is now blacklisted. Current points: {profile.current_points}.", ephemeral=True)
+
+    @blacklist.command(name="remove", description="Remove a player from the blacklist")
+    async def blacklist_remove(interaction: discord.Interaction, member: discord.Member) -> None:
+        if not await ensure_staff(interaction):
+            return
+        profile = await bot.profile_service.set_blacklist(interaction.guild, member.id, False)
+        await bot.audit_service.log(interaction.guild, AuditAction.BLACKLIST_UPDATED, f"Removed blacklist for {member.mention}.", actor_id=interaction.user.id, target_id=member.id)
+        await send_interaction_response(interaction, f"{member.mention} is no longer blacklisted. Current points: {profile.current_points}.", ephemeral=True)
+
+    for group in [season, bootstrap, rank, rank0, points, match, blacklist]:
+        bot.tree.add_command(group)
