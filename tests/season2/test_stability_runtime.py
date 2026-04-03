@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import highlight_manager.db.models  # noqa: F401
+from highlight_manager.app.bot import HighlightBot
 from highlight_manager.app.config import Settings
 from highlight_manager.app.runtime import Repositories
 from highlight_manager.db.base import Base
@@ -249,6 +250,23 @@ def test_legacy_runtime_imports_are_tracked() -> None:
     assert "highlight_manager.services" in summary["legacy_packages"]
     assert "highlight_manager.repositories" in summary["legacy_packages"]
     clear_legacy_runtime_registry()
+
+
+def test_build_rank_nickname_strips_existing_rank_prefixes() -> None:
+    assert HighlightBot.build_rank_nickname(173, "Rank 373 ANAS") == "RANK 173 | ANAS"
+    assert HighlightBot.build_rank_nickname(190, "Rank 76 Aniss") == "RANK 190 | Aniss"
+    assert HighlightBot.build_rank_nickname(191, "RANK 191 | Rank 544 Soong7") == "RANK 191 | Soong7"
+
+
+def test_pick_rank_source_name_prefers_clean_non_rank_text() -> None:
+    fake_member = SimpleNamespace(
+        nick="RANK 173 | Rank 373 ANAS",
+        global_name="ANAS",
+        name="anasboumine1161",
+        display_name="RANK 173 | Rank 373 ANAS",
+    )
+
+    assert HighlightBot.pick_rank_source_name(fake_member) == "ANAS"
 
 
 @pytest.mark.asyncio

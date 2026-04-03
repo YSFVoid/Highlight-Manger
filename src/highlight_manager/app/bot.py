@@ -50,7 +50,7 @@ from highlight_manager.ui.renderers import build_leaderboard_embed, build_profil
 
 
 MENTION_ID_PATTERN = re.compile(r"\d+")
-RANK_NICKNAME_PATTERN = re.compile(r"^RANK\s+\d+\s*\|\s*", re.IGNORECASE)
+RANK_NICKNAME_PATTERN = re.compile(r"^\s*RANK\s+\d+\s*(?:\|\s*|[-:]\s*|\s+)?", re.IGNORECASE)
 
 
 def parse_optional_player_reference(raw: str | None) -> int | None:
@@ -1228,8 +1228,32 @@ class HighlightBot(commands.Bot):
         return self.build_notice_embed("Coins", f"You have **{wallet.balance}** coins.")
 
     @staticmethod
-    def build_rank_nickname(rank: int, source_name: str) -> str:
-        base_name = RANK_NICKNAME_PATTERN.sub("", source_name).strip()
+    def normalize_rank_source_name(source_name: str | None) -> str:
+        cleaned = (source_name or "").strip()
+        while cleaned:
+            updated = RANK_NICKNAME_PATTERN.sub("", cleaned, count=1).strip()
+            if updated == cleaned:
+                break
+            cleaned = updated
+        return cleaned.strip(" |-:")
+
+    @classmethod
+    def pick_rank_source_name(cls, member: discord.Member) -> str:
+        candidates = [
+            member.nick,
+            member.global_name,
+            member.name,
+            member.display_name,
+        ]
+        for candidate in candidates:
+            cleaned = cls.normalize_rank_source_name(candidate)
+            if cleaned:
+                return cleaned
+        return "PLAYER"
+
+    @classmethod
+    def build_rank_nickname(cls, rank: int, source_name: str) -> str:
+        base_name = cls.normalize_rank_source_name(source_name)
         if not base_name:
             base_name = "PLAYER"
         prefix = f"RANK {rank} | "
@@ -1291,7 +1315,7 @@ class HighlightBot(commands.Bot):
             if rank is None:
                 skipped += 1
                 continue
-            nickname = self.build_rank_nickname(rank, member.display_name)
+            nickname = self.build_rank_nickname(rank, self.pick_rank_source_name(member))
             if member.nick == nickname:
                 skipped += 1
                 processed += 1
