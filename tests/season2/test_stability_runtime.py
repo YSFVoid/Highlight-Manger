@@ -11,13 +11,13 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import highlight_manager.db.models  # noqa: F401
-from highlight_manager.app.bot import HighlightBot, QueueActionView
+from highlight_manager.app.bot import HighlightBot, MatchActionView, QueueActionView, parse_ranked_queue_request
 from highlight_manager.app.config import Settings
 from highlight_manager.app.runtime import Repositories
 from highlight_manager.db.base import Base
 from highlight_manager.db.session import create_engine, create_session_factory
 from highlight_manager.legacy_runtime import clear_legacy_runtime_registry, get_legacy_runtime_summary
-from highlight_manager.modules.common.enums import ActivityKind, MatchMode, QueueState, RulesetKey, WalletTransactionType
+from highlight_manager.modules.common.enums import ActivityKind, MatchMode, MatchState, QueueState, RulesetKey, WalletTransactionType
 from highlight_manager.modules.economy.repository import EconomyRepository
 from highlight_manager.modules.economy.service import EconomyService
 from highlight_manager.modules.guilds.repository import GuildRepository
@@ -256,6 +256,30 @@ def test_queue_action_view_applies_pending_room_info_snapshot() -> None:
     assert view.enter_room_info.disabled is False
 
 
+def test_match_action_view_disables_creator_cancel_after_first_vote() -> None:
+    snapshot = SimpleNamespace(
+        match=SimpleNamespace(state=MatchState.RESULT_PENDING),
+        votes=[SimpleNamespace()],
+    )
+
+    view = MatchActionView(SimpleNamespace(), uuid4(), snapshot=snapshot)
+
+    assert view.creator_cancel.disabled is True
+    assert view.vote_result.disabled is False
+
+
+def test_parse_ranked_queue_request_accepts_flexible_order_and_spacing() -> None:
+    mode, ruleset = parse_ranked_queue_request("apos\u00a02v2")
+
+    assert mode == MatchMode.TWO_V_TWO
+    assert ruleset == RulesetKey.APOSTADO
+
+    reversed_mode, reversed_ruleset = parse_ranked_queue_request("  2V2   Apos  ")
+
+    assert reversed_mode == MatchMode.TWO_V_TWO
+    assert reversed_ruleset == RulesetKey.APOSTADO
+
+
 def test_voice_dependency_contract_is_pinned_for_discord_voice() -> None:
     requirements_text = Path("requirements.txt").read_text(encoding="utf-8")
     assert "PyNaCl>=1.5,<1.6" in requirements_text
@@ -388,9 +412,8 @@ async def test_restore_views_rebinds_queue_and_match_messages(session: AsyncSess
     recovery = RecoveryCoordinator()
     restored = await recovery.restore_views(FakeBot())
 
-    assert restored == 3
+    assert restored == 2
     assert (1001, "SimpleNamespace") in added_views
-    assert (2001, "SimpleNamespace") in added_views
     assert (3002, "SimpleNamespace") in added_views
 
 

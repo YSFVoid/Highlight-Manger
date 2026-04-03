@@ -7,6 +7,7 @@ import highlight_manager.db.models  # noqa: F401
 from highlight_manager.app.config import Settings
 from highlight_manager.db.base import Base
 from highlight_manager.db.session import create_engine, create_session_factory
+from highlight_manager.modules.common.enums import ShopSection
 from highlight_manager.modules.common.enums import WalletTransactionType
 from highlight_manager.modules.economy.repository import EconomyRepository
 from highlight_manager.modules.economy.service import EconomyService
@@ -131,3 +132,35 @@ async def test_purchase_token_is_idempotent_for_non_repeatable_item(session: Asy
     assert first_inventory.quantity == 1
     assert second_inventory.quantity == 1
     assert wallet.balance == 450
+
+
+@pytest.mark.asyncio
+async def test_storefront_item_can_exist_without_coin_price(session: AsyncSession) -> None:
+    settings = Settings(DISCORD_TOKEN="token", DATABASE_URL="sqlite+aiosqlite:///test.db")
+    guild_service = GuildService(settings)
+    economy_service = EconomyService()
+    shop_service = ShopService(economy_service)
+
+    guilds = GuildRepository(session)
+    shop = ShopRepository(session)
+
+    bundle = await guild_service.ensure_guild(guilds, 890, "Highlight")
+    item = await shop_service.create_item(
+        shop,
+        guild_id=bundle.guild.id,
+        sku="dev-service",
+        name="Discord Bot Source Code",
+        category="development",
+        price_coins=0,
+        section=ShopSection.DEVELOPE,
+        cash_price_text="$65 USD",
+        details_text="Custom bot source delivery",
+    )
+
+    section_items = await shop_service.list_section_items(shop, bundle.guild.id, ShopSection.DEVELOPE)
+    mixed_catalog = await shop_service.list_mixed_catalog(shop, bundle.guild.id)
+
+    assert item.price_coins == 0
+    assert shop_service.get_item_section(item) == ShopSection.DEVELOPE
+    assert item in section_items
+    assert mixed_catalog.section_configs[ShopSection.DEVELOPE].description is not None

@@ -284,3 +284,126 @@ async def test_confirm_match_rejects_invalid_mvp_team(session: AsyncSession) -> 
             loser_mvp_player_id=creator.id,
             actor_player_id=creator.id,
         )
+
+
+@pytest.mark.asyncio
+async def test_creator_cancel_only_works_before_any_votes(session: AsyncSession) -> None:
+    settings = Settings(DISCORD_TOKEN="token", DATABASE_URL="sqlite+aiosqlite:///test.db")
+    guild_service = GuildService(settings)
+    profile_service = ProfileService()
+    season_service = SeasonService()
+    rank_service = RankService()
+    moderation_service = ModerationService()
+    economy_service = EconomyService()
+    match_service = MatchService(
+        settings,
+        profile_service=profile_service,
+        season_service=season_service,
+        rank_service=rank_service,
+        economy_service=economy_service,
+        moderation_service=moderation_service,
+    )
+
+    guilds = GuildRepository(session)
+    profiles = ProfileRepository(session)
+    seasons = SeasonRepository(session)
+    matches = MatchRepository(session)
+    moderation = ModerationRepository(session)
+
+    bundle = await guild_service.ensure_guild(guilds, 778, "Highlight")
+    season = await season_service.ensure_active(seasons, bundle.guild.id, bundle.settings)
+    creator = await profile_service.ensure_player(profiles, bundle.guild.id, 7801)
+    opponent = await profile_service.ensure_player(profiles, bundle.guild.id, 7802)
+    for player in [creator, opponent]:
+        await season_service.ensure_player(seasons, season.id, player.id)
+
+    queue = await match_service.create_queue(
+        matches,
+        profiles,
+        moderation,
+        guild_id=bundle.guild.id,
+        season_id=season.id,
+        creator_player_id=creator.id,
+        ruleset_key=RulesetKey.HIGHLIGHT,
+        mode=MatchMode.ONE_V_ONE,
+        source_channel_id=1001,
+    )
+    await match_service.join_queue(matches, profiles, moderation, queue_id=queue.queue.id, player_id=opponent.id, team_number=2)
+    match = await match_service.submit_room_info(
+        matches,
+        profiles,
+        moderation,
+        queue_id=queue.queue.id,
+        submitter_player_id=creator.id,
+        is_moderator=False,
+        room_code="ROOM-CANCEL",
+        room_password="PW-CANCEL",
+        room_notes=None,
+    )
+    match = await match_service.mark_match_live(
+        matches,
+        match_id=match.match.id,
+        result_channel_id=11,
+        result_message_id=12,
+        team1_voice_channel_id=13,
+        team2_voice_channel_id=14,
+    )
+
+    cancelled = await match_service.cancel_match_by_creator(
+        matches,
+        profiles,
+        moderation,
+        match_id=match.match.id,
+        creator_player_id=creator.id,
+    )
+
+    assert cancelled.match.state.value == "cancelled"
+
+    second_queue = await match_service.create_queue(
+        matches,
+        profiles,
+        moderation,
+        guild_id=bundle.guild.id,
+        season_id=season.id,
+        creator_player_id=creator.id,
+        ruleset_key=RulesetKey.HIGHLIGHT,
+        mode=MatchMode.ONE_V_ONE,
+        source_channel_id=1002,
+    )
+    await match_service.join_queue(matches, profiles, moderation, queue_id=second_queue.queue.id, player_id=opponent.id, team_number=2)
+    second_match = await match_service.submit_room_info(
+        matches,
+        profiles,
+        moderation,
+        queue_id=second_queue.queue.id,
+        submitter_player_id=creator.id,
+        is_moderator=False,
+        room_code="ROOM-VOTED",
+        room_password="PW-VOTED",
+        room_notes=None,
+    )
+    second_match = await match_service.mark_match_live(
+        matches,
+        match_id=second_match.match.id,
+        result_channel_id=21,
+        result_message_id=22,
+        team1_voice_channel_id=23,
+        team2_voice_channel_id=24,
+    )
+    await match_service.submit_vote(
+        matches,
+        match_id=second_match.match.id,
+        player_id=creator.id,
+        winner_team_number=1,
+        winner_mvp_player_id=None,
+        loser_mvp_player_id=None,
+    )
+
+    with pytest.raises(ValidationError):
+        await match_service.cancel_match_by_creator(
+            matches,
+            profiles,
+            moderation,
+            match_id=second_match.match.id,
+            creator_player_id=creator.id,
+        )

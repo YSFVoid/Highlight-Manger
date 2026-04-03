@@ -6,7 +6,11 @@ from uuid import uuid4
 from highlight_manager.db.models.competitive import MatchModel, MatchPlayerModel, QueueModel, QueuePlayerModel
 from highlight_manager.modules.common.enums import MatchMode, MatchState, QueueState, RulesetKey
 from highlight_manager.modules.matches.types import MatchSnapshot, QueueSnapshot
-from highlight_manager.modules.matches.ui import build_match_embed, build_queue_embed
+from highlight_manager.modules.matches.ui import (
+    build_public_match_embed,
+    build_queue_embed,
+    build_result_match_embed,
+)
 
 
 def test_queue_embed_highlights_required_room_setup() -> None:
@@ -43,7 +47,7 @@ def test_queue_embed_highlights_required_room_setup() -> None:
     assert "Key" in deadline_field.value
 
 
-def test_match_embed_shows_live_rooms_and_key() -> None:
+def test_public_match_embed_shows_live_rooms_and_key_without_result_controls() -> None:
     match = MatchModel(
         id=uuid4(),
         guild_id=1,
@@ -76,12 +80,52 @@ def test_match_embed_shows_live_rooms_and_key() -> None:
         player_discord_ids={1: 101, 2: 102, 3: 103, 4: 104},
     )
 
-    embed = build_match_embed(snapshot)
+    embed = build_public_match_embed(snapshot)
 
-    assert embed.title == "Official Match #007"
+    assert embed.title == "Match Started"
     assert any(field.name == "Live Rooms" for field in embed.fields)
     assert any(field.name == "Room Access" for field in embed.fields)
     room_field = next(field for field in embed.fields if field.name == "Room Access")
     assert "Room ID: `ROOM-77`" in room_field.value
     assert "Password: `PASS-88`" in room_field.value
     assert "Key: `KEY-99`" in room_field.value
+    assert not any(field.name == "Result Progress" for field in embed.fields)
+    assert embed.footer.text is None
+
+
+def test_result_room_embed_keeps_vote_progress_and_footer() -> None:
+    match = MatchModel(
+        id=uuid4(),
+        guild_id=1,
+        season_id=1,
+        queue_id=uuid4(),
+        match_number=12,
+        creator_player_id=1,
+        ruleset_key=RulesetKey.HIGHLIGHT,
+        mode=MatchMode.TWO_V_TWO,
+        state=MatchState.RESULT_PENDING,
+        team_size=2,
+        room_code="ROOM-12",
+        room_password="PW-12",
+        room_notes=None,
+        result_channel_id=5512,
+    )
+    players = [
+        MatchPlayerModel(match_id=match.id, player_id=1, team_number=1),
+        MatchPlayerModel(match_id=match.id, player_id=2, team_number=1),
+        MatchPlayerModel(match_id=match.id, player_id=3, team_number=2),
+        MatchPlayerModel(match_id=match.id, player_id=4, team_number=2),
+    ]
+    snapshot = MatchSnapshot(
+        match=match,
+        players=players,
+        votes=[],
+        player_discord_ids={1: 101, 2: 102, 3: 103, 4: 104},
+    )
+
+    embed = build_result_match_embed(snapshot)
+
+    assert embed.title == "Result Room • Match #012"
+    assert any(field.name == "Result Progress" for field in embed.fields)
+    assert embed.footer.text is not None
+    assert "Creator Cancel" in embed.footer.text

@@ -382,6 +382,7 @@ class MatchService:
         snapshot.match.state = MatchState.CONFIRMED
         snapshot.match.result_source = source
         snapshot.match.confirmed_at = utcnow()
+        snapshot.match.closed_at = utcnow()
         await self.profile_service.clear_activity(profile_repository, snapshot.participant_ids)
         await self.moderation_service.audit(
             moderation_repository,
@@ -391,6 +392,41 @@ class MatchService:
             entity_id=str(snapshot.match.id),
             actor_player_id=actor_player_id,
             metadata_json={"winner_team_number": winner_team_number, "source": source},
+        )
+        return snapshot
+
+    async def cancel_match_by_creator(
+        self,
+        repository: MatchRepository,
+        profile_repository: ProfileRepository,
+        moderation_repository: ModerationRepository,
+        *,
+        match_id: UUID,
+        creator_player_id: int,
+        reason: str = "creator_cancelled",
+    ) -> MatchSnapshot:
+        snapshot = await repository.get_match_snapshot(match_id, for_update=True)
+        if snapshot is None:
+            raise NotFoundError("Match not found.")
+        if snapshot.match.creator_player_id != creator_player_id:
+            raise ValidationError("Only the match creator can cancel this match.")
+        if snapshot.match.state not in {MatchState.LIVE, MatchState.RESULT_PENDING}:
+            raise StateTransitionError("That match cannot be cancelled by the creator right now.")
+        if snapshot.votes:
+            raise ValidationError("Creator cancel is locked after the first result vote.")
+        snapshot.match.state = MatchState.CANCELLED
+        snapshot.match.cancel_reason = reason
+        snapshot.match.closed_at = utcnow()
+        await self.profile_service.clear_activity(profile_repository, snapshot.participant_ids)
+        await self.moderation_service.audit(
+            moderation_repository,
+            guild_id=snapshot.match.guild_id,
+            action=AuditAction.MATCH_FORCE_CLOSED,
+            entity_type=AuditEntityType.MATCH,
+            entity_id=str(snapshot.match.id),
+            actor_player_id=creator_player_id,
+            reason=reason,
+            metadata_json={"source": "creator_cancel"},
         )
         return snapshot
 

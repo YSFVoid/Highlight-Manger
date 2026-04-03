@@ -121,12 +121,6 @@ class RecoveryCoordinator:
                 snapshot = await repos.matches.get_match_snapshot(match.id)
                 if snapshot is None:
                     continue
-                if match.public_message_id:
-                    bot.add_view(
-                        bot.build_match_view(match.id, snapshot=snapshot),
-                        message_id=match.public_message_id,
-                    )
-                    restored_count += 1
                 if match.result_message_id:
                     bot.add_view(
                         bot.build_match_view(match.id, snapshot=snapshot),

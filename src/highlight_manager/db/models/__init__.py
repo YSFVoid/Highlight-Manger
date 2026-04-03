@@ -18,7 +18,7 @@ from highlight_manager.db.models.core import (
 )
 from highlight_manager.db.models.economy import WalletModel, WalletTransactionModel
 from highlight_manager.db.models.moderation import AuditLogModel, ModerationActionModel
-from highlight_manager.db.models.shop import PurchaseModel, ShopItemModel, UserInventoryModel
+from highlight_manager.db.models.shop import PurchaseModel, ShopItemModel, ShopSectionConfigModel, UserInventoryModel
 from highlight_manager.db.models.tournaments import (
     TournamentMatchModel,
     TournamentModel,
@@ -45,6 +45,7 @@ __all__ = [
     "SeasonModel",
     "SeasonPlayerModel",
     "ShopItemModel",
+    "ShopSectionConfigModel",
     "TournamentMatchModel",
     "TournamentModel",
     "TournamentRegistrationModel",

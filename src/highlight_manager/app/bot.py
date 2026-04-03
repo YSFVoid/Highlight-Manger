@@ -28,12 +28,18 @@ from highlight_manager.modules.common.enums import (
     ModerationActionType,
     QueueState,
     RulesetKey,
+    ShopSection,
     WalletTransactionType,
 )
 from highlight_manager.modules.common.exceptions import HighlightManagerError, NotFoundError, ValidationError
-from highlight_manager.modules.matches.ui import build_match_embed, build_queue_embed
+from highlight_manager.modules.matches.ui import build_public_match_embed, build_queue_embed, build_result_match_embed
 from highlight_manager.modules.matches.states import MATCH_RESULT_OPEN_STATES, QUEUE_JOINABLE_STATES, QUEUE_MUTABLE_STATES
-from highlight_manager.modules.shop.ui import build_shop_embed
+from highlight_manager.modules.shop.ui import (
+    STOREFRONT_FOOTER_PREFIX,
+    build_shop_embed,
+    build_storefront_section_embed,
+    build_storefront_ticket_embed,
+)
 from highlight_manager.modules.tournaments.ui import build_tournament_embed
 from highlight_manager.tasks.cleanup import CleanupWorker
 from highlight_manager.tasks.recovery import RecoveryCoordinator
@@ -52,6 +58,80 @@ from highlight_manager.ui.renderers import build_leaderboard_embed, build_profil
 
 MENTION_ID_PATTERN = re.compile(r"\d+")
 RANK_NICKNAME_PATTERN = re.compile(r"^\s*RANK\s+\d+\s*(?:\|\s*|[-:]\s*|\s+)?", re.IGNORECASE)
+PLAY_HIDDEN_SPACE_PATTERN = re.compile(r"[\u00A0\u2000-\u200D\u2060\uFEFF]")
+PLAY_ARGUMENT_GAP_PATTERN = re.compile(r"\s+")
+DEFAULT_STOREFRONT_CHANNELS: dict[ShopSection, int] = {
+    ShopSection.DEVELOPE: 1486113305033707592,
+    ShopSection.OPTIMIZE_TOOL: 1486112868356067402,
+    ShopSection.VIDEO_EDIT: 1486112519889358980,
+    ShopSection.SENSI_PC: 1486112441975832617,
+    ShopSection.SENSI_IPHONE: 1486112372178423910,
+    ShopSection.SENSI_ANDROID: 1486112240854892624,
+}
+SHOP_SECTION_DETAIL_PROMPTS: dict[ShopSection, tuple[str, str]] = {
+    ShopSection.DEVELOPE: (
+        "Project Requirements",
+        "Tell us what bot, source code, or website you want.",
+    ),
+    ShopSection.OPTIMIZE_TOOL: (
+        "PC / Tool Notes",
+        "Tell us the optimization or tool setup you need.",
+    ),
+    ShopSection.VIDEO_EDIT: (
+        "Video / Edit Notes",
+        "Tell us the video type, style, and edit details you want.",
+    ),
+    ShopSection.SENSI_PC: (
+        "PC Sensitivity Notes",
+        "Tell us your DPI, emulator version, and current setup.",
+    ),
+    ShopSection.SENSI_IPHONE: (
+        "iPhone Sensitivity Notes",
+        "Tell us your iPhone model and the sensitivity style you want.",
+    ),
+    ShopSection.SENSI_ANDROID: (
+        "Android Sensitivity Notes",
+        "Tell us your Android device and the sensitivity style you want.",
+    ),
+}
+
+
+def normalize_play_arguments(raw: str | None) -> str:
+    if raw is None:
+        return ""
+    normalized = PLAY_HIDDEN_SPACE_PATTERN.sub(" ", raw)
+    return PLAY_ARGUMENT_GAP_PATTERN.sub(" ", normalized).strip()
+
+
+def parse_ranked_queue_request(raw: str) -> tuple[MatchMode, RulesetKey]:
+    normalized = normalize_play_arguments(raw)
+    if not normalized:
+        raise ValidationError("Use `!play <mode> <ruleset>` or `!play <ruleset> <mode>`.")
+    tokens = normalized.split(" ")
+    if len(tokens) != 2:
+        raise ValidationError("Use `!play <mode> <ruleset>` or `!play <ruleset> <mode>`.")
+
+    parsed_modes: list[MatchMode] = []
+    parsed_rulesets: list[RulesetKey] = []
+    mode_errors = 0
+    ruleset_errors = 0
+    for token in tokens:
+        try:
+            parsed_modes.append(MatchMode.from_input(token))
+        except ValidationError:
+            mode_errors += 1
+        try:
+            parsed_rulesets.append(RulesetKey.from_input(token))
+        except ValidationError:
+            ruleset_errors += 1
+
+    if len(parsed_modes) == 1 and len(parsed_rulesets) == 1:
+        return parsed_modes[0], parsed_rulesets[0]
+    if len(parsed_modes) == 0:
+        raise ValidationError("Mode must be one of: 1v1, 2v2, 3v3, 4v4, 6v6.")
+    if len(parsed_rulesets) == 0:
+        raise ValidationError("Ruleset must be one of: apos, apostado, high, highlight, es, esport.")
+    raise ValidationError("Use exactly one mode and one ruleset, for example `!play 2v2 apos`.")
 
 
 def parse_optional_player_reference(raw: str | None) -> int | None:
@@ -252,8 +332,8 @@ class MatchActionView(discord.ui.View):
         self.bot = bot
         self.match_id = match_id
         custom_ids = [
-            f"match:{match_id}:submit-result",
             f"match:{match_id}:vote-result",
+            f"match:{match_id}:creator-cancel",
             f"match:{match_id}:admin-cancel",
             f"match:{match_id}:admin-force-result",
         ]
@@ -265,22 +345,20 @@ class MatchActionView(discord.ui.View):
     def apply_snapshot(self, snapshot) -> None:
         state = snapshot.match.state
         voting_open = state in {MatchState.LIVE, MatchState.RESULT_PENDING}
-        self.submit_result.disabled = not voting_open
         self.vote_result.disabled = not voting_open
+        self.creator_cancel.disabled = (not voting_open) or bool(snapshot.votes)
         self.admin_cancel.disabled = state in {MatchState.CONFIRMED, MatchState.CANCELLED, MatchState.FORCE_CLOSED}
         self.admin_force_result.disabled = state not in MATCH_RESULT_OPEN_STATES
-
-    @discord.ui.button(label="Submit Result", style=discord.ButtonStyle.primary)
-    async def submit_result(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        await interaction.response.send_modal(
-            ResultVoteModal(self.bot, self.match_id, force=False, title="Submit Match Result")
-        )
 
     @discord.ui.button(label="Vote Result", style=discord.ButtonStyle.primary)
     async def vote_result(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await interaction.response.send_modal(
             ResultVoteModal(self.bot, self.match_id, force=False, title="Vote Match Result")
         )
+
+    @discord.ui.button(label="Creator Cancel", style=discord.ButtonStyle.secondary)
+    async def creator_cancel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.bot.handle_creator_cancel(interaction, self.match_id)
 
     @discord.ui.button(label="Admin Cancel", style=discord.ButtonStyle.danger)
     async def admin_cancel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
@@ -291,6 +369,47 @@ class MatchActionView(discord.ui.View):
         await interaction.response.send_modal(
             ResultVoteModal(self.bot, self.match_id, force=True, title="Admin Force Result")
         )
+
+
+class StorefrontOrderModal(discord.ui.Modal):
+    def __init__(self, bot: "HighlightBot", section: ShopSection) -> None:
+        super().__init__(title=f"{section.label} Purchase", timeout=None)
+        self.bot = bot
+        self.section = section
+        self.requested_item = discord.ui.TextInput(
+            label="What do you want to buy?",
+            placeholder=f"{section.label} product or custom request",
+            max_length=150,
+        )
+        detail_label, detail_placeholder = SHOP_SECTION_DETAIL_PROMPTS[section]
+        self.details = discord.ui.TextInput(
+            label=detail_label,
+            placeholder=detail_placeholder,
+            style=discord.TextStyle.paragraph,
+            max_length=500,
+        )
+        self.add_item(self.requested_item)
+        self.add_item(self.details)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.bot.handle_storefront_purchase(
+            interaction,
+            self.section,
+            requested_item=str(self.requested_item),
+            details=str(self.details),
+        )
+
+
+class StorefrontOrderView(discord.ui.View):
+    def __init__(self, bot: "HighlightBot", section: ShopSection) -> None:
+        super().__init__(timeout=None)
+        self.bot = bot
+        self.section = section
+        self.buy_now.custom_id = f"storefront:{section.value}:buy"
+
+    @discord.ui.button(label="Buy Now", style=discord.ButtonStyle.success, emoji="🛒")
+    async def buy_now(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.send_modal(StorefrontOrderModal(self.bot, self.section))
 
 
 class PlayerCommands(commands.Cog):
@@ -317,12 +436,19 @@ class PlayerCommands(commands.Cog):
 
     @commands.command(name="play")
     @timed_prefix_command("play")
-    async def play(self, ctx: commands.Context, mode: str, ruleset: str) -> None:
+    async def play(self, ctx: commands.Context, *, queue_request: str = "") -> None:
         if ctx.guild is None or ctx.author.bot:
             return
         assert isinstance(ctx.author, discord.Member)
         try:
-            snapshot = await self.bot.create_ranked_queue(ctx.guild, ctx.author, mode, ruleset, ctx.channel.id if ctx.channel else None)
+            mode, ruleset = parse_ranked_queue_request(queue_request)
+            snapshot = await self.bot.create_ranked_queue(
+                ctx.guild,
+                ctx.author,
+                mode,
+                ruleset,
+                ctx.channel.id if ctx.channel else None,
+            )
         except HighlightManagerError as exc:
             await ctx.reply(embed=self.bot.build_notice_embed("Queue creation failed", str(exc), error=True))
             return
@@ -382,10 +508,8 @@ class PlayerCommands(commands.Cog):
     async def shop(self, ctx: commands.Context) -> None:
         if ctx.guild is None:
             return
-        async with self.bot.runtime.session() as repos:
-            bundle = await self.bot.runtime.services.guilds.ensure_guild(repos.guilds, ctx.guild.id, ctx.guild.name)
-            items = await self.bot.runtime.services.shop.list_catalog(repos.shop, bundle.guild.id)
-        await ctx.reply(embed=build_shop_embed(items))
+        embed = await self.bot.build_shop_command_embed(ctx.guild)
+        await ctx.reply(embed=embed)
 
     @commands.command(name="tournament")
     @timed_prefix_command("tournament")
@@ -737,6 +861,9 @@ class HighlightBot(commands.Bot):
     def build_match_view(self, match_id: UUID, *, snapshot=None) -> MatchActionView:
         return MatchActionView(self, match_id, snapshot=snapshot)
 
+    def build_storefront_order_view(self, section: ShopSection) -> StorefrontOrderView:
+        return StorefrontOrderView(self, section)
+
     async def ensure_guild_bundle(self, repos, guild: discord.Guild):
         bundle = await self.runtime.services.guilds.get_bundle(repos.guilds, guild.id)
         if bundle is None:
@@ -780,10 +907,15 @@ class HighlightBot(commands.Bot):
         await self.warm_runtime_assets()
         await self.add_cog(PlayerCommands(self))
         self._register_app_commands()
+        for section in ShopSection:
+            self.add_view(self.build_storefront_order_view(section))
         if self.settings.discord_guild_id:
             try:
                 guild_object = discord.Object(id=self.settings.discord_guild_id)
+                self.tree.clear_commands(guild=guild_object)
                 self.tree.copy_global_to(guild=guild_object)
+                self.tree.clear_commands(guild=None)
+                await self.tree.sync()
                 synced = await self.tree.sync(guild=guild_object)
                 self.command_sync_status = {
                     "scope": "guild",
@@ -855,6 +987,11 @@ class HighlightBot(commands.Bot):
             }
             self.logger.info("connected_guild_commands_synced", guilds=synced_guilds, count=synced_commands)
         await self.warm_connected_guild_caches()
+        async with self.runtime.session() as repos:
+            for guild in self.guilds:
+                bundle = await self.ensure_guild_bundle(repos, guild)
+                await self.ensure_storefront_sections(guild, repos, bundle.guild.id)
+                await self.republish_storefront_sections(guild, bundle.guild.id, repos, *list(ShopSection))
         await self.recovery.restore_persistent_voice(self)
         legacy_summary = self.refresh_runtime_health()
         if legacy_summary["legacy_import_count"]:
@@ -992,9 +1129,16 @@ class HighlightBot(commands.Bot):
                 f"{ruleset.value.title()} queues can only be opened in: {format_channel_mentions(allowed_channel_ids)}"
             )
 
-    async def create_ranked_queue(self, guild: discord.Guild, member: discord.Member, mode_raw: str, ruleset_raw: str, source_channel_id: int | None):
-        mode = MatchMode.from_input(mode_raw)
-        ruleset = RulesetKey.from_input(ruleset_raw)
+    async def create_ranked_queue(
+        self,
+        guild: discord.Guild,
+        member: discord.Member,
+        mode_raw: MatchMode | str,
+        ruleset_raw: RulesetKey | str,
+        source_channel_id: int | None,
+    ):
+        mode = mode_raw if isinstance(mode_raw, MatchMode) else MatchMode.from_input(mode_raw)
+        ruleset = ruleset_raw if isinstance(ruleset_raw, RulesetKey) else RulesetKey.from_input(ruleset_raw)
         async with self.runtime.session() as repos:
             bundle = await self.ensure_guild_bundle(repos, guild)
             self.validate_ranked_queue_request(
@@ -1227,6 +1371,36 @@ class HighlightBot(commands.Bot):
             )
             wallet = await repos.economy.ensure_wallet(player.id)
         return self.build_notice_embed("Coins", f"You have **{wallet.balance}** coins.")
+
+    async def ensure_storefront_sections(self, guild: discord.Guild, repos, guild_id: int) -> dict[ShopSection, object]:
+        configs = await self.runtime.services.shop.ensure_section_configs(repos.shop, guild_id)
+        updated = False
+        for section, channel_id in DEFAULT_STOREFRONT_CHANNELS.items():
+            config = configs[section]
+            if config.channel_id is not None:
+                continue
+            if guild.get_channel(channel_id) is None:
+                continue
+            configs[section] = await self.runtime.services.shop.update_section_config(
+                repos.shop,
+                guild_id=guild_id,
+                section=section,
+                channel_id=channel_id,
+            )
+            updated = True
+        if updated:
+            return await self.runtime.services.shop.ensure_section_configs(repos.shop, guild_id)
+        return configs
+
+    async def build_shop_command_embed(self, guild: discord.Guild) -> discord.Embed:
+        async with self.runtime.session() as repos:
+            bundle = await self.runtime.services.guilds.ensure_guild(repos.guilds, guild.id, guild.name)
+            await self.ensure_storefront_sections(guild, repos, bundle.guild.id)
+            catalog = await self.runtime.services.shop.list_mixed_catalog(repos.shop, bundle.guild.id)
+        return build_shop_embed(
+            coin_items=catalog.coin_items,
+            section_configs=catalog.section_configs,
+        )
 
     @staticmethod
     def normalize_rank_source_name(source_name: str | None) -> str:
@@ -1628,10 +1802,16 @@ class HighlightBot(commands.Bot):
                         loser_mvp_player_id=final_vote.loser_mvp_player_id,
                         actor_player_id=player.id,
                     )
-            await interaction.edit_original_response(
-                embed=self.build_notice_embed("Vote recorded", "Your result vote has been saved."),
-            )
-            await self.refresh_match_messages(interaction.guild, snapshot)
+            if snapshot.match.state == MatchState.CONFIRMED:
+                await interaction.edit_original_response(
+                    embed=self.build_notice_embed("Match confirmed", "All votes matched and the result was confirmed."),
+                )
+                await self.finalize_terminal_match(interaction.guild, snapshot)
+            else:
+                await interaction.edit_original_response(
+                    embed=self.build_notice_embed("Vote recorded", "Your result vote has been saved."),
+                )
+                await self.refresh_match_messages(interaction.guild, snapshot)
             self.log_duration(
                 "interaction_completed",
                 started_at,
@@ -1691,7 +1871,7 @@ class HighlightBot(commands.Bot):
             await interaction.edit_original_response(
                 embed=self.build_notice_embed("Force result applied", "The match was confirmed by staff."),
             )
-            await self.refresh_match_messages(interaction.guild, snapshot)
+            await self.finalize_terminal_match(interaction.guild, snapshot)
             self.log_duration(
                 "interaction_completed",
                 started_at,
@@ -1745,7 +1925,7 @@ class HighlightBot(commands.Bot):
             await interaction.edit_original_response(
                 embed=self.build_notice_embed("Match closed", "The match was force closed."),
             )
-            await self.refresh_match_messages(interaction.guild, snapshot)
+            await self.finalize_terminal_match(interaction.guild, snapshot)
             self.log_duration(
                 "interaction_completed",
                 started_at,
@@ -1764,13 +1944,63 @@ class HighlightBot(commands.Bot):
                 error=type(exc).__name__,
             )
 
+    async def handle_creator_cancel(self, interaction: discord.Interaction, match_id: UUID) -> None:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            return
+        started_at = time.monotonic()
+        try:
+            await self.acknowledge_interaction(
+                interaction,
+                operation="creator_cancel",
+                started_at=started_at,
+                ephemeral=True,
+            )
+            async with self.runtime.session() as repos:
+                bundle = await self.runtime.services.guilds.ensure_guild(repos.guilds, interaction.guild.id, interaction.guild.name)
+                actor = await self.runtime.services.profiles.ensure_player(
+                    repos.profiles,
+                    bundle.guild.id,
+                    interaction.user.id,
+                    display_name=interaction.user.display_name,
+                    global_name=interaction.user.global_name,
+                    joined_guild_at=interaction.user.joined_at,
+                )
+                snapshot = await self.runtime.services.matches.cancel_match_by_creator(
+                    repos.matches,
+                    repos.profiles,
+                    repos.moderation,
+                    match_id=match_id,
+                    creator_player_id=actor.id,
+                )
+            await interaction.edit_original_response(
+                embed=self.build_notice_embed("Match cancelled", "You cancelled the match before voting was finalized."),
+            )
+            await self.finalize_terminal_match(interaction.guild, snapshot)
+            self.log_duration(
+                "interaction_completed",
+                started_at,
+                operation="creator_cancel",
+                match_id=str(match_id),
+                success=True,
+            )
+        except HighlightManagerError as exc:
+            await self.edit_or_followup_notice(interaction, "Creator cancel failed", str(exc), error=True, ephemeral=True)
+            self.log_duration(
+                "interaction_completed",
+                started_at,
+                operation="creator_cancel",
+                match_id=str(match_id),
+                success=False,
+                error=type(exc).__name__,
+            )
+
     async def edit_message_view(
         self,
         channel: discord.abc.GuildChannel | discord.Thread | None,
         message_id: int | None,
         *,
         embed: discord.Embed,
-        view: discord.ui.View,
+        view: discord.ui.View | None,
     ) -> None:
         if message_id is None:
             return
@@ -1792,21 +2022,22 @@ class HighlightBot(commands.Bot):
         )
 
     async def refresh_match_messages(self, guild: discord.Guild, snapshot) -> None:
-        embed = build_match_embed(snapshot)
-        view = self.build_match_view(snapshot.match.id, snapshot=snapshot)
+        public_embed = build_public_match_embed(snapshot)
+        result_embed = build_result_match_embed(snapshot)
+        result_view = self.build_match_view(snapshot.match.id, snapshot=snapshot)
         public_channel = guild.get_channel(snapshot.match.source_channel_id) if snapshot.match.source_channel_id else None
         result_channel = guild.get_channel(snapshot.match.result_channel_id) if snapshot.match.result_channel_id else None
         await self.edit_message_view(
             public_channel,
             snapshot.match.public_message_id,
-            embed=embed,
-            view=view,
+            embed=public_embed,
+            view=None,
         )
         await self.edit_message_view(
             result_channel,
             snapshot.match.result_message_id,
-            embed=embed,
-            view=view,
+            embed=result_embed,
+            view=result_view,
         )
 
     async def provision_match_resources(self, guild: discord.Guild, snapshot):
@@ -1864,7 +2095,7 @@ class HighlightBot(commands.Bot):
             )
 
             result_message = await result_channel.send(
-                embed=build_match_embed(snapshot),
+                embed=build_result_match_embed(snapshot),
                 view=self.build_match_view(snapshot.match.id, snapshot=snapshot),
             )
 
@@ -1907,6 +2138,90 @@ class HighlightBot(commands.Bot):
             )
             return live_snapshot
 
+    def build_match_terminal_notice(self, snapshot) -> discord.Embed:
+        match = snapshot.match
+        ruleset_label = match.ruleset_key.value.title()
+        if match.state == MatchState.CONFIRMED:
+            winner_team = next((row.team_number for row in snapshot.players if row.result.value == "win"), None)
+            winner_mvp = next((row for row in snapshot.players if row.is_winner_mvp), None)
+            loser_mvp = next((row for row in snapshot.players if row.is_loser_mvp), None)
+            details = [
+                f"{ruleset_label} {match.mode.value.upper()} finished successfully.",
+                f"Winner Team: **Team {winner_team}**" if winner_team is not None else "Winner Team: **Unknown**",
+            ]
+            if winner_mvp is not None:
+                winner_id = snapshot.player_discord_ids.get(winner_mvp.player_id)
+                details.append(f"Winner MVP: <@{winner_id}>" if winner_id else f"Winner MVP: Player {winner_mvp.player_id}")
+            if loser_mvp is not None:
+                loser_id = snapshot.player_discord_ids.get(loser_mvp.player_id)
+                details.append(f"Loser MVP: <@{loser_id}>" if loser_id else f"Loser MVP: Player {loser_mvp.player_id}")
+            return self.build_notice_embed(
+                f"Match #{match.match_number:03d} Confirmed",
+                "\n".join(details),
+            )
+        if match.state == MatchState.CANCELLED:
+            return self.build_notice_embed(
+                f"Match #{match.match_number:03d} Cancelled",
+                "The match creator cancelled the match before results were finalized.",
+                error=True,
+            )
+        if match.state == MatchState.FORCE_CLOSED:
+            reason = match.force_close_reason or "No staff reason was provided."
+            return self.build_notice_embed(
+                f"Match #{match.match_number:03d} Force Closed",
+                reason,
+                error=True,
+            )
+        if match.state == MatchState.EXPIRED:
+            return self.build_notice_embed(
+                f"Match #{match.match_number:03d} Expired",
+                "Voting expired and staff review is now required.",
+                error=True,
+            )
+        return self.build_notice_embed(
+            f"Match #{match.match_number:03d}",
+            f"{ruleset_label} {match.mode.value.upper()} updated.",
+        )
+
+    async def post_match_terminal_notice(self, guild: discord.Guild, snapshot) -> None:
+        if snapshot.match.state not in {MatchState.CONFIRMED, MatchState.CANCELLED, MatchState.FORCE_CLOSED}:
+            return
+        channel = guild.get_channel(snapshot.match.source_channel_id) if snapshot.match.source_channel_id else None
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            return
+        try:
+            await channel.send(embed=self.build_match_terminal_notice(snapshot))
+        except discord.HTTPException:
+            self.logger.warning(
+                "match_terminal_notice_failed",
+                guild_id=guild.id,
+                match_id=str(snapshot.match.id),
+                source_channel_id=snapshot.match.source_channel_id,
+            )
+
+    async def delete_channel_if_exists(self, channel: discord.abc.GuildChannel | None) -> None:
+        if channel is None:
+            return
+        try:
+            await channel.delete(reason="Highlight Manger match cleanup")
+        except discord.HTTPException:
+            return
+
+    async def cleanup_terminal_match_resources(self, guild: discord.Guild, snapshot) -> None:
+        if snapshot.match.state not in {MatchState.CONFIRMED, MatchState.CANCELLED, MatchState.FORCE_CLOSED}:
+            return
+        result_channel = guild.get_channel(snapshot.match.result_channel_id) if snapshot.match.result_channel_id else None
+        team1_channel = guild.get_channel(snapshot.match.team1_voice_channel_id) if snapshot.match.team1_voice_channel_id else None
+        team2_channel = guild.get_channel(snapshot.match.team2_voice_channel_id) if snapshot.match.team2_voice_channel_id else None
+        await self.delete_channel_if_exists(result_channel)
+        await self.delete_channel_if_exists(team1_channel)
+        await self.delete_channel_if_exists(team2_channel)
+
+    async def finalize_terminal_match(self, guild: discord.Guild, snapshot) -> None:
+        await self.refresh_match_messages(guild, snapshot)
+        await self.post_match_terminal_notice(guild, snapshot)
+        await self.cleanup_terminal_match_resources(guild, snapshot)
+
     async def announce_match_created(self, guild: discord.Guild, snapshot) -> None:
         channel = guild.get_channel(snapshot.match.source_channel_id) if snapshot.match.source_channel_id else None
         if not isinstance(channel, (discord.TextChannel, discord.Thread)):
@@ -1930,6 +2245,243 @@ class HighlightBot(commands.Bot):
                 guild_id=guild.id,
                 match_id=str(snapshot.match.id),
                 source_channel_id=snapshot.match.source_channel_id,
+            )
+
+    async def publish_storefront_section(self, guild: discord.Guild, guild_id: int, repos, section: ShopSection) -> int | None:
+        configs = await self.ensure_storefront_sections(guild, repos, guild_id)
+        config = configs[section]
+        if config.channel_id is None:
+            return None
+        channel = guild.get_channel(config.channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            return None
+        items = await self.runtime.services.shop.list_section_items(repos.shop, guild_id, section)
+        embed = build_storefront_section_embed(
+            section=section,
+            config=config,
+            items=items,
+            shop_service=self.runtime.services.shop,
+        )
+        view = self.build_storefront_order_view(section)
+        message_id = await self.upsert_storefront_message(channel, config.showcase_message_id, embed, view)
+        await self.cleanup_stale_storefront_messages(channel, section, keep_message_id=message_id)
+        if config.showcase_message_id != message_id:
+            await self.runtime.services.shop.update_section_config(
+                repos.shop,
+                guild_id=guild_id,
+                section=section,
+                showcase_message_id=message_id,
+            )
+        return message_id
+
+    async def upsert_storefront_message(
+        self,
+        channel: discord.TextChannel,
+        message_id: int | None,
+        embed: discord.Embed,
+        view: discord.ui.View,
+    ) -> int:
+        if message_id:
+            try:
+                message = await channel.fetch_message(message_id)
+                await message.edit(embed=embed, view=view)
+                return message.id
+            except discord.HTTPException:
+                pass
+        message = await channel.send(embed=embed, view=view)
+        return message.id
+
+    async def cleanup_stale_storefront_messages(self, channel: discord.TextChannel, section: ShopSection, *, keep_message_id: int) -> None:
+        me = channel.guild.me
+        my_id = me.id if me is not None else None
+        signature = f"{STOREFRONT_FOOTER_PREFIX} | {section.value}".casefold()
+        try:
+            async for message in channel.history(limit=50):
+                if message.id == keep_message_id:
+                    continue
+                if my_id is not None and getattr(message.author, "id", None) != my_id:
+                    continue
+                if not any(
+                    embed.footer and (embed.footer.text or "").casefold() == signature
+                    for embed in message.embeds
+                ):
+                    continue
+                try:
+                    await message.delete()
+                except discord.HTTPException:
+                    continue
+        except discord.HTTPException:
+            return
+
+    async def republish_storefront_sections(
+        self,
+        guild: discord.Guild,
+        guild_id: int,
+        repos,
+        *sections: ShopSection,
+    ) -> None:
+        ordered_sections: list[ShopSection] = []
+        seen: set[ShopSection] = set()
+        for section in sections:
+            if section in seen:
+                continue
+            seen.add(section)
+            ordered_sections.append(section)
+        for section in ordered_sections:
+            try:
+                await self.publish_storefront_section(guild, guild_id, repos, section)
+            except discord.HTTPException:
+                self.logger.warning(
+                    "storefront_section_publish_failed",
+                    guild_id=guild.id,
+                    section=section.value,
+                )
+
+    async def ensure_shop_ticket_category(self, guild: discord.Guild) -> discord.CategoryChannel:
+        category = discord.utils.find(
+            lambda item: isinstance(item, discord.CategoryChannel) and item.name.lower() == "shop tickets",
+            guild.channels,
+        )
+        if isinstance(category, discord.CategoryChannel):
+            return category
+        return await guild.create_category("Shop Tickets", reason="Highlight Manger storefront ticket setup")
+
+    async def resolve_storefront_item(self, repos, guild_id: int, section: ShopSection, requested_text: str):
+        items = await self.runtime.services.shop.list_section_items(repos.shop, guild_id, section)
+        normalized = requested_text.strip().casefold()
+        if not normalized:
+            return items[0] if len(items) == 1 else None
+        item_id_match = re.search(r"#(\d+)", requested_text)
+        if item_id_match:
+            item_id = int(item_id_match.group(1))
+            return next((item for item in items if item.id == item_id), None)
+        exact = [item for item in items if item.name.strip().casefold() == normalized or item.sku.casefold() == normalized]
+        if exact:
+            return exact[0]
+        partial = [
+            item
+            for item in items
+            if normalized in item.name.strip().casefold()
+            or item.name.strip().casefold() in normalized
+            or normalized in item.sku.casefold()
+        ]
+        if len(partial) == 1:
+            return partial[0]
+        return items[0] if len(items) == 1 else None
+
+    @staticmethod
+    def build_storefront_ticket_channel_name(section: ShopSection, member: discord.Member) -> str:
+        base_name = re.sub(r"[^a-z0-9-]+", "-", member.display_name.casefold()).strip("-")
+        trimmed = (base_name or "buyer")[:16]
+        section_name = section.value.replace("sensi-", "sn-")
+        return f"shop-{section_name[:10]}-{trimmed}"
+
+    async def handle_storefront_purchase(
+        self,
+        interaction: discord.Interaction,
+        section: ShopSection,
+        *,
+        requested_item: str,
+        details: str,
+    ) -> None:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            return
+        started_at = time.monotonic()
+        try:
+            await self.acknowledge_interaction(
+                interaction,
+                operation="storefront_purchase",
+                started_at=started_at,
+                ephemeral=True,
+            )
+            async with self.runtime.session() as repos:
+                bundle = await self.runtime.services.guilds.ensure_guild(repos.guilds, interaction.guild.id, interaction.guild.name)
+                await self.ensure_storefront_sections(interaction.guild, repos, bundle.guild.id)
+                matched_item = await self.resolve_storefront_item(repos, bundle.guild.id, section, requested_item)
+                ticket_category = await self.ensure_shop_ticket_category(interaction.guild)
+                staff_roles = await self.runtime.services.guilds.get_staff_roles(repos.guilds, bundle.guild.id)
+                overwrites: dict[discord.Role | discord.Member, discord.PermissionOverwrite] = {
+                    interaction.guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                    interaction.user: discord.PermissionOverwrite(
+                        view_channel=True,
+                        send_messages=True,
+                        read_message_history=True,
+                    ),
+                }
+                if interaction.guild.me is not None:
+                    overwrites[interaction.guild.me] = discord.PermissionOverwrite(
+                        view_channel=True,
+                        send_messages=True,
+                        read_message_history=True,
+                        embed_links=True,
+                        manage_channels=True,
+                    )
+                for role_id in staff_roles.admin_role_ids | staff_roles.moderator_role_ids:
+                    role = interaction.guild.get_role(role_id)
+                    if role is None:
+                        continue
+                    overwrites[role] = discord.PermissionOverwrite(
+                        view_channel=True,
+                        send_messages=True,
+                        read_message_history=True,
+                    )
+                ticket_channel = await interaction.guild.create_text_channel(
+                    self.build_storefront_ticket_channel_name(section, interaction.user),
+                    category=ticket_category,
+                    overwrites=overwrites,
+                    reason="Highlight Manger storefront order",
+                )
+                await ticket_channel.send(
+                    embed=build_storefront_ticket_embed(
+                        buyer_mention=interaction.user.mention,
+                        section=section,
+                        requested_text=requested_item,
+                        details_text=details,
+                        matched_item=matched_item,
+                        shop_service=self.runtime.services.shop,
+                    )
+                )
+            await interaction.edit_original_response(
+                embed=self.build_notice_embed(
+                    "Shop ticket opened",
+                    f"Your private order ticket is {ticket_channel.mention}. Staff will continue there.",
+                ),
+            )
+            self.log_duration(
+                "interaction_completed",
+                started_at,
+                operation="storefront_purchase",
+                guild_id=interaction.guild.id,
+                section=section.value,
+                success=True,
+            )
+        except HighlightManagerError as exc:
+            await self.edit_or_followup_notice(interaction, "Storefront request failed", str(exc), error=True, ephemeral=True)
+            self.log_duration(
+                "interaction_completed",
+                started_at,
+                operation="storefront_purchase",
+                guild_id=interaction.guild.id,
+                section=section.value,
+                success=False,
+                error=type(exc).__name__,
+            )
+        except discord.HTTPException as exc:
+            await self.edit_or_followup_notice(
+                interaction,
+                "Storefront request failed",
+                "I could not open the private ticket channel right now.",
+                error=True,
+                ephemeral=True,
+            )
+            self.log_duration(
+                "interaction_completed",
+                started_at,
+                operation="storefront_purchase",
+                guild_id=interaction.guild.id,
+                section=section.value,
+                success=False,
+                error=type(exc).__name__,
             )
 
     def _register_app_commands(self) -> None:
@@ -2301,14 +2853,18 @@ class HighlightBot(commands.Bot):
                 ephemeral=True,
             )
 
-        @admin_group.command(name="add-shop-item", description="Create a cosmetic shop item")
+        @admin_group.command(name="add-shop-item", description="Create a mixed shop item")
         async def add_shop_item(
             interaction: discord.Interaction,
             sku: str,
             name: str,
-            price: int,
             category: str,
+            coin_price: Optional[int] = None,
+            section: Optional[str] = None,
             description: Optional[str] = None,
+            cash_price_text: Optional[str] = None,
+            image_url: Optional[str] = None,
+            details_text: Optional[str] = None,
             cosmetic_slot: Optional[str] = None,
             repeatable: bool = False,
             sort_order: int = 0,
@@ -2318,8 +2874,17 @@ class HighlightBot(commands.Bot):
             if not await self.is_admin_member(interaction.guild, interaction.user):
                 await interaction.response.send_message(embed=self.build_notice_embed("Not allowed", "Admins only.", error=True), ephemeral=True)
                 return
+            started_at = time.monotonic()
+            await self.acknowledge_interaction(
+                interaction,
+                operation="add_shop_item",
+                started_at=started_at,
+                ephemeral=True,
+            )
+            shop_section = ShopSection.from_input(section) if section else None
             async with self.runtime.session() as repos:
                 bundle = await self.runtime.services.guilds.ensure_guild(repos.guilds, interaction.guild.id, interaction.guild.name)
+                await self.ensure_storefront_sections(interaction.guild, repos, bundle.guild.id)
                 actor = await self.runtime.services.profiles.ensure_player(
                     repos.profiles,
                     bundle.guild.id,
@@ -2334,12 +2899,18 @@ class HighlightBot(commands.Bot):
                     sku=sku,
                     name=name,
                     category=category,
-                    price_coins=price,
+                    price_coins=coin_price,
                     description=description,
                     cosmetic_slot=cosmetic_slot,
                     repeatable=repeatable,
                     sort_order=sort_order,
+                    section=shop_section,
+                    cash_price_text=cash_price_text,
+                    image_url=image_url,
+                    details_text=details_text,
                 )
+                if shop_section is not None and item.active:
+                    await self.republish_storefront_sections(interaction.guild, bundle.guild.id, repos, shop_section)
                 await self.runtime.services.moderation.audit(
                     repos.moderation,
                     guild_id=bundle.guild.id,
@@ -2347,14 +2918,19 @@ class HighlightBot(commands.Bot):
                     entity_type=AuditEntityType.SHOP,
                     entity_id=str(item.id),
                     actor_player_id=actor.id,
-                    metadata_json={"sku": item.sku, "active": item.active},
+                    metadata_json={
+                        "sku": item.sku,
+                        "active": item.active,
+                        "section": shop_section.value if shop_section else None,
+                        "price_coins": item.price_coins,
+                    },
                 )
-            await interaction.response.send_message(
+            section_text = f" in **{shop_section.label}**" if shop_section else ""
+            await interaction.edit_original_response(
                 embed=self.build_notice_embed(
                     "Shop item created",
-                    f"Created **{item.name}** as `#{item.id}` with SKU `{item.sku}`.",
+                    f"Created **{item.name}** as `#{item.id}` with SKU `{item.sku}`{section_text}.",
                 ),
-                ephemeral=True,
             )
 
         @admin_group.command(name="set-shop-item-active", description="Enable or disable a shop item")
@@ -2364,8 +2940,16 @@ class HighlightBot(commands.Bot):
             if not await self.is_admin_member(interaction.guild, interaction.user):
                 await interaction.response.send_message(embed=self.build_notice_embed("Not allowed", "Admins only.", error=True), ephemeral=True)
                 return
+            started_at = time.monotonic()
+            await self.acknowledge_interaction(
+                interaction,
+                operation="set_shop_item_active",
+                started_at=started_at,
+                ephemeral=True,
+            )
             async with self.runtime.session() as repos:
                 bundle = await self.runtime.services.guilds.ensure_guild(repos.guilds, interaction.guild.id, interaction.guild.name)
+                await self.ensure_storefront_sections(interaction.guild, repos, bundle.guild.id)
                 actor = await self.runtime.services.profiles.ensure_player(
                     repos.profiles,
                     bundle.guild.id,
@@ -2380,6 +2964,9 @@ class HighlightBot(commands.Bot):
                     item_id=item_id,
                     active=active,
                 )
+                section_key = self.runtime.services.shop.get_item_section(item)
+                if section_key is not None:
+                    await self.republish_storefront_sections(interaction.guild, bundle.guild.id, repos, section_key)
                 await self.runtime.services.moderation.audit(
                     repos.moderation,
                     guild_id=bundle.guild.id,
@@ -2391,9 +2978,185 @@ class HighlightBot(commands.Bot):
                     metadata_json={"active": item.active, "sku": item.sku},
                 )
             state_text = "enabled" if active else "disabled"
-            await interaction.response.send_message(
+            await interaction.edit_original_response(
                 embed=self.build_notice_embed("Shop item updated", f"`#{item.id}` is now {state_text}."),
+            )
+
+        @admin_group.command(name="update-shop-item", description="Update an existing mixed shop item")
+        async def update_shop_item(
+            interaction: discord.Interaction,
+            item_id: int,
+            name: Optional[str] = None,
+            category: Optional[str] = None,
+            coin_price: Optional[int] = None,
+            section: Optional[str] = None,
+            description: Optional[str] = None,
+            cash_price_text: Optional[str] = None,
+            image_url: Optional[str] = None,
+            details_text: Optional[str] = None,
+            cosmetic_slot: Optional[str] = None,
+            repeatable: Optional[bool] = None,
+            sort_order: Optional[int] = None,
+        ) -> None:
+            if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+                return
+            if not await self.is_admin_member(interaction.guild, interaction.user):
+                await interaction.response.send_message(embed=self.build_notice_embed("Not allowed", "Admins only.", error=True), ephemeral=True)
+                return
+            started_at = time.monotonic()
+            await self.acknowledge_interaction(
+                interaction,
+                operation="update_shop_item",
+                started_at=started_at,
                 ephemeral=True,
+            )
+            section_value = ShopSection.from_input(section) if section else None
+            async with self.runtime.session() as repos:
+                bundle = await self.runtime.services.guilds.ensure_guild(repos.guilds, interaction.guild.id, interaction.guild.name)
+                await self.ensure_storefront_sections(interaction.guild, repos, bundle.guild.id)
+                actor = await self.runtime.services.profiles.ensure_player(
+                    repos.profiles,
+                    bundle.guild.id,
+                    interaction.user.id,
+                    display_name=interaction.user.display_name,
+                    global_name=interaction.user.global_name,
+                    joined_guild_at=interaction.user.joined_at,
+                )
+                existing_item = await repos.shop.get_item(item_id)
+                if existing_item is None or existing_item.guild_id != bundle.guild.id:
+                    raise NotFoundError("Shop item not found.")
+                existing_section = self.runtime.services.shop.get_item_section(existing_item)
+                update_fields = {}
+                if name is not None:
+                    update_fields["name"] = name
+                if category is not None:
+                    update_fields["category"] = category
+                if coin_price is not None:
+                    update_fields["price_coins"] = coin_price
+                if description is not None:
+                    update_fields["description"] = description
+                if cosmetic_slot is not None:
+                    update_fields["cosmetic_slot"] = cosmetic_slot
+                if repeatable is not None:
+                    update_fields["repeatable"] = repeatable
+                if sort_order is not None:
+                    update_fields["sort_order"] = sort_order
+                if section is not None:
+                    update_fields["section"] = section_value
+                if image_url is not None:
+                    update_fields["image_url"] = image_url
+                if cash_price_text is not None:
+                    update_fields["cash_price_text"] = cash_price_text
+                if details_text is not None:
+                    update_fields["details_text"] = details_text
+                item = await self.runtime.services.shop.update_item(
+                    repos.shop,
+                    guild_id=bundle.guild.id,
+                    item_id=item_id,
+                    **update_fields,
+                )
+                new_section = self.runtime.services.shop.get_item_section(item)
+                sections_to_publish = [section_key for section_key in {existing_section, new_section} if section_key is not None]
+                if sections_to_publish:
+                    await self.republish_storefront_sections(interaction.guild, bundle.guild.id, repos, *sections_to_publish)
+                await self.runtime.services.moderation.audit(
+                    repos.moderation,
+                    guild_id=bundle.guild.id,
+                    action=AuditAction.SHOP_ITEM_UPDATED,
+                    entity_type=AuditEntityType.SHOP,
+                    entity_id=str(item.id),
+                    actor_player_id=actor.id,
+                    metadata_json={"sku": item.sku, "section": new_section.value if new_section else None},
+                )
+            await interaction.edit_original_response(
+                embed=self.build_notice_embed("Shop item updated", f"`#{item.id}` was updated successfully."),
+            )
+
+        @admin_group.command(name="set-shop-section-channel", description="Configure the storefront channel for a shop section")
+        async def set_shop_section_channel(interaction: discord.Interaction, section: str, channel: discord.TextChannel) -> None:
+            if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+                return
+            if not await self.is_admin_member(interaction.guild, interaction.user):
+                await interaction.response.send_message(embed=self.build_notice_embed("Not allowed", "Admins only.", error=True), ephemeral=True)
+                return
+            started_at = time.monotonic()
+            await self.acknowledge_interaction(
+                interaction,
+                operation="set_shop_section_channel",
+                started_at=started_at,
+                ephemeral=True,
+            )
+            shop_section = ShopSection.from_input(section)
+            async with self.runtime.session() as repos:
+                bundle = await self.runtime.services.guilds.ensure_guild(repos.guilds, interaction.guild.id, interaction.guild.name)
+                await self.runtime.services.shop.update_section_config(
+                    repos.shop,
+                    guild_id=bundle.guild.id,
+                    section=shop_section,
+                    channel_id=channel.id,
+                )
+                await self.republish_storefront_sections(interaction.guild, bundle.guild.id, repos, shop_section)
+            await interaction.edit_original_response(
+                embed=self.build_notice_embed(
+                    "Section channel updated",
+                    f"{shop_section.label} storefront now publishes in {channel.mention}.",
+                ),
+            )
+
+        @admin_group.command(name="set-shop-section-image", description="Set the showcase image for a shop section")
+        async def set_shop_section_image(interaction: discord.Interaction, section: str, image_url: str) -> None:
+            if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+                return
+            if not await self.is_admin_member(interaction.guild, interaction.user):
+                await interaction.response.send_message(embed=self.build_notice_embed("Not allowed", "Admins only.", error=True), ephemeral=True)
+                return
+            started_at = time.monotonic()
+            await self.acknowledge_interaction(
+                interaction,
+                operation="set_shop_section_image",
+                started_at=started_at,
+                ephemeral=True,
+            )
+            shop_section = ShopSection.from_input(section)
+            async with self.runtime.session() as repos:
+                bundle = await self.runtime.services.guilds.ensure_guild(repos.guilds, interaction.guild.id, interaction.guild.name)
+                await self.runtime.services.shop.update_section_config(
+                    repos.shop,
+                    guild_id=bundle.guild.id,
+                    section=shop_section,
+                    image_url=image_url,
+                )
+                await self.republish_storefront_sections(interaction.guild, bundle.guild.id, repos, shop_section)
+            await interaction.edit_original_response(
+                embed=self.build_notice_embed("Section image updated", f"{shop_section.label} showcase image was updated."),
+            )
+
+        @admin_group.command(name="set-shop-section-description", description="Set the storefront description for a shop section")
+        async def set_shop_section_description(interaction: discord.Interaction, section: str, description: str) -> None:
+            if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+                return
+            if not await self.is_admin_member(interaction.guild, interaction.user):
+                await interaction.response.send_message(embed=self.build_notice_embed("Not allowed", "Admins only.", error=True), ephemeral=True)
+                return
+            started_at = time.monotonic()
+            await self.acknowledge_interaction(
+                interaction,
+                operation="set_shop_section_description",
+                started_at=started_at,
+                ephemeral=True,
+            )
+            shop_section = ShopSection.from_input(section)
+            async with self.runtime.session() as repos:
+                bundle = await self.runtime.services.guilds.ensure_guild(repos.guilds, interaction.guild.id, interaction.guild.name)
+                await self.runtime.services.shop.update_section_config(
+                    repos.shop,
+                    guild_id=bundle.guild.id,
+                    section=shop_section,
+                    description=description,
+                )
+                await self.republish_storefront_sections(interaction.guild, bundle.guild.id, repos, shop_section)
+            await interaction.edit_original_response(
+                embed=self.build_notice_embed("Section description updated", f"{shop_section.label} description was updated."),
             )
 
         @admin_group.command(name="rename-members", description="Rename members to RANK X | USERNAME")
