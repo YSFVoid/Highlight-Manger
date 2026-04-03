@@ -35,12 +35,24 @@ class RecoveryCoordinator:
     def get_voice_status(self, guild_id: int) -> VoiceAnchorStatus | None:
         return self._voice_status.get(guild_id)
 
-    def voice_dependency_available(self) -> bool:
+    def voice_dependency_reason(self) -> str | None:
+        missing: list[str] = []
         try:
             import nacl  # noqa: F401
         except ImportError:
-            return False
-        return True
+            missing.append("PyNaCl")
+        try:
+            import davey  # noqa: F401
+        except ImportError:
+            missing.append("davey")
+        if not missing:
+            return None
+        if len(missing) == 1:
+            return f"{missing[0]} is not installed, so Discord voice is unavailable."
+        return f"{' and '.join(missing)} are not installed, so Discord voice is unavailable."
+
+    def voice_dependency_available(self) -> bool:
+        return self.voice_dependency_reason() is None
 
     def _set_voice_status(
         self,
@@ -151,13 +163,14 @@ class RecoveryCoordinator:
                         next_retry_at=next_retry_at,
                     )
                     continue
-                if not self.voice_dependency_available():
+                dependency_reason = self.voice_dependency_reason()
+                if dependency_reason is not None:
                     current_index = self._voice_backoff_index.get(guild.id, 0)
                     delay = self.BACKOFF_STEPS[min(current_index, len(self.BACKOFF_STEPS) - 1)]
                     self._voice_backoff_index[guild.id] = min(current_index + 1, len(self.BACKOFF_STEPS) - 1)
                     retry_at = utcnow() + timedelta(seconds=delay)
                     self._voice_next_retry_at[guild.id] = retry_at
-                    reason = "PyNaCl is not installed, so Discord voice is unavailable."
+                    reason = dependency_reason
                     self._set_voice_status(
                         guild.id,
                         enabled=True,

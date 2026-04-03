@@ -37,7 +37,7 @@ Use this as the startup command:
 
 ## Voice Checklist
 
-- `PyNaCl` installed from `requirements.txt`
+- `PyNaCl` and `davey` installed from `requirements.txt`
 - bot has `View Channel` and `Connect` on the selected persistent voice
 - bot has `Move Members` for queue->match voice moves
 
@@ -55,4 +55,4 @@ If persistent voice does not connect, check:
 - `/admin bot-voice-status`
 - selected voice channel still exists
 - permissions are present
-- `PyNaCl` installed successfully during startup
+- `PyNaCl` and `davey` installed successfully during startup

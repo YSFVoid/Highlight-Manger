@@ -10,7 +10,7 @@ Highlight Manger is the Season 2 production runtime for a competitive Discord se
 - SQLAlchemy async
 - Pydantic v2
 - `structlog`
-- `PyNaCl` for voice support
+- `PyNaCl` and `davey` for voice support
 - Pillow for card rendering
 
 ## Runtime Contract
@@ -108,7 +108,7 @@ cp .env.example .env
 python app.py
 ```
 
-Voice support requires `PyNaCl`, which is already listed in `requirements.txt`.
+Voice support on the current `discord.py` runtime requires both `PyNaCl` and `davey`, and both are listed in `requirements.txt`.
 
 ## Pterodactyl
 

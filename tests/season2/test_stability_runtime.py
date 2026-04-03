@@ -2,19 +2,22 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 import importlib
+from pathlib import Path
 from types import SimpleNamespace
+import tomllib
+from uuid import uuid4
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import highlight_manager.db.models  # noqa: F401
-from highlight_manager.app.bot import HighlightBot
+from highlight_manager.app.bot import HighlightBot, QueueActionView
 from highlight_manager.app.config import Settings
 from highlight_manager.app.runtime import Repositories
 from highlight_manager.db.base import Base
 from highlight_manager.db.session import create_engine, create_session_factory
 from highlight_manager.legacy_runtime import clear_legacy_runtime_registry, get_legacy_runtime_summary
-from highlight_manager.modules.common.enums import ActivityKind, MatchMode, RulesetKey, WalletTransactionType
+from highlight_manager.modules.common.enums import ActivityKind, MatchMode, QueueState, RulesetKey, WalletTransactionType
 from highlight_manager.modules.economy.repository import EconomyRepository
 from highlight_manager.modules.economy.service import EconomyService
 from highlight_manager.modules.guilds.repository import GuildRepository
@@ -220,7 +223,11 @@ async def test_recovery_reports_missing_voice_dependency(session: AsyncSession, 
         id = 9002
 
     recovery = RecoveryCoordinator()
-    monkeypatch.setattr(recovery, "voice_dependency_available", lambda: False)
+    monkeypatch.setattr(
+        recovery,
+        "voice_dependency_reason",
+        lambda: "PyNaCl and davey are not installed, so Discord voice is unavailable.",
+    )
     bot = SimpleNamespace(
         runtime=runtime,
         guilds=[FakeGuild()],
@@ -234,6 +241,30 @@ async def test_recovery_reports_missing_voice_dependency(session: AsyncSession, 
     assert status.state == "dependency_missing"
     assert status.retry_in_seconds == 15
     assert "PyNaCl" in (status.reason or "")
+    assert "davey" in (status.reason or "")
+
+
+def test_queue_action_view_applies_pending_room_info_snapshot() -> None:
+    snapshot = SimpleNamespace(
+        queue=SimpleNamespace(state=QueueState.FULL_PENDING_ROOM_INFO, team_size=1),
+        team1_ids=[1],
+        team2_ids=[],
+    )
+
+    view = QueueActionView(SimpleNamespace(), uuid4(), snapshot=snapshot)
+
+    assert view.enter_room_info.disabled is False
+
+
+def test_voice_dependency_contract_is_pinned_for_discord_voice() -> None:
+    requirements_text = Path("requirements.txt").read_text(encoding="utf-8")
+    assert "PyNaCl>=1.5,<1.6" in requirements_text
+    assert "davey>=0.1.0,<1.0" in requirements_text
+
+    pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    dependencies = pyproject["project"]["dependencies"]
+    assert "PyNaCl>=1.5,<1.6" in dependencies
+    assert "davey>=0.1.0,<1.0" in dependencies
 
 
 def test_legacy_runtime_imports_are_tracked() -> None:

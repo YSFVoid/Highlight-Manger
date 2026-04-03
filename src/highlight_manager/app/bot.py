@@ -26,6 +26,7 @@ from highlight_manager.modules.common.enums import (
     MatchMode,
     MatchState,
     ModerationActionType,
+    QueueState,
     RulesetKey,
     WalletTransactionType,
 )
