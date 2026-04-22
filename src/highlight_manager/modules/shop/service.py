@@ -39,6 +39,13 @@ class ShopService:
         self._catalog_cache.set(str(guild_id), items)
         return items
 
+    async def get_cheapest_coin_item(self, repository: ShopRepository, guild_id: int) -> ShopItemModel | None:
+        items = await self.list_catalog(repository, guild_id)
+        coin_items = [item for item in items if item.price_coins > 0]
+        if not coin_items:
+            return None
+        return min(coin_items, key=lambda i: i.price_coins)
+
     async def list_mixed_catalog(self, repository: ShopRepository, guild_id: int) -> MixedShopCatalog:
         items = await self.list_catalog(repository, guild_id)
         configs = await self.ensure_section_configs(repository, guild_id)

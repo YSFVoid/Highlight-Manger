@@ -18,6 +18,8 @@ class RatingChange:
     before: int
     after: int
     delta: int
+    tier_before: str | None = None
+    tier_after: str | None = None
 
 
 DEFAULT_TIERS = [
@@ -29,6 +31,50 @@ DEFAULT_TIERS = [
     RatingTierDefinition("master", "Master", 1350, 1499, "#826BFF"),
     RatingTierDefinition("elite", "Elite", 1500, None, "#C85BFF"),
 ]
+
+TIER_EMOJI = {
+    "bronze": "🟤",
+    "silver": "⚪",
+    "gold": "🟡",
+    "platinum": "🔵",
+    "diamond": "💎",
+    "master": "🟣",
+    "elite": "👑",
+}
+
+TIER_COLORS_RGB = {
+    "bronze": (122, 91, 58),
+    "silver": (167, 182, 200),
+    "gold": (216, 169, 59),
+    "platinum": (93, 203, 200),
+    "diamond": (124, 168, 255),
+    "master": (130, 107, 255),
+    "elite": (200, 91, 255),
+}
+
+
+def resolve_tier(rating: int, tiers: list[RatingTierDefinition] | None = None) -> RatingTierDefinition:
+    """Return the tier definition that contains the given rating."""
+    for tier in reversed(tiers or DEFAULT_TIERS):
+        if rating >= tier.min_rating:
+            return tier
+    return (tiers or DEFAULT_TIERS)[0]
+
+
+def tier_emoji(code: str) -> str:
+    """Return the emoji for a tier code."""
+    return TIER_EMOJI.get(code, "⬜")
+
+
+def tier_progress(rating: int, tiers: list[RatingTierDefinition] | None = None) -> tuple[int, int, int]:
+    """Return (current_points_into_tier, points_needed_for_next, percentage)."""
+    tier = resolve_tier(rating, tiers)
+    if tier.max_rating is None:
+        return 0, 0, 100
+    points_into = rating - tier.min_rating
+    range_size = tier.max_rating - tier.min_rating + 1
+    pct = int(points_into / range_size * 100)
+    return points_into, range_size, min(pct, 100)
 
 
 def expected_score(team_rating: float, opponent_rating: float) -> float:
@@ -50,6 +96,17 @@ def calculate_delta(*, rating: int, matches_played: int, team_rating: float, opp
 
 def bounded_rating(before: int, delta: int, *, floor: int = 800) -> int:
     return max(floor, before + delta)
+
+
+def calculate_decay(days_inactive: int, current_rating: int, *, floor: int = 800, grace_days: int = 7, daily_loss: int = 5, max_loss: int = 100) -> int:
+    """Calculate rating decay for inactivity. Returns the amount to subtract (positive number)."""
+    if days_inactive <= grace_days:
+        return 0
+    decay_days = days_inactive - grace_days
+    total_loss = min(decay_days * daily_loss, max_loss)
+    # Don't decay below the floor
+    max_possible = max(current_rating - floor, 0)
+    return min(total_loss, max_possible)
 
 
 def soft_reset_seed(*, final_rank: int, total_players: int) -> int:

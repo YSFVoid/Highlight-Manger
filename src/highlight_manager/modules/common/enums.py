@@ -27,6 +27,7 @@ class SeasonStatus(StrEnum):
 class QueueState(StrEnum):
     QUEUE_OPEN = "queue_open"
     FILLING = "filling"
+    READY_CHECK = "ready_check"
     FULL_PENDING_ROOM_INFO = "full_pending_room_info"
     QUEUE_CANCELLED = "queue_cancelled"
     CONVERTED_TO_MATCH = "converted_to_match"
@@ -41,6 +42,12 @@ class MatchState(StrEnum):
     CANCELLED = "cancelled"
     EXPIRED = "expired"
     FORCE_CLOSED = "force_closed"
+
+
+class MatchResultPhase(StrEnum):
+    CAPTAIN = "captain"
+    FALLBACK = "fallback"
+    STAFF_REVIEW = "staff_review"
 
 
 class MatchPlayerResult(StrEnum):
@@ -61,6 +68,9 @@ class WalletTransactionType(StrEnum):
     MATCH_WIN = "match_win"
     MATCH_MVP_WINNER = "match_mvp_winner"
     MATCH_MVP_LOSER = "match_mvp_loser"
+    STREAK_BONUS = "streak_bonus"
+    DAILY_BONUS = "daily_bonus"
+    MILESTONE_BONUS = "milestone_bonus"
     PURCHASE = "purchase"
     PURCHASE_REFUND = "purchase_refund"
     TOURNAMENT_PARTICIPATION = "tournament_participation"
@@ -184,6 +194,8 @@ class AuditAction(StrEnum):
     MATCH_EXPIRED = "match_expired"
     MATCH_FORCE_RESULT = "match_force_result"
     MATCH_FORCE_CLOSED = "match_force_closed"
+    MATCH_RESULT_FALLBACK_OPENED = "match_result_fallback_opened"
+    MATCH_REHOSTED = "match_rehosted"
     COINS_ADJUSTED = "coins_adjusted"
     PURCHASE_COMPLETED = "purchase_completed"
     PURCHASE_REFUNDED = "purchase_refunded"

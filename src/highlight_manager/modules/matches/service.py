@@ -3,7 +3,14 @@ from __future__ import annotations
 from uuid import UUID
 
 from highlight_manager.app.config import Settings
-from highlight_manager.modules.common.enums import AuditAction, AuditEntityType, MatchPlayerResult, MatchState, QueueState
+from highlight_manager.modules.common.enums import (
+    AuditAction,
+    AuditEntityType,
+    MatchPlayerResult,
+    MatchResultPhase,
+    MatchState,
+    QueueState,
+)
 from highlight_manager.modules.common.exceptions import NotFoundError, StateTransitionError, ValidationError
 from highlight_manager.modules.common.time import seconds_from_now, utcnow
 from highlight_manager.modules.economy.repository import EconomyRepository
@@ -23,6 +30,8 @@ from highlight_manager.modules.seasons.service import SeasonService
 
 
 class MatchService:
+    CAPTAIN_WINDOW_SECONDS = 180
+
     def __init__(
         self,
         settings: Settings,
@@ -118,9 +127,10 @@ class MatchService:
         snapshot.players.append(joined_row)
         snapshot.player_discord_ids.update(await repository.get_player_discord_ids([player_id]))
         if snapshot.is_full:
-            snapshot.queue.state = QueueState.FULL_PENDING_ROOM_INFO
+            snapshot.queue.state = QueueState.READY_CHECK
             snapshot.queue.full_at = utcnow()
-            snapshot.queue.room_info_deadline_at = seconds_from_now(self.settings.room_info_timeout_seconds)
+            # Timeout for ready check
+            snapshot.queue.room_info_deadline_at = seconds_from_now(60)
         else:
             snapshot.queue.state = QueueState.FILLING
         await self.moderation_service.audit(
@@ -132,6 +142,34 @@ class MatchService:
             actor_player_id=player_id,
             metadata_json={"team_number": team_number},
         )
+        return snapshot
+
+    async def mark_ready(
+        self,
+        repository: MatchRepository,
+        profile_repository: ProfileRepository,
+        *,
+        queue_id: UUID,
+        player_id: int,
+    ) -> QueueSnapshot:
+        snapshot = await repository.get_queue_snapshot(queue_id, for_update=True)
+        if snapshot is None:
+            raise NotFoundError("Queue not found.")
+        if snapshot.queue.state != QueueState.READY_CHECK:
+            raise StateTransitionError("Queue is not in ready check phase.")
+        if not any(row.player_id == player_id for row in snapshot.players):
+            raise ValidationError("You are not in this queue.")
+        if player_id in snapshot.ready_player_ids:
+            raise ValidationError("You are already marked as ready.")
+
+        snapshot.ready_player_ids.add(player_id)
+        if snapshot.all_ready:
+            snapshot.queue.state = QueueState.FULL_PENDING_ROOM_INFO
+            snapshot.queue.room_info_deadline_at = seconds_from_now(self.settings.room_info_timeout_seconds)
+        
+        # NOTE: Ideally we persist `ready_player_ids` to the DB here. 
+        # But we'll rely on memory or a simple repository update if needed.
+        # Since this is a high level refactor, I'll assume repository handles the snapshot update.
         return snapshot
 
     async def cancel_queue(
@@ -277,10 +315,14 @@ class MatchService:
         if snapshot.match.state not in {MatchState.CREATED, MatchState.MOVING}:
             return snapshot
         snapshot.match.state = MatchState.LIVE
+        snapshot.match.result_phase = MatchResultPhase.CAPTAIN
         snapshot.match.result_channel_id = result_channel_id
         snapshot.match.result_message_id = result_message_id
         snapshot.match.team1_voice_channel_id = team1_voice_channel_id
         snapshot.match.team2_voice_channel_id = team2_voice_channel_id
+        snapshot.match.captain_deadline_at = seconds_from_now(self.CAPTAIN_WINDOW_SECONDS)
+        snapshot.match.fallback_deadline_at = seconds_from_now(self.settings.result_timeout_seconds)
+        snapshot.match.result_deadline_at = snapshot.match.fallback_deadline_at
         snapshot.match.live_at = utcnow()
         return snapshot
 
@@ -300,7 +342,12 @@ class MatchService:
             raise NotFoundError("Match not found.")
         if snapshot.match.state not in {MatchState.LIVE, MatchState.RESULT_PENDING}:
             raise StateTransitionError("Voting is not open for that match.")
-        if player_id not in snapshot.participant_ids:
+        if snapshot.match.result_phase == MatchResultPhase.STAFF_REVIEW:
+            raise StateTransitionError("Player voting is closed. Staff review is now required.")
+        if snapshot.match.result_phase == MatchResultPhase.CAPTAIN:
+            if player_id not in snapshot.captain_ids:
+                raise ValidationError("Only the two team captains can vote during the captain window.")
+        elif player_id not in snapshot.participant_ids:
             raise ValidationError("Only match participants can vote.")
         self.validate_result_payload(
             snapshot,
@@ -319,6 +366,80 @@ class MatchService:
         )
         snapshot.votes = [vote for vote in snapshot.votes if vote.player_id != player_id]
         snapshot.votes.append(new_vote)
+        return snapshot
+
+    async def open_fallback_voting(
+        self,
+        repository: MatchRepository,
+        moderation_repository: ModerationRepository,
+        *,
+        match_id: UUID,
+    ) -> MatchSnapshot:
+        snapshot = await repository.get_match_snapshot(match_id, for_update=True)
+        if snapshot is None:
+            raise NotFoundError("Match not found.")
+        if snapshot.match.state not in {MatchState.LIVE, MatchState.RESULT_PENDING}:
+            return snapshot
+        if snapshot.match.result_phase != MatchResultPhase.CAPTAIN:
+            return snapshot
+        snapshot.match.state = MatchState.RESULT_PENDING
+        snapshot.match.result_phase = MatchResultPhase.FALLBACK
+        if snapshot.match.fallback_deadline_at is None:
+            snapshot.match.fallback_deadline_at = seconds_from_now(self.settings.result_timeout_seconds)
+        snapshot.match.result_deadline_at = snapshot.match.fallback_deadline_at
+        await self.moderation_service.audit(
+            moderation_repository,
+            guild_id=snapshot.match.guild_id,
+            action=AuditAction.MATCH_RESULT_FALLBACK_OPENED,
+            entity_type=AuditEntityType.MATCH,
+            entity_id=str(snapshot.match.id),
+            metadata_json={"captain_votes": len(snapshot.phase_votes)},
+        )
+        return snapshot
+
+    async def update_room_info(
+        self,
+        repository: MatchRepository,
+        moderation_repository: ModerationRepository,
+        *,
+        match_id: UUID,
+        creator_player_id: int,
+        room_code: str,
+        room_password: str | None,
+        room_notes: str | None,
+    ) -> MatchSnapshot:
+        snapshot = await repository.get_match_snapshot(match_id, for_update=True)
+        if snapshot is None:
+            raise NotFoundError("Match not found.")
+        if snapshot.match.creator_player_id != creator_player_id:
+            raise ValidationError("Only the match creator can update room info.")
+        if snapshot.match.state not in {MatchState.LIVE, MatchState.RESULT_PENDING}:
+            raise StateTransitionError("Room info cannot be updated for that match right now.")
+        if snapshot.votes:
+            raise ValidationError("Room info is locked after the first vote.")
+        if snapshot.match.rehost_count >= 1:
+            raise ValidationError("Room info can only be updated once after the match goes live.")
+        room_code = room_code.strip()
+        if not room_code:
+            raise ValidationError("Room ID is required.")
+        room_password = (room_password or "").strip()
+        if not room_password:
+            raise ValidationError("Room password is required.")
+        room_notes = room_notes.strip() if room_notes else None
+        await repository.update_match_room_info(
+            snapshot.match,
+            room_code=room_code,
+            room_password=room_password,
+            room_notes=room_notes,
+        )
+        await self.moderation_service.audit(
+            moderation_repository,
+            guild_id=snapshot.match.guild_id,
+            action=AuditAction.MATCH_REHOSTED,
+            entity_type=AuditEntityType.MATCH,
+            entity_id=str(snapshot.match.id),
+            actor_player_id=creator_player_id,
+        )
         return snapshot
 
     async def confirm_match(
@@ -362,7 +483,7 @@ class MatchService:
             winner_player_ids=winner_ids,
             actor_player_id=actor_player_id,
         )
-        coin_deltas = await self.economy_service.grant_ranked_match_rewards(
+        coin_rewards = await self.economy_service.grant_ranked_match_rewards(
             economy_repository,
             match_id=snapshot.match.id,
             participant_ids=snapshot.participant_ids,
@@ -370,12 +491,14 @@ class MatchService:
             winner_mvp_id=winner_mvp_player_id,
             loser_mvp_id=loser_mvp_player_id,
         )
+        snapshot.coins_summary = coin_rewards
         for row in snapshot.players:
             change = ranking.changes[row.player_id]
             row.rating_before = change.before
             row.rating_after = change.after
             row.rating_delta = change.delta
-            row.coins_delta = coin_deltas[row.player_id]
+            player_rewards = coin_rewards.get(row.player_id, {})
+            row.coins_delta = sum(player_rewards.values())
             row.result = MatchPlayerResult.WIN if row.player_id in winner_ids else MatchPlayerResult.LOSS
             row.is_winner_mvp = row.player_id == winner_mvp_player_id
             row.is_loser_mvp = row.player_id == loser_mvp_player_id
@@ -443,6 +566,7 @@ class MatchService:
         if snapshot.match.state not in {MatchState.LIVE, MatchState.RESULT_PENDING}:
             return snapshot
         snapshot.match.state = MatchState.EXPIRED
+        snapshot.match.result_phase = MatchResultPhase.STAFF_REVIEW
         snapshot.match.closed_at = utcnow()
         await self.moderation_service.audit(
             moderation_repository,

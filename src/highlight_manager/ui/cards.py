@@ -7,6 +7,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
+from highlight_manager.modules.ranks.calculator import TIER_COLORS_RGB
 
 ASSET_FONT_DIR = Path(__file__).resolve().parent / "assets" / "fonts"
 FONT_REGULAR_CANDIDATES = (
@@ -60,6 +61,8 @@ class ProfileCardData:
     coins: int
     peak: int
     avatar_bytes: bytes | None = None
+    tier_code: str = "bronze"
+    streak: int = 0
 
 
 @dataclass(slots=True)
@@ -71,6 +74,7 @@ class LeaderboardCardEntry:
     winrate_text: str
     points: int
     avatar_bytes: bytes | None = None
+    tier_code: str = "bronze"
 
 
 def _buffer_from_image(image: Image.Image) -> BytesIO:
@@ -126,7 +130,7 @@ def _divider(draw: ImageDraw.ImageDraw, x1: int, y: int, x2: int) -> None:
     draw.line((x1, y, x2, y), fill=(255, 255, 255, 22), width=2)
 
 
-def _avatar_circle(size: int, avatar_bytes: bytes | None, fallback_text: str) -> Image.Image:
+def _avatar_circle(size: int, avatar_bytes: bytes | None, fallback_text: str, *, tier_code: str = "bronze") -> Image.Image:
     if avatar_bytes:
         avatar = Image.open(BytesIO(avatar_bytes)).convert("RGBA")
         avatar = ImageOps.fit(avatar, (size, size), Image.Resampling.LANCZOS)
@@ -145,9 +149,11 @@ def _avatar_circle(size: int, avatar_bytes: bytes | None, fallback_text: str) ->
     ImageDraw.Draw(mask).ellipse((0, 0, size - 1, size - 1), fill=255)
     framed = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     framed.paste(avatar, (0, 0), mask)
+    # Tier-colored ring
+    ring_color = TIER_COLORS_RGB.get(tier_code, (255, 255, 255))
     ring = Image.new("RGBA", (size + 12, size + 12), (0, 0, 0, 0))
     ring_draw = ImageDraw.Draw(ring)
-    ring_draw.ellipse((0, 0, size + 11, size + 11), fill=(0, 0, 0, 0), outline=(255, 255, 255, 140), width=4)
+    ring_draw.ellipse((0, 0, size + 11, size + 11), fill=(0, 0, 0, 0), outline=(*ring_color, 200), width=4)
     ring.paste(framed, (6, 6), framed)
     return ring
 
@@ -181,12 +187,24 @@ def render_profile_card(data: ProfileCardData) -> BytesIO:
     image = _base_canvas(1200, 760)
     _rounded_panel(image, (54, 140, 1146, 688), radius=42)
     draw = ImageDraw.Draw(image)
-    avatar = _avatar_circle(152, data.avatar_bytes, data.display_name)
+    avatar = _avatar_circle(152, data.avatar_bytes, data.display_name, tier_code=data.tier_code)
     image.alpha_composite(avatar, (84, 92))
     draw.text((94, 282), data.display_name, font=_font(FONT_BOLD_CANDIDATES, 46), fill=TEXT)
-    draw.text((96, 338), data.rank_text, font=_font(FONT_REGULAR_CANDIDATES, 24), fill=MUTED)
+
+    # Tier badge
+    tier_color = TIER_COLORS_RGB.get(data.tier_code, (255, 255, 255))
+    tier_name = data.tier_code.upper()
+    draw.rounded_rectangle((94, 338, 94 + 140, 338 + 34), radius=12, fill=(*tier_color, 180))
+    draw.text((164, 355), tier_name, font=_font(FONT_BOLD_CANDIDATES, 20), fill=TEXT, anchor="mm")
+
+    # Streak indicator
+    if data.streak >= 2:
+        streak_text = f"STREAK x{data.streak}"
+        draw.rounded_rectangle((250, 338, 250 + 160, 338 + 34), radius=12, fill=(241, 100, 55, 200))
+        draw.text((330, 355), streak_text, font=_font(FONT_BOLD_CANDIDATES, 20), fill=TEXT, anchor="mm")
+
     draw.text((894, 110), data.season_name.upper(), font=_font(FONT_BOLD_CANDIDATES, 24), fill=ACCENT)
-    _divider(draw, 94, 388, 1100)
+    _divider(draw, 94, 394, 1100)
 
     stats = [
         ("POINTS", str(data.points)),
@@ -245,7 +263,7 @@ def render_leaderboard_card(season_name: str, total_players: int, entries: list[
         elif entry.rank == 3:
             badge_color = BRONZE
         draw.text((120, y + 29), f"#{entry.rank}", font=_font(FONT_BOLD_CANDIDATES, 26), fill=badge_color, anchor="mm")
-        avatar = _avatar_circle(42, entry.avatar_bytes, entry.display_name)
+        avatar = _avatar_circle(42, entry.avatar_bytes, entry.display_name, tier_code=entry.tier_code)
         image.alpha_composite(avatar, (166, y + 8))
         draw.text((228, y + 28), entry.display_name, font=_font(FONT_BOLD_CANDIDATES, 24), fill=TEXT)
         draw.text((738, y + 28), f"{entry.wins}/{entry.losses}", font=_font(FONT_BOLD_CANDIDATES, 22), fill=TEXT)

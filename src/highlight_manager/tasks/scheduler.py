@@ -10,6 +10,7 @@ class SchedulerWorker:
         self.last_summary: dict[str, int | str] = {
             "room_info_reminders": 0,
             "room_info_timeouts": 0,
+            "captain_fallback_opens": 0,
             "result_timeouts": 0,
         }
 
@@ -18,6 +19,7 @@ class SchedulerWorker:
         match_refreshes: list[tuple[int, object]] = []
         reminder_count = 0
         room_info_timeouts = 0
+        captain_fallback_opens = 0
         result_timeouts = 0
         async with bot.runtime.session() as repos:
             now = utcnow()
@@ -56,7 +58,18 @@ class SchedulerWorker:
                     queue_refreshes.append((guild_record.discord_guild_id, snapshot))
                 room_info_timeouts += 1
 
-            for match in await repos.matches.list_due_result_timeouts(now):
+            for match in await repos.matches.list_due_captain_timeouts(now):
+                snapshot = await bot.runtime.services.matches.open_fallback_voting(
+                    repos.matches,
+                    repos.moderation,
+                    match_id=match.id,
+                )
+                guild_record = await repos.guilds.get_by_id(snapshot.match.guild_id)
+                if guild_record is not None:
+                    match_refreshes.append((guild_record.discord_guild_id, snapshot))
+                captain_fallback_opens += 1
+
+            for match in await repos.matches.list_due_fallback_timeouts(now):
                 snapshot = await bot.runtime.services.matches.expire_match(
                     repos.matches,
                     repos.moderation,
@@ -70,6 +83,7 @@ class SchedulerWorker:
         self.last_summary = {
             "room_info_reminders": reminder_count,
             "room_info_timeouts": room_info_timeouts,
+            "captain_fallback_opens": captain_fallback_opens,
             "result_timeouts": result_timeouts,
             "ran_at": now.isoformat(),
         }

@@ -12,6 +12,7 @@ from highlight_manager.db.models._helpers import TimestampMixin, enum_column
 from highlight_manager.modules.common.enums import (
     MatchMode,
     MatchPlayerResult,
+    MatchResultPhase,
     MatchState,
     QueueState,
     RatingReason,
@@ -143,9 +144,12 @@ class MatchModel(Base):
     queue_id: Mapped[UUID] = mapped_column(ForeignKey("queues.id", ondelete="RESTRICT"), nullable=False)
     match_number: Mapped[int] = mapped_column(Integer, nullable=False)
     creator_player_id: Mapped[int] = mapped_column(ForeignKey("players.id"), nullable=False)
+    team1_captain_player_id: Mapped[int | None] = mapped_column(ForeignKey("players.id"), nullable=True)
+    team2_captain_player_id: Mapped[int | None] = mapped_column(ForeignKey("players.id"), nullable=True)
     ruleset_key: Mapped[RulesetKey] = enum_column(RulesetKey, default=RulesetKey.APOSTADO)
     mode: Mapped[MatchMode] = enum_column(MatchMode, default=MatchMode.TWO_V_TWO)
     state: Mapped[MatchState] = enum_column(MatchState, default=MatchState.CREATED)
+    result_phase: Mapped[MatchResultPhase] = enum_column(MatchResultPhase, default=MatchResultPhase.CAPTAIN)
     team_size: Mapped[int] = mapped_column(Integer, nullable=False)
     room_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
     room_password: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -156,11 +160,14 @@ class MatchModel(Base):
     result_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     team1_voice_channel_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     team2_voice_channel_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    captain_deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    fallback_deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     result_deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     room_info_submitted_by_player_id: Mapped[int | None] = mapped_column(ForeignKey("players.id"), nullable=True)
     result_source: Mapped[str | None] = mapped_column(String(64), nullable=True)
     cancel_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
     force_close_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    rehost_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
     live_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

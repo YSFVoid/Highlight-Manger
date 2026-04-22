@@ -7,7 +7,7 @@ import highlight_manager.db.models  # noqa: F401
 from highlight_manager.app.config import Settings
 from highlight_manager.db.base import Base
 from highlight_manager.db.session import create_engine, create_session_factory
-from highlight_manager.modules.common.enums import MatchMode, RulesetKey
+from highlight_manager.modules.common.enums import MatchMode, MatchResultPhase, MatchState, RulesetKey
 from highlight_manager.modules.common.exceptions import ValidationError
 from highlight_manager.modules.economy.repository import EconomyRepository
 from highlight_manager.modules.economy.service import EconomyService
@@ -100,6 +100,268 @@ async def test_queue_requires_room_info_before_match_creation(session: AsyncSess
     assert match.match.queue_id == full_queue.queue.id
     assert match.match.state.value == "created"
     assert len(match.players) == 4
+
+
+@pytest.mark.asyncio
+async def test_live_match_persists_captains_and_captain_phase(session: AsyncSession) -> None:
+    settings = Settings(DISCORD_TOKEN="token", DATABASE_URL="sqlite+aiosqlite:///test.db")
+    guild_service = GuildService(settings)
+    profile_service = ProfileService()
+    season_service = SeasonService()
+    rank_service = RankService()
+    moderation_service = ModerationService()
+    economy_service = EconomyService()
+    match_service = MatchService(
+        settings,
+        profile_service=profile_service,
+        season_service=season_service,
+        rank_service=rank_service,
+        economy_service=economy_service,
+        moderation_service=moderation_service,
+    )
+
+    guilds = GuildRepository(session)
+    profiles = ProfileRepository(session)
+    seasons = SeasonRepository(session)
+    matches = MatchRepository(session)
+    moderation = ModerationRepository(session)
+
+    bundle = await guild_service.ensure_guild(guilds, 124, "Highlight")
+    season = await season_service.ensure_active(seasons, bundle.guild.id, bundle.settings)
+    creator = await profile_service.ensure_player(profiles, bundle.guild.id, 1101, display_name="Creator")
+    teammate = await profile_service.ensure_player(profiles, bundle.guild.id, 1102, display_name="Teammate")
+    opponent_one = await profile_service.ensure_player(profiles, bundle.guild.id, 1103, display_name="Opponent1")
+    opponent_two = await profile_service.ensure_player(profiles, bundle.guild.id, 1104, display_name="Opponent2")
+
+    queue = await match_service.create_queue(
+        matches,
+        profiles,
+        moderation,
+        guild_id=bundle.guild.id,
+        season_id=season.id,
+        creator_player_id=creator.id,
+        ruleset_key=RulesetKey.HIGHLIGHT,
+        mode=MatchMode.TWO_V_TWO,
+        source_channel_id=556,
+    )
+    await match_service.join_queue(matches, profiles, moderation, queue_id=queue.queue.id, player_id=teammate.id, team_number=1)
+    await match_service.join_queue(matches, profiles, moderation, queue_id=queue.queue.id, player_id=opponent_one.id, team_number=2)
+    await match_service.join_queue(matches, profiles, moderation, queue_id=queue.queue.id, player_id=opponent_two.id, team_number=2)
+    match = await match_service.submit_room_info(
+        matches,
+        profiles,
+        moderation,
+        queue_id=queue.queue.id,
+        submitter_player_id=creator.id,
+        is_moderator=False,
+        room_code="ROOM-CAPTAIN",
+        room_password="PW-CAPTAIN",
+        room_notes=None,
+    )
+    live_match = await match_service.mark_match_live(
+        matches,
+        match_id=match.match.id,
+        result_channel_id=41,
+        result_message_id=42,
+        team1_voice_channel_id=43,
+        team2_voice_channel_id=44,
+    )
+
+    assert live_match.match.result_phase == MatchResultPhase.CAPTAIN
+    assert live_match.team1_captain_player_id == creator.id
+    assert live_match.team2_captain_player_id == opponent_one.id
+    assert live_match.match.captain_deadline_at is not None
+    assert live_match.match.fallback_deadline_at is not None
+
+
+@pytest.mark.asyncio
+async def test_captain_phase_only_allows_captain_votes_and_fallback_opens(session: AsyncSession) -> None:
+    settings = Settings(DISCORD_TOKEN="token", DATABASE_URL="sqlite+aiosqlite:///test.db")
+    guild_service = GuildService(settings)
+    profile_service = ProfileService()
+    season_service = SeasonService()
+    rank_service = RankService()
+    moderation_service = ModerationService()
+    economy_service = EconomyService()
+    match_service = MatchService(
+        settings,
+        profile_service=profile_service,
+        season_service=season_service,
+        rank_service=rank_service,
+        economy_service=economy_service,
+        moderation_service=moderation_service,
+    )
+
+    guilds = GuildRepository(session)
+    profiles = ProfileRepository(session)
+    seasons = SeasonRepository(session)
+    matches = MatchRepository(session)
+    moderation = ModerationRepository(session)
+
+    bundle = await guild_service.ensure_guild(guilds, 125, "Highlight")
+    season = await season_service.ensure_active(seasons, bundle.guild.id, bundle.settings)
+    creator = await profile_service.ensure_player(profiles, bundle.guild.id, 1201, display_name="Creator")
+    teammate = await profile_service.ensure_player(profiles, bundle.guild.id, 1202, display_name="Teammate")
+    opponent_one = await profile_service.ensure_player(profiles, bundle.guild.id, 1203, display_name="Opponent1")
+    opponent_two = await profile_service.ensure_player(profiles, bundle.guild.id, 1204, display_name="Opponent2")
+
+    queue = await match_service.create_queue(
+        matches,
+        profiles,
+        moderation,
+        guild_id=bundle.guild.id,
+        season_id=season.id,
+        creator_player_id=creator.id,
+        ruleset_key=RulesetKey.APOSTADO,
+        mode=MatchMode.TWO_V_TWO,
+        source_channel_id=557,
+    )
+    await match_service.join_queue(matches, profiles, moderation, queue_id=queue.queue.id, player_id=teammate.id, team_number=1)
+    await match_service.join_queue(matches, profiles, moderation, queue_id=queue.queue.id, player_id=opponent_one.id, team_number=2)
+    await match_service.join_queue(matches, profiles, moderation, queue_id=queue.queue.id, player_id=opponent_two.id, team_number=2)
+    match = await match_service.submit_room_info(
+        matches,
+        profiles,
+        moderation,
+        queue_id=queue.queue.id,
+        submitter_player_id=creator.id,
+        is_moderator=False,
+        room_code="ROOM-VOTE",
+        room_password="PW-VOTE",
+        room_notes=None,
+    )
+    match = await match_service.mark_match_live(
+        matches,
+        match_id=match.match.id,
+        result_channel_id=51,
+        result_message_id=52,
+        team1_voice_channel_id=53,
+        team2_voice_channel_id=54,
+    )
+
+    with pytest.raises(ValidationError):
+        await match_service.submit_vote(
+            matches,
+            match_id=match.match.id,
+            player_id=teammate.id,
+            winner_team_number=1,
+            winner_mvp_player_id=creator.id,
+            loser_mvp_player_id=opponent_one.id,
+        )
+
+    after_creator_vote = await match_service.submit_vote(
+        matches,
+        match_id=match.match.id,
+        player_id=creator.id,
+        winner_team_number=1,
+        winner_mvp_player_id=creator.id,
+        loser_mvp_player_id=opponent_one.id,
+    )
+    assert len(after_creator_vote.phase_votes) == 1
+    assert after_creator_vote.all_votes_match() is False
+
+    fallback_snapshot = await match_service.open_fallback_voting(
+        matches,
+        moderation,
+        match_id=match.match.id,
+    )
+    assert fallback_snapshot.match.result_phase == MatchResultPhase.FALLBACK
+
+    after_teammate_vote = await match_service.submit_vote(
+        matches,
+        match_id=match.match.id,
+        player_id=teammate.id,
+        winner_team_number=1,
+        winner_mvp_player_id=creator.id,
+        loser_mvp_player_id=opponent_one.id,
+    )
+    assert len(after_teammate_vote.phase_votes) == 2
+    assert after_teammate_vote.match.result_phase == MatchResultPhase.FALLBACK
+
+
+@pytest.mark.asyncio
+async def test_room_update_only_allowed_once_before_first_vote(session: AsyncSession) -> None:
+    settings = Settings(DISCORD_TOKEN="token", DATABASE_URL="sqlite+aiosqlite:///test.db")
+    guild_service = GuildService(settings)
+    profile_service = ProfileService()
+    season_service = SeasonService()
+    rank_service = RankService()
+    moderation_service = ModerationService()
+    economy_service = EconomyService()
+    match_service = MatchService(
+        settings,
+        profile_service=profile_service,
+        season_service=season_service,
+        rank_service=rank_service,
+        economy_service=economy_service,
+        moderation_service=moderation_service,
+    )
+
+    guilds = GuildRepository(session)
+    profiles = ProfileRepository(session)
+    seasons = SeasonRepository(session)
+    matches = MatchRepository(session)
+    moderation = ModerationRepository(session)
+
+    bundle = await guild_service.ensure_guild(guilds, 126, "Highlight")
+    season = await season_service.ensure_active(seasons, bundle.guild.id, bundle.settings)
+    creator = await profile_service.ensure_player(profiles, bundle.guild.id, 1301, display_name="Creator")
+    opponent = await profile_service.ensure_player(profiles, bundle.guild.id, 1302, display_name="Opponent")
+
+    queue = await match_service.create_queue(
+        matches,
+        profiles,
+        moderation,
+        guild_id=bundle.guild.id,
+        season_id=season.id,
+        creator_player_id=creator.id,
+        ruleset_key=RulesetKey.HIGHLIGHT,
+        mode=MatchMode.ONE_V_ONE,
+        source_channel_id=558,
+    )
+    await match_service.join_queue(matches, profiles, moderation, queue_id=queue.queue.id, player_id=opponent.id, team_number=2)
+    match = await match_service.submit_room_info(
+        matches,
+        profiles,
+        moderation,
+        queue_id=queue.queue.id,
+        submitter_player_id=creator.id,
+        is_moderator=False,
+        room_code="ROOM-OLD",
+        room_password="PW-OLD",
+        room_notes=None,
+    )
+    match = await match_service.mark_match_live(
+        matches,
+        match_id=match.match.id,
+        result_channel_id=61,
+        result_message_id=62,
+        team1_voice_channel_id=63,
+        team2_voice_channel_id=64,
+    )
+
+    updated = await match_service.update_room_info(
+        matches,
+        moderation,
+        match_id=match.match.id,
+        creator_player_id=creator.id,
+        room_code="ROOM-NEW",
+        room_password="PW-NEW",
+        room_notes="KEY-NEW",
+    )
+    assert updated.match.room_code == "ROOM-NEW"
+    assert updated.match.rehost_count == 1
+
+    with pytest.raises(ValidationError):
+        await match_service.update_room_info(
+            matches,
+            moderation,
+            match_id=match.match.id,
+            creator_player_id=creator.id,
+            room_code="ROOM-SECOND",
+            room_password="PW-SECOND",
+            room_notes=None,
+        )
 
 
 def test_esport_ruleset_and_mode_parsing() -> None:

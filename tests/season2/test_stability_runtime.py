@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import tomllib
 from uuid import uuid4
 
+import discord
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,7 +18,7 @@ from highlight_manager.app.runtime import Repositories
 from highlight_manager.db.base import Base
 from highlight_manager.db.session import create_engine, create_session_factory
 from highlight_manager.legacy_runtime import clear_legacy_runtime_registry, get_legacy_runtime_summary
-from highlight_manager.modules.common.enums import ActivityKind, MatchMode, MatchState, QueueState, RulesetKey, WalletTransactionType
+from highlight_manager.modules.common.enums import ActivityKind, MatchMode, MatchResultPhase, MatchState, QueueState, RulesetKey, WalletTransactionType
 from highlight_manager.modules.economy.repository import EconomyRepository
 from highlight_manager.modules.economy.service import EconomyService
 from highlight_manager.modules.guilds.repository import GuildRepository
@@ -258,14 +259,30 @@ def test_queue_action_view_applies_pending_room_info_snapshot() -> None:
 
 def test_match_action_view_disables_creator_cancel_after_first_vote() -> None:
     snapshot = SimpleNamespace(
-        match=SimpleNamespace(state=MatchState.RESULT_PENDING),
+        match=SimpleNamespace(state=MatchState.RESULT_PENDING, result_phase=MatchResultPhase.CAPTAIN),
         votes=[SimpleNamespace()],
     )
 
     view = MatchActionView(SimpleNamespace(), uuid4(), snapshot=snapshot)
 
     assert view.creator_cancel.disabled is True
+    assert view.update_room_info.disabled is True
     assert view.vote_result.disabled is False
+
+
+def test_match_action_view_disables_player_buttons_in_staff_review() -> None:
+    snapshot = SimpleNamespace(
+        match=SimpleNamespace(state=MatchState.RESULT_PENDING, result_phase=MatchResultPhase.STAFF_REVIEW),
+        votes=[],
+        rehost_allowed=False,
+        creator_cancel_allowed=False,
+    )
+
+    view = MatchActionView(SimpleNamespace(), uuid4(), snapshot=snapshot)
+
+    assert view.vote_result.disabled is True
+    assert view.update_room_info.disabled is True
+    assert view.creator_cancel.disabled is True
 
 
 def test_parse_ranked_queue_request_accepts_flexible_order_and_spacing() -> None:
@@ -322,6 +339,28 @@ def test_pick_rank_source_name_prefers_clean_non_rank_text() -> None:
     )
 
     assert HighlightBot.pick_rank_source_name(fake_member) == "ANAS"
+
+
+def test_register_app_commands_uses_guild_scope_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = Settings(
+        DISCORD_TOKEN="token",
+        DATABASE_URL="sqlite+aiosqlite:///test.db",
+        DISCORD_GUILD_ID=123456789012345678,
+    )
+    monkeypatch.setattr("highlight_manager.app.bot.get_settings", lambda: settings)
+
+    bot = HighlightBot()
+    target_guild = bot.app_command_target_guild()
+
+    assert target_guild is not None
+
+    bot._register_app_commands(guild=target_guild)
+
+    global_commands = bot.tree.get_commands()
+    guild_commands = bot.tree.get_commands(guild=discord.Object(id=settings.discord_guild_id))
+
+    assert global_commands == []
+    assert sorted(command.name for command in guild_commands) == ["admin", "match", "season", "tournament-admin"]
 
 
 @pytest.mark.asyncio
@@ -489,3 +528,66 @@ async def test_submit_vote_snapshot_stays_consistent_without_reload(session: Asy
     assert len(after_first_vote.votes) == 1
     assert len(after_second_vote.votes) == 2
     assert after_second_vote.all_votes_match() is True
+
+
+@pytest.mark.asyncio
+async def test_scheduler_path_can_open_fallback_and_then_expire(session: AsyncSession) -> None:
+    settings = Settings(DISCORD_TOKEN="token", DATABASE_URL="sqlite+aiosqlite:///test.db")
+    services = build_services(settings)
+    repos = build_repositories(session)
+
+    bundle = await services.guilds.ensure_guild(repos.guilds, 9004, "Highlight")
+    season = await services.seasons.ensure_active(repos.seasons, bundle.guild.id, bundle.settings)
+    creator = await services.profiles.ensure_player(repos.profiles, bundle.guild.id, 4001, display_name="Creator")
+    teammate = await services.profiles.ensure_player(repos.profiles, bundle.guild.id, 4002, display_name="Teammate")
+    opponent_one = await services.profiles.ensure_player(repos.profiles, bundle.guild.id, 4003, display_name="OpponentOne")
+    opponent_two = await services.profiles.ensure_player(repos.profiles, bundle.guild.id, 4004, display_name="OpponentTwo")
+
+    queue = await services.matches.create_queue(
+        repos.matches,
+        repos.profiles,
+        repos.moderation,
+        guild_id=bundle.guild.id,
+        season_id=season.id,
+        creator_player_id=creator.id,
+        ruleset_key=RulesetKey.HIGHLIGHT,
+        mode=MatchMode.TWO_V_TWO,
+        source_channel_id=445,
+    )
+    await services.matches.join_queue(repos.matches, repos.profiles, repos.moderation, queue_id=queue.queue.id, player_id=teammate.id, team_number=1)
+    await services.matches.join_queue(repos.matches, repos.profiles, repos.moderation, queue_id=queue.queue.id, player_id=opponent_one.id, team_number=2)
+    await services.matches.join_queue(repos.matches, repos.profiles, repos.moderation, queue_id=queue.queue.id, player_id=opponent_two.id, team_number=2)
+    match = await services.matches.submit_room_info(
+        repos.matches,
+        repos.profiles,
+        repos.moderation,
+        queue_id=queue.queue.id,
+        submitter_player_id=creator.id,
+        is_moderator=False,
+        room_code="ROOM-9004",
+        room_password="PW-9004",
+        room_notes=None,
+    )
+    match = await services.matches.mark_match_live(
+        repos.matches,
+        match_id=match.match.id,
+        result_channel_id=101,
+        result_message_id=102,
+        team1_voice_channel_id=103,
+        team2_voice_channel_id=104,
+    )
+
+    fallback = await services.matches.open_fallback_voting(
+        repos.matches,
+        repos.moderation,
+        match_id=match.match.id,
+    )
+    assert fallback.match.result_phase == MatchResultPhase.FALLBACK
+
+    expired = await services.matches.expire_match(
+        repos.matches,
+        repos.moderation,
+        match_id=match.match.id,
+    )
+    assert expired.match.state == MatchState.EXPIRED
+    assert expired.match.result_phase == MatchResultPhase.STAFF_REVIEW

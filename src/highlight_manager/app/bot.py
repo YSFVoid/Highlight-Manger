@@ -24,6 +24,7 @@ from highlight_manager.modules.common.enums import (
     AuditAction,
     AuditEntityType,
     MatchMode,
+    MatchResultPhase,
     MatchState,
     ModerationActionType,
     QueueState,
@@ -34,6 +35,7 @@ from highlight_manager.modules.common.enums import (
 from highlight_manager.modules.common.exceptions import HighlightManagerError, NotFoundError, ValidationError
 from highlight_manager.modules.matches.ui import build_public_match_embed, build_queue_embed, build_result_match_embed
 from highlight_manager.modules.matches.states import MATCH_RESULT_OPEN_STATES, QUEUE_JOINABLE_STATES, QUEUE_MUTABLE_STATES
+from highlight_manager.modules.ranks.calculator import resolve_tier, tier_emoji
 from highlight_manager.modules.shop.ui import (
     STOREFRONT_FOOTER_PREFIX,
     build_shop_embed,
@@ -42,6 +44,7 @@ from highlight_manager.modules.shop.ui import (
 )
 from highlight_manager.modules.tournaments.ui import build_tournament_embed
 from highlight_manager.tasks.cleanup import CleanupWorker
+from highlight_manager.tasks.decay import DecayWorker
 from highlight_manager.tasks.recovery import RecoveryCoordinator
 from highlight_manager.tasks.scheduler import SchedulerWorker
 from highlight_manager.ui.cards import (
@@ -52,8 +55,9 @@ from highlight_manager.ui.cards import (
     render_profile_card,
     warm_card_assets,
 )
-from highlight_manager.ui.embeds import build_notice_embed
+from highlight_manager.ui.embeds import build_notice_embed, build_promotion_embed, build_reward_embed
 from highlight_manager.ui.renderers import build_leaderboard_embed, build_profile_embed
+from highlight_manager.ui import theme
 
 
 MENTION_ID_PATTERN = re.compile(r"\d+")
@@ -257,13 +261,47 @@ class ResultVoteModal(discord.ui.Modal):
         self.force = force
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        winner_team = int(self.winner_team.value)
-        winner_mvp = parse_optional_player_reference(self.winner_mvp.value or None)
-        loser_mvp = parse_optional_player_reference(self.loser_mvp.value or None)
+        try:
+            winner_team = int(self.winner_team.value)
+        except ValueError:
+            await interaction.response.send_message(
+                embed=self.bot.build_notice_embed("Vote failed", "Winner Team must be 1 or 2.", error=True),
+                ephemeral=True,
+            )
+            return
+        try:
+            winner_mvp = parse_optional_player_reference(self.winner_mvp.value or None)
+            loser_mvp = parse_optional_player_reference(self.loser_mvp.value or None)
+        except HighlightManagerError as exc:
+            await interaction.response.send_message(
+                embed=self.bot.build_notice_embed("Vote failed", str(exc), error=True),
+                ephemeral=True,
+            )
+            return
         if self.force:
             await self.bot.handle_force_result(interaction, self.match_id, winner_team, winner_mvp, loser_mvp)
         else:
             await self.bot.handle_vote_submission(interaction, self.match_id, winner_team, winner_mvp, loser_mvp)
+
+
+class MatchRoomUpdateModal(discord.ui.Modal, title="Update Match Room"):
+    room_code = discord.ui.TextInput(label="Room ID", placeholder="Required", max_length=128)
+    room_password = discord.ui.TextInput(label="Password", placeholder="Required", max_length=128)
+    room_notes = discord.ui.TextInput(label="Key (Optional)", required=False, max_length=128)
+
+    def __init__(self, bot: "HighlightBot", match_id: UUID) -> None:
+        super().__init__(timeout=None)
+        self.bot = bot
+        self.match_id = match_id
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.bot.handle_match_room_update(
+            interaction,
+            self.match_id,
+            room_code=self.room_code.value,
+            room_password=self.room_password.value or None,
+            room_notes=self.room_notes.value or None,
+        )
 
 
 class ForceCloseModal(discord.ui.Modal, title="Admin Cancel Match"):
@@ -286,6 +324,7 @@ class QueueActionView(discord.ui.View):
         custom_ids = [
             f"queue:{queue_id}:join:1",
             f"queue:{queue_id}:join:2",
+            f"queue:{queue_id}:ready",
             f"queue:{queue_id}:leave",
             f"queue:{queue_id}:room-info",
             f"queue:{queue_id}:admin-cancel",
@@ -299,29 +338,38 @@ class QueueActionView(discord.ui.View):
         queue = snapshot.queue
         queue_joinable = queue.state in QUEUE_JOINABLE_STATES
         queue_mutable = queue.state in QUEUE_MUTABLE_STATES
-        self.join_team_1.disabled = not queue_joinable or len(snapshot.team1_ids) >= queue.team_size
-        self.join_team_2.disabled = not queue_joinable or len(snapshot.team2_ids) >= queue.team_size
+        t1_full = len(snapshot.team1_ids) >= queue.team_size
+        t2_full = len(snapshot.team2_ids) >= queue.team_size
+        self.join_team_1.disabled = not queue_joinable or t1_full
+        self.join_team_1.label = "🔒 Team 1 FULL" if t1_full else "⚔️ Join Team 1"
+        self.join_team_2.disabled = not queue_joinable or t2_full
+        self.join_team_2.label = "🔒 Team 2 FULL" if t2_full else "🛡️ Join Team 2"
+        self.mark_ready.disabled = queue.state != QueueState.READY_CHECK
         self.leave_queue.disabled = not queue_mutable
         self.enter_room_info.disabled = queue.state != QueueState.FULL_PENDING_ROOM_INFO
         self.admin_cancel.disabled = not queue_mutable
 
-    @discord.ui.button(label="Join Team 1", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="⚔️ Join Team 1", style=discord.ButtonStyle.danger)
     async def join_team_1(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self.bot.handle_queue_join(interaction, self.queue_id, 1)
 
-    @discord.ui.button(label="Join Team 2", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="🛡️ Join Team 2", style=discord.ButtonStyle.success)
     async def join_team_2(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self.bot.handle_queue_join(interaction, self.queue_id, 2)
 
-    @discord.ui.button(label="Leave Queue", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="✅ Ready", style=discord.ButtonStyle.success)
+    async def mark_ready(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.bot.handle_queue_ready(interaction, self.queue_id)
+
+    @discord.ui.button(label="🚪 Leave Queue", style=discord.ButtonStyle.secondary)
     async def leave_queue(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self.bot.handle_queue_leave(interaction, self.queue_id)
 
-    @discord.ui.button(label="Enter Room Info", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="🔑 Enter Room Info", style=discord.ButtonStyle.primary)
     async def enter_room_info(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await interaction.response.send_modal(RoomInfoModal(self.bot, self.queue_id))
 
-    @discord.ui.button(label="Admin Cancel", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="❌ Admin Cancel", style=discord.ButtonStyle.danger)
     async def admin_cancel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self.bot.handle_queue_admin_cancel(interaction, self.queue_id)
 
@@ -333,6 +381,7 @@ class MatchActionView(discord.ui.View):
         self.match_id = match_id
         custom_ids = [
             f"match:{match_id}:vote-result",
+            f"match:{match_id}:update-room-info",
             f"match:{match_id}:creator-cancel",
             f"match:{match_id}:admin-cancel",
             f"match:{match_id}:admin-force-result",
@@ -344,27 +393,35 @@ class MatchActionView(discord.ui.View):
 
     def apply_snapshot(self, snapshot) -> None:
         state = snapshot.match.state
-        voting_open = state in {MatchState.LIVE, MatchState.RESULT_PENDING}
+        result_phase = getattr(snapshot.match, "result_phase", MatchResultPhase.CAPTAIN)
+        rehost_allowed = getattr(snapshot, "rehost_allowed", not bool(getattr(snapshot, "votes", [])))
+        creator_cancel_allowed = getattr(snapshot, "creator_cancel_allowed", not bool(getattr(snapshot, "votes", [])))
+        voting_open = state in {MatchState.LIVE, MatchState.RESULT_PENDING} and result_phase != MatchResultPhase.STAFF_REVIEW
         self.vote_result.disabled = not voting_open
-        self.creator_cancel.disabled = (not voting_open) or bool(snapshot.votes)
+        self.update_room_info.disabled = (not voting_open) or (not rehost_allowed)
+        self.creator_cancel.disabled = (not voting_open) or (not creator_cancel_allowed)
         self.admin_cancel.disabled = state in {MatchState.CONFIRMED, MatchState.CANCELLED, MatchState.FORCE_CLOSED}
         self.admin_force_result.disabled = state not in MATCH_RESULT_OPEN_STATES
 
-    @discord.ui.button(label="Vote Result", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="🗳️ Vote Result", style=discord.ButtonStyle.primary)
     async def vote_result(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await interaction.response.send_modal(
             ResultVoteModal(self.bot, self.match_id, force=False, title="Vote Match Result")
         )
 
-    @discord.ui.button(label="Creator Cancel", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="🔑 Update Room Info", style=discord.ButtonStyle.secondary)
+    async def update_room_info(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.send_modal(MatchRoomUpdateModal(self.bot, self.match_id))
+
+    @discord.ui.button(label="🚪 Creator Cancel", style=discord.ButtonStyle.secondary)
     async def creator_cancel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self.bot.handle_creator_cancel(interaction, self.match_id)
 
-    @discord.ui.button(label="Admin Cancel", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="❌ Admin Cancel", style=discord.ButtonStyle.danger)
     async def admin_cancel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await interaction.response.send_modal(ForceCloseModal(self.bot, self.match_id))
 
-    @discord.ui.button(label="Admin Force Result", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="⚡ Admin Force Result", style=discord.ButtonStyle.success)
     async def admin_force_result(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await interaction.response.send_modal(
             ResultVoteModal(self.bot, self.match_id, force=True, title="Admin Force Result")
@@ -440,6 +497,13 @@ class PlayerCommands(commands.Cog):
         if ctx.guild is None or ctx.author.bot:
             return
         assert isinstance(ctx.author, discord.Member)
+        # If no arguments, show a visual picker instead of an error
+        if not queue_request.strip():
+            await ctx.reply(
+                embed=self.bot.build_play_picker_embed(ctx.clean_prefix),
+                view=self.bot.build_play_picker_view(),
+            )
+            return
         try:
             mode, ruleset = parse_ranked_queue_request(queue_request)
             snapshot = await self.bot.create_ranked_queue(
@@ -562,6 +626,11 @@ class HighlightBot(commands.Bot):
             "canonical_runtime": legacy_summary["canonical_entrypoint"],
             "legacy_import_count": legacy_summary["legacy_import_count"],
         }
+
+    def app_command_target_guild(self) -> discord.Object | None:
+        if not self.settings.discord_guild_id:
+            return None
+        return discord.Object(id=self.settings.discord_guild_id)
 
     def build_notice_embed(self, title: str, description: str, *, error: bool = False) -> discord.Embed:
         return build_notice_embed(title, description, error=error)
@@ -755,6 +824,59 @@ class HighlightBot(commands.Bot):
             self.log_duration("render_completed", started_at, surface="help_banner", success=False, prefix=prefix, error=type(exc).__name__)
             return embed, None
 
+    def build_play_picker_embed(self, prefix: str) -> discord.Embed:
+        embed = discord.Embed(
+            title=f"{theme.EMOJI_SWORD} Play Ranked",
+            description=(
+                f"Use the buttons below to quickly start a queue, or type it manually:\n"
+                f"`{prefix}play <mode> <ruleset>`\n\n"
+                f"**Modes:** `1v1`, `2v2`, `3v3`, `4v4`, `6v6`\n"
+                f"**Rulesets:** `apostado`, `highlight`, `esport`"
+            ),
+            colour=theme.PRIMARY,
+        )
+        embed.set_footer(text="Highlight Manger  •  Quick Play")
+        return embed
+
+    def build_play_picker_view(self) -> discord.ui.View:
+        class PlayPickerView(discord.ui.View):
+            def __init__(self, bot: "HighlightBot"):
+                super().__init__(timeout=180)
+                self.bot = bot
+
+            @discord.ui.button(label="💰 4v4 Apostado", style=discord.ButtonStyle.primary)
+            async def ap_4v4(self, interaction: discord.Interaction, button: discord.ui.Button):
+                await self._create(interaction, MatchMode.FOUR_V_FOUR, RulesetKey.APOSTADO)
+
+            @discord.ui.button(label="🔦 4v4 Highlight", style=discord.ButtonStyle.secondary)
+            async def hl_4v4(self, interaction: discord.Interaction, button: discord.ui.Button):
+                await self._create(interaction, MatchMode.FOUR_V_FOUR, RulesetKey.HIGHLIGHT)
+
+            @discord.ui.button(label="🏆 4v4 Esport", style=discord.ButtonStyle.success)
+            async def es_4v4(self, interaction: discord.Interaction, button: discord.ui.Button):
+                await self._create(interaction, MatchMode.FOUR_V_FOUR, RulesetKey.ESPORT)
+
+            async def _create(self, interaction: discord.Interaction, mode: MatchMode, ruleset: RulesetKey):
+                try:
+                    await interaction.response.defer()
+                    snapshot = await self.bot.create_ranked_queue(
+                        interaction.guild,
+                        interaction.user,
+                        mode,
+                        ruleset,
+                        interaction.channel_id,
+                    )
+                    message = await interaction.followup.send(
+                        embed=build_queue_embed(snapshot),
+                        view=self.bot.build_queue_view(snapshot.queue.id, snapshot=snapshot),
+                    )
+                    async with self.bot.runtime.session() as repos:
+                        await repos.matches.set_queue_public_message_id(snapshot.queue.id, message.id)
+                except HighlightManagerError as exc:
+                    await interaction.followup.send(embed=self.bot.build_notice_embed("Queue creation failed", str(exc), error=True), ephemeral=True)
+
+        return PlayPickerView(self)
+
     def build_latest_update_embed(self, prefix: str) -> discord.Embed:
         embed = discord.Embed(
             title="Highlight Manger V2 Latest Update",
@@ -874,19 +996,36 @@ class HighlightBot(commands.Bot):
     async def ensure_runtime_schema(self) -> None:
         async with self.runtime.engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
-            existing_columns = await connection.run_sync(
+            guild_setting_columns = await connection.run_sync(
                 lambda sync_connection: {
                     column["name"] for column in inspect(sync_connection).get_columns("guild_settings")
                 }
             )
-            compatibility_columns = {
+            guild_setting_compatibility_columns = {
                 "waiting_voice_channel_ids": "ALTER TABLE guild_settings ADD COLUMN waiting_voice_channel_ids TEXT",
                 "apostado_channel_ids": "ALTER TABLE guild_settings ADD COLUMN apostado_channel_ids TEXT",
                 "highlight_channel_ids": "ALTER TABLE guild_settings ADD COLUMN highlight_channel_ids TEXT",
                 "esport_channel_ids": "ALTER TABLE guild_settings ADD COLUMN esport_channel_ids TEXT",
             }
-            for column_name, statement in compatibility_columns.items():
-                if column_name in existing_columns:
+            for column_name, statement in guild_setting_compatibility_columns.items():
+                if column_name in guild_setting_columns:
+                    continue
+                await connection.execute(text(statement))
+            match_columns = await connection.run_sync(
+                lambda sync_connection: {
+                    column["name"] for column in inspect(sync_connection).get_columns("matches")
+                }
+            )
+            match_compatibility_columns = {
+                "team1_captain_player_id": "ALTER TABLE matches ADD COLUMN team1_captain_player_id INTEGER",
+                "team2_captain_player_id": "ALTER TABLE matches ADD COLUMN team2_captain_player_id INTEGER",
+                "result_phase": "ALTER TABLE matches ADD COLUMN result_phase TEXT",
+                "captain_deadline_at": "ALTER TABLE matches ADD COLUMN captain_deadline_at TIMESTAMP",
+                "fallback_deadline_at": "ALTER TABLE matches ADD COLUMN fallback_deadline_at TIMESTAMP",
+                "rehost_count": "ALTER TABLE matches ADD COLUMN rehost_count INTEGER DEFAULT 0 NOT NULL",
+            }
+            for column_name, statement in match_compatibility_columns.items():
+                if column_name in match_columns:
                     continue
                 await connection.execute(text(statement))
             await connection.execute(
@@ -899,6 +1038,54 @@ class HighlightBot(commands.Bot):
                     """
                 )
             )
+            await connection.execute(
+                text(
+                    """
+                    UPDATE matches
+                    SET team1_captain_player_id = creator_player_id
+                    WHERE team1_captain_player_id IS NULL
+                    """
+                )
+            )
+            await connection.execute(
+                text(
+                    """
+                    UPDATE matches
+                    SET team2_captain_player_id = (
+                        SELECT player_id
+                        FROM match_players
+                        WHERE match_players.match_id = matches.id
+                          AND match_players.team_number = 2
+                        ORDER BY match_players.id ASC
+                        LIMIT 1
+                    )
+                    WHERE team2_captain_player_id IS NULL
+                    """
+                )
+            )
+            await connection.execute(
+                text(
+                    """
+                    UPDATE matches
+                    SET result_phase = CASE
+                        WHEN state = 'expired' THEN 'staff_review'
+                        WHEN state IN ('live', 'result_pending') THEN 'fallback'
+                        ELSE 'captain'
+                    END
+                    WHERE result_phase IS NULL OR result_phase = ''
+                    """
+                )
+            )
+            await connection.execute(
+                text(
+                    """
+                    UPDATE matches
+                    SET fallback_deadline_at = result_deadline_at
+                    WHERE fallback_deadline_at IS NULL
+                      AND result_deadline_at IS NOT NULL
+                    """
+                )
+            )
 
     async def setup_hook(self) -> None:
         await self.ensure_runtime_schema()
@@ -906,17 +1093,16 @@ class HighlightBot(commands.Bot):
         self.refresh_runtime_health()
         await self.warm_runtime_assets()
         await self.add_cog(PlayerCommands(self))
-        self._register_app_commands()
+        target_guild = self.app_command_target_guild()
+        self._register_app_commands(guild=target_guild)
         for section in ShopSection:
             self.add_view(self.build_storefront_order_view(section))
-        if self.settings.discord_guild_id:
+        if target_guild is not None:
             try:
-                guild_object = discord.Object(id=self.settings.discord_guild_id)
-                self.tree.clear_commands(guild=guild_object)
-                self.tree.copy_global_to(guild=guild_object)
                 self.tree.clear_commands(guild=None)
                 await self.tree.sync()
-                synced = await self.tree.sync(guild=guild_object)
+                synced = await self.tree.sync(guild=target_guild)
+                self._guild_commands_synced = True
                 self.command_sync_status = {
                     "scope": "guild",
                     "success": True,
@@ -1013,6 +1199,39 @@ class HighlightBot(commands.Bot):
             voice_ready_guilds=self.recovery.connected_guild_count,
         )
         self.logger.info("bot_ready", user=str(self.user), guilds=len(self.guilds))
+
+    async def on_message(self, message: discord.Message) -> None:
+        if message.author.bot or message.guild is None:
+            await super().on_message(message)
+            return
+
+        async with self.runtime.session() as repos:
+            bundle = await self.ensure_guild_bundle(repos, message.guild)
+            is_staff = await self.runtime.services.guilds.member_is_admin(
+                repos.guilds,
+                bundle.guild.id,
+                [role.id for role in getattr(message.author, "roles", [])],
+            )
+            
+            if not is_staff:
+                all_ruleset_channels = set()
+                for key in RulesetKey:
+                    all_ruleset_channels.update(self.get_ruleset_channel_ids(bundle.settings, key))
+                
+                if message.channel.id in all_ruleset_channels:
+                    prefixes = await self.command_prefix(self, message)
+                    if isinstance(prefixes, str):
+                        prefixes = [prefixes]
+                    
+                    is_command = any(message.content.startswith(p) for p in prefixes)
+                    if not is_command:
+                        try:
+                            await message.delete()
+                        except Exception:
+                            pass
+                        return
+
+        await super().on_message(message)
 
     async def on_command_error(self, context: commands.Context, exception: commands.CommandError) -> None:
         original = getattr(exception, "original", exception)
@@ -1370,7 +1589,36 @@ class HighlightBot(commands.Bot):
                 joined_guild_at=member.joined_at,
             )
             wallet = await repos.economy.ensure_wallet(player.id)
-        return self.build_notice_embed("Coins", f"You have **{wallet.balance}** coins.")
+            season = await self.runtime.services.seasons.ensure_active(repos.seasons, bundle.guild.id, bundle.settings)
+            sp = await repos.seasons.get_season_player(season.id, player.id)
+            cheapest_item = await self.runtime.services.shop.get_cheapest_coin_item(repos.shop, bundle.guild.id)
+        matches_played = sp.matches_played if sp else 0
+        next_milestone = None
+        from highlight_manager.modules.economy.ledger import MILESTONE_THRESHOLDS
+        for threshold in MILESTONE_THRESHOLDS:
+            if matches_played < threshold:
+                next_milestone = threshold
+                break
+        milestone_text = f"Next milestone: **{next_milestone}** matches" if next_milestone else "All milestones complete! 🎉"
+        cheapest_text = f"Cheapest shop item: **{cheapest_item.price_coins}** coins (`{cheapest_item.name}`)" if cheapest_item else "No coin items available"
+        embed = discord.Embed(
+            title=f"{theme.EMOJI_COIN} Wallet — {member.display_name}",
+            description=(
+                f"**Balance:** `{wallet.balance}` coins\n"
+                f"**Lifetime Earned:** `{wallet.lifetime_earned}` coins\n"
+                f"**Lifetime Spent:** `{wallet.lifetime_spent}` coins\n\n"
+                f"{theme.EMOJI_STAR} {milestone_text}\n"
+                f"{theme.EMOJI_SPARKLE} {cheapest_text}\n\n"
+                f"**How to earn:**\n"
+                f"  {theme.EMOJI_SWORD} Play a match → +5 coins\n"
+                f"  {theme.EMOJI_TROPHY} Win → +5 bonus\n"
+                f"  {theme.EMOJI_FIRE} Win streak (3+) → +2 to +5 bonus\n"
+                f"  {theme.EMOJI_STAR} First match of the day → +10 bonus"
+            ),
+            colour=theme.ACCENT,
+        )
+        embed.set_footer(text="Highlight Manger  •  Economy")
+        return embed
 
     async def ensure_storefront_sections(self, guild: discord.Guild, repos, guild_id: int) -> dict[ShopSection, object]:
         configs = await self.runtime.services.shop.ensure_section_configs(repos.shop, guild_id)
@@ -1579,6 +1827,48 @@ class HighlightBot(commands.Bot):
                 error=type(exc).__name__,
             )
 
+    async def handle_queue_ready(self, interaction: discord.Interaction, queue_id: UUID) -> None:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            return
+        started_at = time.monotonic()
+        try:
+            await self.acknowledge_interaction(
+                interaction,
+                operation="queue_ready",
+                started_at=started_at,
+                update_message=True,
+            )
+            async with self.runtime.session() as repos:
+                player = await self.runtime.services.profiles.require_not_blacklisted(repos.profiles, interaction.guild.id, interaction.user.id)
+                snapshot = await self.runtime.services.matches.mark_ready(
+                    repos.matches,
+                    repos.profiles,
+                    queue_id=queue_id,
+                    player_id=player.id,
+                )
+            await self.edit_interaction_message(
+                interaction,
+                embed=build_queue_embed(snapshot),
+                view=self.build_queue_view(queue_id, snapshot=snapshot),
+            )
+            self.log_duration(
+                "interaction_completed",
+                started_at,
+                operation="queue_ready",
+                queue_id=str(queue_id),
+                success=True,
+            )
+        except HighlightManagerError as exc:
+            await self.send_interaction_notice(interaction, "Ready check failed", str(exc), error=True, ephemeral=True)
+            self.log_duration(
+                "interaction_completed",
+                started_at,
+                operation="queue_ready",
+                queue_id=str(queue_id),
+                success=False,
+                error=type(exc).__name__,
+            )
+
     async def handle_queue_leave(self, interaction: discord.Interaction, queue_id: UUID) -> None:
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
             return
@@ -1689,6 +1979,7 @@ class HighlightBot(commands.Bot):
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
             return
         started_at = time.monotonic()
+        player_id: int | None = None
         try:
             is_moderator = await self.is_staff_member(interaction.guild, interaction.user)
             await self.acknowledge_interaction(
@@ -1707,6 +1998,7 @@ class HighlightBot(commands.Bot):
                     global_name=interaction.user.global_name,
                     joined_guild_at=interaction.user.joined_at,
                 )
+                player_id = player.id
                 match_snapshot = await self.runtime.services.matches.submit_room_info(
                     repos.matches,
                     repos.profiles,
@@ -1747,8 +2039,55 @@ class HighlightBot(commands.Bot):
                 queue_id=str(queue_id),
                 success=True,
             )
-        except HighlightManagerError as exc:
-            await self.edit_or_followup_notice(interaction, "Room info failed", str(exc), error=True, ephemeral=True)
+        except Exception as exc:  # pragma: no cover - safety path exercised via higher-level tests
+            if isinstance(exc, HighlightManagerError):
+                await self.edit_or_followup_notice(interaction, "Room info failed", str(exc), error=True, ephemeral=True)
+                self.log_duration(
+                    "interaction_completed",
+                    started_at,
+                    operation="submit_room_info",
+                    queue_id=str(queue_id),
+                    success=False,
+                    error=type(exc).__name__,
+                )
+                return
+            self.logger.exception(
+                "match_provision_failed",
+                guild_id=interaction.guild.id,
+                queue_id=str(queue_id),
+                error=str(exc),
+            )
+            failure_snapshot = None
+            if player_id is not None:
+                async with self.runtime.session() as repos:
+                    queue_snapshot = await repos.matches.get_queue_snapshot(queue_id)
+                    match_id = queue_snapshot.queue.converted_match_id if queue_snapshot is not None else None
+                    if match_id is not None:
+                        failure_snapshot = await self.runtime.services.matches.force_close_match(
+                            repos.matches,
+                            repos.profiles,
+                            repos.moderation,
+                            match_id=match_id,
+                            actor_player_id=player_id,
+                            reason="Automatic match setup failed after multiple retry attempts.",
+                        )
+            if failure_snapshot is not None:
+                await self.finalize_terminal_match(interaction.guild, failure_snapshot)
+                await self.edit_or_followup_notice(
+                    interaction,
+                    "Match setup failed",
+                    "The official match could not finish building and was closed safely. Staff can review the source channel summary.",
+                    error=True,
+                    ephemeral=True,
+                )
+            else:
+                await self.edit_or_followup_notice(
+                    interaction,
+                    "Match setup failed",
+                    "The bot hit a startup error while building the official match.",
+                    error=True,
+                    ephemeral=True,
+                )
             self.log_duration(
                 "interaction_completed",
                 started_at,
@@ -1801,6 +2140,7 @@ class HighlightBot(commands.Bot):
                         winner_mvp_player_id=final_vote.winner_mvp_player_id,
                         loser_mvp_player_id=final_vote.loser_mvp_player_id,
                         actor_player_id=player.id,
+                        source=f"{snapshot.match.result_phase.value}_consensus",
                     )
             if snapshot.match.state == MatchState.CONFIRMED:
                 await interaction.edit_original_response(
@@ -1808,8 +2148,14 @@ class HighlightBot(commands.Bot):
                 )
                 await self.finalize_terminal_match(interaction.guild, snapshot)
             else:
+                if snapshot.match.result_phase == MatchResultPhase.CAPTAIN and len(snapshot.phase_votes) == len(snapshot.captain_ids):
+                    message = "Captain vote saved. The captains do not agree yet, so backup voting will open when the captain window ends."
+                elif snapshot.match.result_phase == MatchResultPhase.CAPTAIN:
+                    message = "Captain vote saved. Waiting for the other team captain."
+                else:
+                    message = "Fallback vote saved."
                 await interaction.edit_original_response(
-                    embed=self.build_notice_embed("Vote recorded", "Your result vote has been saved."),
+                    embed=self.build_notice_embed("Vote recorded", message),
                 )
                 await self.refresh_match_messages(interaction.guild, snapshot)
             self.log_duration(
@@ -1825,6 +2171,66 @@ class HighlightBot(commands.Bot):
                 "interaction_completed",
                 started_at,
                 operation="submit_vote",
+                match_id=str(match_id),
+                success=False,
+                error=type(exc).__name__,
+            )
+
+    async def handle_match_room_update(
+        self,
+        interaction: discord.Interaction,
+        match_id: UUID,
+        *,
+        room_code: str,
+        room_password: str | None,
+        room_notes: str | None,
+    ) -> None:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            return
+        started_at = time.monotonic()
+        try:
+            await self.acknowledge_interaction(
+                interaction,
+                operation="update_match_room",
+                started_at=started_at,
+                ephemeral=True,
+            )
+            async with self.runtime.session() as repos:
+                bundle = await self.runtime.services.guilds.ensure_guild(repos.guilds, interaction.guild.id, interaction.guild.name)
+                actor = await self.runtime.services.profiles.ensure_player(
+                    repos.profiles,
+                    bundle.guild.id,
+                    interaction.user.id,
+                    display_name=interaction.user.display_name,
+                    global_name=interaction.user.global_name,
+                    joined_guild_at=interaction.user.joined_at,
+                )
+                snapshot = await self.runtime.services.matches.update_room_info(
+                    repos.matches,
+                    repos.moderation,
+                    match_id=match_id,
+                    creator_player_id=actor.id,
+                    room_code=room_code,
+                    room_password=room_password,
+                    room_notes=room_notes,
+                )
+            await self.refresh_match_messages(interaction.guild, snapshot)
+            await interaction.edit_original_response(
+                embed=self.build_notice_embed("Room info updated", "The live room details were updated for this match."),
+            )
+            self.log_duration(
+                "interaction_completed",
+                started_at,
+                operation="update_match_room",
+                match_id=str(match_id),
+                success=True,
+            )
+        except HighlightManagerError as exc:
+            await self.edit_or_followup_notice(interaction, "Room update failed", str(exc), error=True, ephemeral=True)
+            self.log_duration(
+                "interaction_completed",
+                started_at,
+                operation="update_match_room",
                 match_id=str(match_id),
                 success=False,
                 error=type(exc).__name__,
@@ -2042,101 +2448,124 @@ class HighlightBot(commands.Bot):
 
     async def provision_match_resources(self, guild: discord.Guild, snapshot):
         started_at = time.monotonic()
-        async with self.runtime.session() as repos:
-            bundle = await self.ensure_guild_bundle(repos, guild)
-            category = guild.get_channel(bundle.settings.match_category_id) if bundle.settings.match_category_id else None
-            result_category = guild.get_channel(bundle.settings.result_category_id) if bundle.settings.result_category_id else None
-            waiting_voice_channel_ids = set(self.get_waiting_voice_channel_ids(bundle.settings))
-            snapshot.match.state = MatchState.MOVING
-            overwrites = {
-                guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            }
-            if guild.me:
-                overwrites[guild.me] = discord.PermissionOverwrite(
-                    view_channel=True,
-                    send_messages=True,
-                    read_message_history=True,
-                    embed_links=True,
+        max_attempts = 3
+        last_error: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            created_channels: list[discord.abc.GuildChannel] = []
+            try:
+                async with self.runtime.session() as repos:
+                    bundle = await self.ensure_guild_bundle(repos, guild)
+                    category = guild.get_channel(bundle.settings.match_category_id) if bundle.settings.match_category_id else None
+                    result_category = guild.get_channel(bundle.settings.result_category_id) if bundle.settings.result_category_id else None
+                    waiting_voice_channel_ids = set(self.get_waiting_voice_channel_ids(bundle.settings))
+                    snapshot.match.state = MatchState.MOVING
+                    overwrites = {
+                        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                    }
+                    if guild.me:
+                        overwrites[guild.me] = discord.PermissionOverwrite(
+                            view_channel=True,
+                            send_messages=True,
+                            read_message_history=True,
+                            embed_links=True,
+                        )
+                    staff_roles = await self.runtime.services.guilds.get_staff_roles(repos.guilds, bundle.guild.id)
+                    for role_id in staff_roles.admin_role_ids | staff_roles.moderator_role_ids:
+                        role = guild.get_role(role_id)
+                        if role is not None:
+                            overwrites[role] = discord.PermissionOverwrite(
+                                view_channel=True,
+                                send_messages=True,
+                                read_message_history=True,
+                            )
+                    for discord_user_id in snapshot.player_discord_ids.values():
+                        member = guild.get_member(discord_user_id)
+                        if member is not None:
+                            overwrites[member] = discord.PermissionOverwrite(
+                                view_channel=True,
+                                send_messages=True,
+                                read_message_history=True,
+                            )
+
+                    voice_category = category if isinstance(category, discord.CategoryChannel) else None
+                    result_parent = result_category if isinstance(result_category, discord.CategoryChannel) else None
+
+                    team1_channel = await guild.create_voice_channel(
+                        name=f"TEAM 1 - Match #{snapshot.match.match_number:03d}",
+                        category=voice_category,
+                    )
+                    created_channels.append(team1_channel)
+                    team2_channel = await guild.create_voice_channel(
+                        name=f"TEAM 2 - Match #{snapshot.match.match_number:03d}",
+                        category=voice_category,
+                    )
+                    created_channels.append(team2_channel)
+                    result_channel = await guild.create_text_channel(
+                        name=f"match-{snapshot.match.match_number:03d}",
+                        category=result_parent,
+                        overwrites=overwrites,
+                    )
+                    created_channels.append(result_channel)
+
+                    result_message = await result_channel.send(
+                        embed=build_result_match_embed(snapshot),
+                        view=self.build_match_view(snapshot.match.id, snapshot=snapshot),
+                    )
+
+                    move_tasks: list[asyncio.Future] = []
+                    for player_id in snapshot.team1_ids:
+                        member = guild.get_member(snapshot.player_discord_ids.get(player_id, 0))
+                        if (
+                            member
+                            and member.voice
+                            and member.voice.channel
+                            and (not waiting_voice_channel_ids or member.voice.channel.id in waiting_voice_channel_ids)
+                        ):
+                            move_tasks.append(member.move_to(team1_channel))
+                    for player_id in snapshot.team2_ids:
+                        member = guild.get_member(snapshot.player_discord_ids.get(player_id, 0))
+                        if (
+                            member
+                            and member.voice
+                            and member.voice.channel
+                            and (not waiting_voice_channel_ids or member.voice.channel.id in waiting_voice_channel_ids)
+                        ):
+                            move_tasks.append(member.move_to(team2_channel))
+                    if move_tasks:
+                        await asyncio.gather(*move_tasks, return_exceptions=True)
+
+                    live_snapshot = await self.runtime.services.matches.mark_match_live(
+                        repos.matches,
+                        match_id=snapshot.match.id,
+                        result_channel_id=result_channel.id,
+                        result_message_id=result_message.id,
+                        team1_voice_channel_id=team1_channel.id,
+                        team2_voice_channel_id=team2_channel.id,
+                    )
+                    self.log_duration(
+                        "match_resource_provisioned",
+                        started_at,
+                        guild_id=guild.id,
+                        match_id=str(snapshot.match.id),
+                        result_channel_id=result_channel.id,
+                        attempt=attempt,
+                    )
+                    return live_snapshot
+            except Exception as exc:
+                last_error = exc
+                for channel in reversed(created_channels):
+                    await self.delete_channel_if_exists(channel)
+                self.logger.warning(
+                    "match_resource_provision_retry",
+                    guild_id=guild.id,
+                    match_id=str(snapshot.match.id),
+                    attempt=attempt,
+                    error=str(exc),
                 )
-            staff_roles = await self.runtime.services.guilds.get_staff_roles(repos.guilds, bundle.guild.id)
-            for role_id in staff_roles.admin_role_ids | staff_roles.moderator_role_ids:
-                role = guild.get_role(role_id)
-                if role is not None:
-                    overwrites[role] = discord.PermissionOverwrite(
-                        view_channel=True,
-                        send_messages=True,
-                        read_message_history=True,
-                    )
-            for discord_user_id in snapshot.player_discord_ids.values():
-                member = guild.get_member(discord_user_id)
-                if member is not None:
-                    overwrites[member] = discord.PermissionOverwrite(
-                        view_channel=True,
-                        send_messages=True,
-                        read_message_history=True,
-                    )
-
-            voice_category = category if isinstance(category, discord.CategoryChannel) else None
-            result_parent = result_category if isinstance(result_category, discord.CategoryChannel) else None
-            team1_channel, team2_channel, result_channel = await asyncio.gather(
-                guild.create_voice_channel(
-                    name=f"TEAM 1 - Match #{snapshot.match.match_number:03d}",
-                    category=voice_category,
-                ),
-                guild.create_voice_channel(
-                    name=f"TEAM 2 - Match #{snapshot.match.match_number:03d}",
-                    category=voice_category,
-                ),
-                guild.create_text_channel(
-                    name=f"match-{snapshot.match.match_number:03d}",
-                    category=result_parent,
-                    overwrites=overwrites,
-                ),
-            )
-
-            result_message = await result_channel.send(
-                embed=build_result_match_embed(snapshot),
-                view=self.build_match_view(snapshot.match.id, snapshot=snapshot),
-            )
-
-            move_tasks: list[asyncio.Future] = []
-            for player_id in snapshot.team1_ids:
-                member = guild.get_member(snapshot.player_discord_ids.get(player_id, 0))
-                if (
-                    member
-                    and member.voice
-                    and member.voice.channel
-                    and (not waiting_voice_channel_ids or member.voice.channel.id in waiting_voice_channel_ids)
-                ):
-                    move_tasks.append(member.move_to(team1_channel))
-            for player_id in snapshot.team2_ids:
-                member = guild.get_member(snapshot.player_discord_ids.get(player_id, 0))
-                if (
-                    member
-                    and member.voice
-                    and member.voice.channel
-                    and (not waiting_voice_channel_ids or member.voice.channel.id in waiting_voice_channel_ids)
-                ):
-                    move_tasks.append(member.move_to(team2_channel))
-            if move_tasks:
-                await asyncio.gather(*move_tasks, return_exceptions=True)
-
-            live_snapshot = await self.runtime.services.matches.mark_match_live(
-                repos.matches,
-                match_id=snapshot.match.id,
-                result_channel_id=result_channel.id,
-                result_message_id=result_message.id,
-                team1_voice_channel_id=team1_channel.id,
-                team2_voice_channel_id=team2_channel.id,
-            )
-            self.log_duration(
-                "match_resource_provisioned",
-                started_at,
-                guild_id=guild.id,
-                match_id=str(snapshot.match.id),
-                result_channel_id=result_channel.id,
-            )
-            return live_snapshot
+                if attempt < max_attempts:
+                    await asyncio.sleep(1)
+        assert last_error is not None
+        raise last_error
 
     def build_match_terminal_notice(self, snapshot) -> discord.Embed:
         match = snapshot.match
@@ -2484,7 +2913,7 @@ class HighlightBot(commands.Bot):
                 error=type(exc).__name__,
             )
 
-    def _register_app_commands(self) -> None:
+    def _register_app_commands(self, *, guild: discord.Object | None = None) -> None:
         admin_group = app_commands.Group(name="admin", description="Highlight Manger admin commands")
         season_group = app_commands.Group(name="season", description="Season controls")
         match_group = app_commands.Group(name="match", description="Match moderation")
@@ -2729,7 +3158,7 @@ class HighlightBot(commands.Bot):
                         f"Runtime: `{self.startup_health.get('canonical_runtime')}` / legacy imports=`{legacy_summary['legacy_import_count']}` ({legacy_packages})\n"
                         f"Command sync: `{self.command_sync_status.get('scope')}` / success=`{self.command_sync_status.get('success')}` / count=`{self.command_sync_status.get('count')}`\n"
                         f"Voice state: `{voice_status.state if voice_status else 'unknown'}`\n"
-                        f"Recovery backlog: reminders=`{scheduler_summary.get('room_info_reminders', 0)}` / queue timeouts=`{scheduler_summary.get('room_info_timeouts', 0)}` / result timeouts=`{scheduler_summary.get('result_timeouts', 0)}`\n"
+                        f"Recovery backlog: reminders=`{scheduler_summary.get('room_info_reminders', 0)}` / queue timeouts=`{scheduler_summary.get('room_info_timeouts', 0)}` / captain fallback opens=`{scheduler_summary.get('captain_fallback_opens', 0)}` / result timeouts=`{scheduler_summary.get('result_timeouts', 0)}`\n"
                         f"Cleanup: cleared stale activity rows=`{cleanup_summary.get('cleared_orphaned_activities', 0)}` / missing match resources=`{cleanup_summary.get('missing_match_resources', 0)}` / repaired matches=`{cleanup_summary.get('repaired_matches', 0)}` / reconciled wallets=`{cleanup_summary.get('reconciled_wallets', 0)}`\n"
                         f"Current stale activity rows: **{len(stale_activities)}**"
                     ),
@@ -3313,10 +3742,10 @@ class HighlightBot(commands.Bot):
                 await self.runtime.services.tournaments.start_tournament(repos.tournaments, tournament_id=tournament.id)
             await interaction.response.send_message(embed=self.build_notice_embed("Tournament started", f"{tournament.name} is now live."), ephemeral=True)
 
-        self.tree.add_command(admin_group)
-        self.tree.add_command(season_group)
-        self.tree.add_command(match_group)
-        self.tree.add_command(tournament_group)
+        self.tree.add_command(admin_group, guild=guild)
+        self.tree.add_command(season_group, guild=guild)
+        self.tree.add_command(match_group, guild=guild)
+        self.tree.add_command(tournament_group, guild=guild)
 
 
 def main() -> None:

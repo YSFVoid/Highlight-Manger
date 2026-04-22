@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from highlight_manager.db.models.competitive import MatchModel, MatchPlayerModel, MatchVoteModel, QueueModel, QueuePlayerModel
 from highlight_manager.db.models.core import PlayerModel
-from highlight_manager.modules.common.enums import MatchState, QueueState
+from highlight_manager.modules.common.enums import MatchResultPhase, MatchState, QueueState
 from highlight_manager.modules.common.time import utcnow
 from highlight_manager.modules.matches.types import MatchSnapshot, QueueSnapshot
 
@@ -90,14 +90,18 @@ class MatchRepository:
         return int(value or 0) + 1
 
     async def create_match_from_queue(self, snapshot: QueueSnapshot, *, result_deadline_at: datetime) -> MatchSnapshot:
+        team2_captain_player_id = snapshot.team2_ids[0] if snapshot.team2_ids else None
         match = MatchModel(
             guild_id=snapshot.queue.guild_id,
             season_id=snapshot.queue.season_id,
             queue_id=snapshot.queue.id,
             match_number=await self.next_match_number(snapshot.queue.guild_id),
             creator_player_id=snapshot.queue.creator_player_id,
+            team1_captain_player_id=snapshot.queue.creator_player_id,
+            team2_captain_player_id=team2_captain_player_id,
             ruleset_key=snapshot.queue.ruleset_key,
             mode=snapshot.queue.mode,
+            result_phase=MatchResultPhase.CAPTAIN,
             team_size=snapshot.queue.team_size,
             room_code=snapshot.queue.room_code,
             room_password=snapshot.queue.room_password,
@@ -205,6 +209,28 @@ class MatchRepository:
         )
         return list(result.all())
 
+    async def list_due_captain_timeouts(self, now: datetime) -> list[MatchModel]:
+        result = await self.session.scalars(
+            select(MatchModel).where(
+                MatchModel.state.in_([MatchState.LIVE, MatchState.RESULT_PENDING]),
+                MatchModel.result_phase == MatchResultPhase.CAPTAIN,
+                MatchModel.captain_deadline_at.is_not(None),
+                MatchModel.captain_deadline_at <= now,
+            )
+        )
+        return list(result.all())
+
+    async def list_due_fallback_timeouts(self, now: datetime) -> list[MatchModel]:
+        result = await self.session.scalars(
+            select(MatchModel).where(
+                MatchModel.state.in_([MatchState.LIVE, MatchState.RESULT_PENDING]),
+                MatchModel.result_phase == MatchResultPhase.FALLBACK,
+                MatchModel.fallback_deadline_at.is_not(None),
+                MatchModel.fallback_deadline_at <= now,
+            )
+        )
+        return list(result.all())
+
     async def set_queue_public_message_id(self, queue_id: UUID, public_message_id: int) -> None:
         queue = await self.get_queue(queue_id, for_update=True)
         if queue is None:
@@ -239,6 +265,20 @@ class MatchRepository:
                 MatchModel.match_number == match_number,
             )
         )
+
+    async def update_match_room_info(
+        self,
+        match: MatchModel,
+        *,
+        room_code: str,
+        room_password: str,
+        room_notes: str | None,
+    ) -> None:
+        match.room_code = room_code
+        match.room_password = room_password
+        match.room_notes = room_notes
+        match.rehost_count += 1
+        await self.session.flush()
 
     async def _player_lookup(self, player_ids: list[int]) -> dict[int, int]:
         if not player_ids:

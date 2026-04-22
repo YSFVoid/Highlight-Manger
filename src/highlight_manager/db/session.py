@@ -12,9 +12,11 @@ def create_engine(database_url: str, *, echo: bool = False) -> AsyncEngine:
     engine_kwargs = {
         "echo": echo,
         "pool_pre_ping": True,
+        "pool_size": 20,
+        "max_overflow": 10,
+        "pool_recycle": 1800,
     }
     if "pooler.supabase.com" in database_url or ":6543/" in database_url:
-        engine_kwargs["poolclass"] = NullPool
         engine_kwargs["connect_args"] = {
             "statement_cache_size": 0,
             "prepared_statement_cache_size": 0,
