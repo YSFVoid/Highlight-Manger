@@ -2919,6 +2919,32 @@ class HighlightBot(commands.Bot):
         match_group = app_commands.Group(name="match", description="Match moderation")
         tournament_group = app_commands.Group(name="tournament-admin", description="Tournament administration")
 
+        @admin_group.command(name="post-update", description="Post the latest bot update notes to a selected channel")
+        async def post_update(interaction: discord.Interaction, channel: discord.TextChannel) -> None:
+            if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+                return
+            if not await self.is_admin_member(interaction.guild, interaction.user):
+                await self.send_interaction_notice(interaction, "Not allowed", "Admins only.", error=True, ephemeral=True)
+                return
+            started_at = time.monotonic()
+            await self.acknowledge_interaction(
+                interaction,
+                operation="post_update",
+                started_at=started_at,
+                ephemeral=True,
+            )
+            async with self.runtime.session() as repos:
+                bundle = await self.runtime.services.guilds.ensure_guild(repos.guilds, interaction.guild.id, interaction.guild.name)
+            
+            embed = self.build_latest_update_embed(bundle.settings.prefix)
+            try:
+                await channel.send(embed=embed)
+                await interaction.edit_original_response(embed=self.build_notice_embed("Update Posted", f"Successfully posted update notes to {channel.mention}."))
+            except discord.Forbidden:
+                await interaction.edit_original_response(embed=self.build_notice_embed("Missing Permissions", f"I don't have permission to post in {channel.mention}.", error=True))
+            except Exception as exc:
+                await interaction.edit_original_response(embed=self.build_notice_embed("Error", f"Failed to post update: {exc}", error=True))
+
         @admin_group.command(name="set-bot-voice", description="Set the persistent bot voice channel")
         async def set_bot_voice(interaction: discord.Interaction, channel: discord.VoiceChannel) -> None:
             if interaction.guild is None or not isinstance(interaction.user, discord.Member):
