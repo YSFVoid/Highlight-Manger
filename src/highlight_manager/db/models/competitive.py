@@ -128,6 +128,7 @@ class QueuePlayerModel(Base):
     player_id: Mapped[int] = mapped_column(ForeignKey("players.id", ondelete="CASCADE"), nullable=False)
     team_number: Mapped[int] = mapped_column(Integer, nullable=False)
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    ready_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class MatchModel(Base):

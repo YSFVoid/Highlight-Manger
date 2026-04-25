@@ -3,6 +3,8 @@ from __future__ import annotations
 from highlight_manager.db.models.competitive import SeasonModel, SeasonPlayerModel
 from highlight_manager.db.models.core import GuildSettingModel
 from highlight_manager.modules.common.cache import SimpleTTLCache
+from highlight_manager.modules.common.enums import SeasonStatus
+from highlight_manager.modules.common.exceptions import NotFoundError, ValidationError
 from highlight_manager.modules.seasons.repository import SeasonRepository
 
 
@@ -59,3 +61,27 @@ class SeasonService:
             legacy_points=legacy_points,
             legacy_rank=legacy_rank,
         )
+
+    async def list_history(
+        self,
+        repository: SeasonRepository,
+        guild_id: int,
+        *,
+        limit: int | None = 8,
+    ) -> list[SeasonModel]:
+        return await repository.list_seasons(guild_id, limit=limit)
+
+    async def resolve_archived_season(
+        self,
+        repository: SeasonRepository,
+        guild_id: int,
+        season_number: int,
+    ) -> SeasonModel:
+        season = await repository.get_by_number(guild_id, season_number)
+        if season is None:
+            raise NotFoundError(f"Season {season_number} was not found.")
+        if season.status == SeasonStatus.ACTIVE:
+            raise ValidationError(
+                f"Season {season_number} is still active. Use the command without a season number for the live view."
+            )
+        return season

@@ -36,6 +36,10 @@ class Settings(BaseSettings):
         default=600,
         alias="RESULT_CHANNEL_DELETE_DELAY_SECONDS",
     )
+    emergency_coin_adjustments_enabled: bool = Field(
+        default=False,
+        alias="EMERGENCY_COIN_ADJUSTMENTS_ENABLED",
+    )
 
     @field_validator("discord_guild_id", mode="before")
     @classmethod

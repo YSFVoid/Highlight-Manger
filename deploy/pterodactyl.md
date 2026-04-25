@@ -11,9 +11,28 @@ Highlight Manger is supported on Pterodactyl with the Season 2 runtime.
 
 Recommended optional variables:
 
+- `DISCORD_CLIENT_ID`
 - `LOG_LEVEL=INFO`
+- `QUEUE_TIMEOUT_SECONDS=300`
+- `ROOM_INFO_TIMEOUT_SECONDS=60`
+- `RESULT_TIMEOUT_SECONDS=1800`
 - `RECOVERY_INTERVAL_SECONDS=5`
 - `CLEANUP_INTERVAL_SECONDS=30`
+- `RESULT_CHANNEL_DELETE_DELAY_SECONDS=600`
+- `EMERGENCY_COIN_ADJUSTMENTS_ENABLED=false`
+
+For the full Season 2 launch gate, use:
+
+- `deploy/season2-launch-readiness.md`
+
+## Migration Gate
+
+Before launching or restarting against production data, apply and verify migrations:
+
+```bash
+alembic upgrade head
+alembic current
+```
 
 ## Startup Command
 

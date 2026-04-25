@@ -8,15 +8,28 @@ from highlight_manager.modules.common.time import utcnow
 class SchedulerWorker:
     def __init__(self) -> None:
         self.last_summary: dict[str, int | str] = {
+            "queue_timeouts": 0,
+            "ready_check_timeouts": 0,
             "room_info_reminders": 0,
             "room_info_timeouts": 0,
             "captain_fallback_opens": 0,
             "result_timeouts": 0,
         }
 
+    @staticmethod
+    def _queue_timeout_due(*, created_at, timeout_seconds: int, now) -> bool:
+        deadline = created_at + timedelta(seconds=timeout_seconds)
+        if deadline.tzinfo is None and now.tzinfo is not None:
+            now = now.replace(tzinfo=None)
+        elif deadline.tzinfo is not None and now.tzinfo is None:
+            deadline = deadline.replace(tzinfo=None)
+        return deadline <= now
+
     async def process_deadlines(self, bot) -> None:
         queue_refreshes: list[tuple[int, object]] = []
         match_refreshes: list[tuple[int, object]] = []
+        queue_timeouts = 0
+        ready_check_timeouts = 0
         reminder_count = 0
         room_info_timeouts = 0
         captain_fallback_opens = 0
@@ -24,6 +37,43 @@ class SchedulerWorker:
         async with bot.runtime.session() as repos:
             now = utcnow()
             reminder_threshold = now + timedelta(seconds=30)
+            for queue in await repos.matches.list_stale_queue_timeout_candidates():
+                settings = await repos.guilds.get_settings(queue.guild_id)
+                if settings is None:
+                    continue
+                if not self._queue_timeout_due(
+                    created_at=queue.created_at,
+                    timeout_seconds=settings.queue_timeout_seconds,
+                    now=now,
+                ):
+                    continue
+                snapshot = await bot.runtime.services.matches.cancel_queue(
+                    repos.matches,
+                    repos.profiles,
+                    repos.moderation,
+                    queue_id=queue.id,
+                    actor_player_id=None,
+                    reason="queue_timeout",
+                )
+                guild_record = await repos.guilds.get_by_id(snapshot.queue.guild_id)
+                if guild_record is not None:
+                    queue_refreshes.append((guild_record.discord_guild_id, snapshot))
+                queue_timeouts += 1
+
+            for queue in await repos.matches.list_due_ready_check_timeouts(now):
+                snapshot = await bot.runtime.services.matches.cancel_queue(
+                    repos.matches,
+                    repos.profiles,
+                    repos.moderation,
+                    queue_id=queue.id,
+                    actor_player_id=None,
+                    reason="ready_check_timeout",
+                )
+                guild_record = await repos.guilds.get_by_id(snapshot.queue.guild_id)
+                if guild_record is not None:
+                    queue_refreshes.append((guild_record.discord_guild_id, snapshot))
+                ready_check_timeouts += 1
+
             for queue in await repos.matches.list_due_room_info_reminders(reminder_threshold):
                 if queue.room_info_deadline_at is None or queue.room_info_reminder_sent_at is not None:
                     continue
@@ -81,6 +131,8 @@ class SchedulerWorker:
                 result_timeouts += 1
 
         self.last_summary = {
+            "queue_timeouts": queue_timeouts,
+            "ready_check_timeouts": ready_check_timeouts,
             "room_info_reminders": reminder_count,
             "room_info_timeouts": room_info_timeouts,
             "captain_fallback_opens": captain_fallback_opens,

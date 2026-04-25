@@ -11,11 +11,30 @@ class SeasonRepository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
+    async def list_seasons(self, guild_id: int, *, limit: int | None = None) -> list[SeasonModel]:
+        stmt = (
+            select(SeasonModel)
+            .where(SeasonModel.guild_id == guild_id)
+            .order_by(SeasonModel.season_number.desc(), SeasonModel.id.desc())
+        )
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        result = await self.session.scalars(stmt)
+        return list(result.all())
+
     async def get_active(self, guild_id: int) -> SeasonModel | None:
         return await self.session.scalar(
             select(SeasonModel).where(
                 SeasonModel.guild_id == guild_id,
                 SeasonModel.status == SeasonStatus.ACTIVE,
+            )
+        )
+
+    async def get_by_number(self, guild_id: int, season_number: int) -> SeasonModel | None:
+        return await self.session.scalar(
+            select(SeasonModel).where(
+                SeasonModel.guild_id == guild_id,
+                SeasonModel.season_number == season_number,
             )
         )
 
@@ -75,3 +94,11 @@ class SeasonRepository:
             )
         )
         return list(result.all())
+
+    async def get_season_player(self, season_id: int, player_id: int) -> SeasonPlayerModel | None:
+        return await self.session.scalar(
+            select(SeasonPlayerModel).where(
+                SeasonPlayerModel.season_id == season_id,
+                SeasonPlayerModel.player_id == player_id,
+            )
+        )

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from highlight_manager.db.models.competitive import RankTierModel, SeasonPlayerModel
 from highlight_manager.modules.common.cache import SimpleTTLCache
-from highlight_manager.modules.common.enums import RatingReason
+from highlight_manager.modules.common.enums import RatingReason, RulesetKey
 from highlight_manager.modules.ranks.calculator import DEFAULT_TIERS, RatingChange, bounded_rating, calculate_delta
 from highlight_manager.modules.ranks.repository import RankRepository
 
@@ -15,6 +15,14 @@ class RankedMatchResult:
 
 
 class RankService:
+    WINNER_MVP_RATING_BONUS = 3
+    LOSER_MVP_LOSS_REDUCTION = 3
+    RULESET_RATING_MULTIPLIERS = {
+        RulesetKey.APOSTADO: 1.0,
+        RulesetKey.HIGHLIGHT: 1.25,
+        RulesetKey.ESPORT: 1.0,
+    }
+
     def __init__(self) -> None:
         self._tier_cache = SimpleTTLCache(maxsize=128, ttl=300)
 
@@ -49,6 +57,31 @@ class RankService:
                 return tier
         return tiers[-1] if tiers else None
 
+    @classmethod
+    def _apply_ruleset_multiplier(cls, delta: int, ruleset_key: RulesetKey) -> int:
+        multiplier = cls.RULESET_RATING_MULTIPLIERS.get(ruleset_key, 1.0)
+        if multiplier == 1.0 or delta == 0:
+            return delta
+        adjusted = round(delta * multiplier)
+        if delta > 0:
+            return max(delta, adjusted)
+        return min(delta, adjusted)
+
+    @classmethod
+    def _apply_mvp_adjustment(
+        cls,
+        delta: int,
+        *,
+        player_id: int,
+        winner_mvp_player_id: int | None,
+        loser_mvp_player_id: int | None,
+    ) -> int:
+        if player_id == winner_mvp_player_id:
+            return delta + cls.WINNER_MVP_RATING_BONUS
+        if player_id == loser_mvp_player_id and delta < 0:
+            return min(0, delta + cls.LOSER_MVP_LOSS_REDUCTION)
+        return delta
+
     async def apply_match_result(
         self,
         repository: RankRepository,
@@ -57,6 +90,9 @@ class RankService:
         tiers: list[RankTierModel],
         match_id,
         winner_player_ids: set[int],
+        ruleset_key: RulesetKey = RulesetKey.APOSTADO,
+        winner_mvp_player_id: int | None = None,
+        loser_mvp_player_id: int | None = None,
         actor_player_id: int | None = None,
     ) -> RankedMatchResult:
         team_one = [row for row in season_players if row.player_id in winner_player_ids]
@@ -76,6 +112,13 @@ class RankService:
                 team_rating=team_one_rating,
                 opponent_rating=team_two_rating,
                 actual=1.0,
+            )
+            delta = self._apply_ruleset_multiplier(delta, ruleset_key)
+            delta = self._apply_mvp_adjustment(
+                delta,
+                player_id=row.player_id,
+                winner_mvp_player_id=winner_mvp_player_id,
+                loser_mvp_player_id=loser_mvp_player_id,
             )
             after = bounded_rating(before, delta)
             row.rating = after
@@ -104,6 +147,13 @@ class RankService:
                 team_rating=team_two_rating,
                 opponent_rating=team_one_rating,
                 actual=0.0,
+            )
+            delta = self._apply_ruleset_multiplier(delta, ruleset_key)
+            delta = self._apply_mvp_adjustment(
+                delta,
+                player_id=row.player_id,
+                winner_mvp_player_id=winner_mvp_player_id,
+                loser_mvp_player_id=loser_mvp_player_id,
             )
             after = bounded_rating(before, delta)
             row.rating = after

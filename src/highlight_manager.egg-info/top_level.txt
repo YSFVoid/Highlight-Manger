@@ -1,10 +1,1 @@
-commands
-config
 highlight_manager
-interactions
-jobs
-models
-repositories
-services
-utils
-validators

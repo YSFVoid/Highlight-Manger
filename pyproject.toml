@@ -48,4 +48,4 @@ target-version = "py311"
 where = ["src"]
 
 [tool.setuptools.package-data]
-highlight_manager = ["ui/assets/fonts/*.ttf"]
+highlight_manager = ["ui/assets/fonts/*.ttf", "assets/brand/*.gif"]

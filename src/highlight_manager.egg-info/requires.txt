@@ -1,11 +1,19 @@
+alembic<2.0,>=1.14
+asyncpg<1.0,>=0.30
+cachetools<6.0,>=5.5
 discord.py<3.0,>=2.5
-pymongo<5.0,>=4.11
+pillow<13.0,>=12.1
+PyNaCl<1.6,>=1.5
+davey<1.0,>=0.1.0
 pydantic<3.0,>=2.11
 pydantic-settings<3.0,>=2.8
+pymongo<5.0,>=4.11
 python-dotenv<2.0,>=1.0
+sqlalchemy<3.0,>=2.0.39
 structlog<26.0,>=25.1
 
 [dev]
+aiosqlite<1.0,>=0.21
 pytest<9.0,>=8.3
 pytest-asyncio<1.0,>=0.26
 ruff<1.0,>=0.11

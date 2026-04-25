@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from highlight_manager.app.config import Settings
 from highlight_manager.db.session import create_engine, create_session_factory, session_scope
+from highlight_manager.modules.diagnostics.service import AdminDiagnosticsService
 from highlight_manager.modules.economy.repository import EconomyRepository
 from highlight_manager.modules.economy.service import EconomyService
 from highlight_manager.modules.guilds.repository import GuildRepository
@@ -53,6 +54,7 @@ class Services:
     shop: ShopService
     matches: MatchService
     tournaments: TournamentService
+    diagnostics: AdminDiagnosticsService
 
 
 class Runtime:
@@ -79,6 +81,7 @@ class Runtime:
             economy_service=economy_service,
             moderation_service=moderation_service,
         )
+        diagnostics_service = AdminDiagnosticsService()
         self.services = Services(
             guilds=guild_service,
             profiles=profile_service,
@@ -89,6 +92,7 @@ class Runtime:
             shop=shop_service,
             matches=match_service,
             tournaments=tournament_service,
+            diagnostics=diagnostics_service,
         )
 
     @asynccontextmanager

@@ -4,6 +4,7 @@ import discord
 
 from highlight_manager.modules.ranks.calculator import resolve_tier, tier_emoji, tier_progress
 from highlight_manager.ui import theme
+from highlight_manager.ui.brand import apply_embed_chrome
 
 
 def format_percentage(value: float) -> str:
@@ -61,17 +62,13 @@ def build_profile_embed(
     embed.add_field(name="🎒 Inventory", value=f"**{inventory_count}** items", inline=True)
 
     if total > 0:
-        next_tier_name = "Next Tier"
-        for i, t in enumerate(resolve_tier.__wrapped__.__code__.co_consts if hasattr(resolve_tier, '__wrapped__') else []):
-            pass  # tier progress already computed above
         embed.add_field(
             name=f"{t_emoji} Tier Progress",
             value=f"`{into}/{total}` pts to next rank ({pct}%)",
             inline=False,
         )
 
-    embed.set_footer(text=f"Highlight Manger  •  {season_name}")
-    return embed
+    return apply_embed_chrome(embed, footer=f"HIGHLIGHT MANGER  •  {season_name}")
 
 
 def build_leaderboard_embed(rows, players_by_id, *, season_name: str, total_players: int) -> discord.Embed:
@@ -120,5 +117,4 @@ def build_leaderboard_embed(rows, players_by_id, *, season_name: str, total_play
         dist = " • ".join(f"{tier_emoji(k.lower())} {k}: **{v}**" for k, v in tier_counts.items())
         embed.add_field(name="Tier Distribution", value=dist, inline=False)
 
-    embed.set_footer(text=f"Highlight Manger  •  {season_name}  •  Ordered by points, wins, peak")
-    return embed
+    return apply_embed_chrome(embed, footer=f"HIGHLIGHT MANGER  •  {season_name}  •  Ordered by points, wins, peak")

@@ -7,8 +7,8 @@ import highlight_manager.db.models  # noqa: F401
 from highlight_manager.app.config import Settings
 from highlight_manager.db.base import Base
 from highlight_manager.db.session import create_engine, create_session_factory
-from highlight_manager.modules.common.enums import MatchMode, MatchResultPhase, MatchState, RulesetKey
-from highlight_manager.modules.common.exceptions import ValidationError
+from highlight_manager.modules.common.enums import MatchMode, MatchResultPhase, MatchState, QueueState, RulesetKey
+from highlight_manager.modules.common.exceptions import StateTransitionError, ValidationError
 from highlight_manager.modules.economy.repository import EconomyRepository
 from highlight_manager.modules.economy.service import EconomyService
 from highlight_manager.modules.guilds.repository import GuildRepository
@@ -35,6 +35,27 @@ async def session(tmp_path) -> AsyncSession:
         yield session
         await session.rollback()
     await engine.dispose()
+
+
+async def mark_all_ready(
+    match_service: MatchService,
+    matches: MatchRepository,
+    profiles: ProfileRepository,
+    *,
+    queue_id,
+    player_ids: list[int],
+):
+    snapshot = None
+    for player_id in player_ids:
+        snapshot = await match_service.mark_ready(
+            matches,
+            profiles,
+            queue_id=queue_id,
+            player_id=player_id,
+        )
+    assert snapshot is not None
+    assert snapshot.queue.state == QueueState.FULL_PENDING_ROOM_INFO
+    return snapshot
 
 
 @pytest.mark.asyncio
@@ -83,13 +104,33 @@ async def test_queue_requires_room_info_before_match_creation(session: AsyncSess
     await match_service.join_queue(matches, profiles, moderation, queue_id=queue.queue.id, player_id=opponent_one.id, team_number=2)
     full_queue = await match_service.join_queue(matches, profiles, moderation, queue_id=queue.queue.id, player_id=opponent_two.id, team_number=2)
 
-    assert full_queue.queue.state.value == "full_pending_room_info"
+    assert full_queue.queue.state == QueueState.READY_CHECK
+    with pytest.raises(StateTransitionError):
+        await match_service.submit_room_info(
+            matches,
+            profiles,
+            moderation,
+            queue_id=full_queue.queue.id,
+            submitter_player_id=creator.id,
+            is_moderator=False,
+            room_code="ABC123",
+            room_password="pw",
+            room_notes="Final lobby",
+        )
+
+    ready_queue = await mark_all_ready(
+        match_service,
+        matches,
+        profiles,
+        queue_id=full_queue.queue.id,
+        player_ids=[creator.id, teammate.id, opponent_one.id, opponent_two.id],
+    )
 
     match = await match_service.submit_room_info(
         matches,
         profiles,
         moderation,
-        queue_id=full_queue.queue.id,
+        queue_id=ready_queue.queue.id,
         submitter_player_id=creator.id,
         is_moderator=False,
         room_code="ABC123",
@@ -147,6 +188,13 @@ async def test_live_match_persists_captains_and_captain_phase(session: AsyncSess
     await match_service.join_queue(matches, profiles, moderation, queue_id=queue.queue.id, player_id=teammate.id, team_number=1)
     await match_service.join_queue(matches, profiles, moderation, queue_id=queue.queue.id, player_id=opponent_one.id, team_number=2)
     await match_service.join_queue(matches, profiles, moderation, queue_id=queue.queue.id, player_id=opponent_two.id, team_number=2)
+    await mark_all_ready(
+        match_service,
+        matches,
+        profiles,
+        queue_id=queue.queue.id,
+        player_ids=[creator.id, teammate.id, opponent_one.id, opponent_two.id],
+    )
     match = await match_service.submit_room_info(
         matches,
         profiles,
@@ -219,6 +267,13 @@ async def test_captain_phase_only_allows_captain_votes_and_fallback_opens(sessio
     await match_service.join_queue(matches, profiles, moderation, queue_id=queue.queue.id, player_id=teammate.id, team_number=1)
     await match_service.join_queue(matches, profiles, moderation, queue_id=queue.queue.id, player_id=opponent_one.id, team_number=2)
     await match_service.join_queue(matches, profiles, moderation, queue_id=queue.queue.id, player_id=opponent_two.id, team_number=2)
+    await mark_all_ready(
+        match_service,
+        matches,
+        profiles,
+        queue_id=queue.queue.id,
+        player_ids=[creator.id, teammate.id, opponent_one.id, opponent_two.id],
+    )
     match = await match_service.submit_room_info(
         matches,
         profiles,
@@ -320,6 +375,13 @@ async def test_room_update_only_allowed_once_before_first_vote(session: AsyncSes
         source_channel_id=558,
     )
     await match_service.join_queue(matches, profiles, moderation, queue_id=queue.queue.id, player_id=opponent.id, team_number=2)
+    await mark_all_ready(
+        match_service,
+        matches,
+        profiles,
+        queue_id=queue.queue.id,
+        player_ids=[creator.id, opponent.id],
+    )
     match = await match_service.submit_room_info(
         matches,
         profiles,
@@ -421,6 +483,13 @@ async def test_confirm_match_updates_rating_and_wallets(session: AsyncSession) -
     await match_service.join_queue(matches, profiles, moderation, queue_id=queue.queue.id, player_id=teammate.id, team_number=1)
     await match_service.join_queue(matches, profiles, moderation, queue_id=queue.queue.id, player_id=opponent_one.id, team_number=2)
     await match_service.join_queue(matches, profiles, moderation, queue_id=queue.queue.id, player_id=opponent_two.id, team_number=2)
+    await mark_all_ready(
+        match_service,
+        matches,
+        profiles,
+        queue_id=queue.queue.id,
+        player_ids=[creator.id, teammate.id, opponent_one.id, opponent_two.id],
+    )
     match = await match_service.submit_room_info(
         matches,
         profiles,
@@ -512,6 +581,13 @@ async def test_confirm_match_rejects_invalid_mvp_team(session: AsyncSession) -> 
     await match_service.join_queue(matches, profiles, moderation, queue_id=queue.queue.id, player_id=teammate.id, team_number=1)
     await match_service.join_queue(matches, profiles, moderation, queue_id=queue.queue.id, player_id=opponent_one.id, team_number=2)
     await match_service.join_queue(matches, profiles, moderation, queue_id=queue.queue.id, player_id=opponent_two.id, team_number=2)
+    await mark_all_ready(
+        match_service,
+        matches,
+        profiles,
+        queue_id=queue.queue.id,
+        player_ids=[creator.id, teammate.id, opponent_one.id, opponent_two.id],
+    )
     match = await match_service.submit_room_info(
         matches,
         profiles,
@@ -591,6 +667,13 @@ async def test_creator_cancel_only_works_before_any_votes(session: AsyncSession)
         source_channel_id=1001,
     )
     await match_service.join_queue(matches, profiles, moderation, queue_id=queue.queue.id, player_id=opponent.id, team_number=2)
+    await mark_all_ready(
+        match_service,
+        matches,
+        profiles,
+        queue_id=queue.queue.id,
+        player_ids=[creator.id, opponent.id],
+    )
     match = await match_service.submit_room_info(
         matches,
         profiles,
@@ -633,6 +716,13 @@ async def test_creator_cancel_only_works_before_any_votes(session: AsyncSession)
         source_channel_id=1002,
     )
     await match_service.join_queue(matches, profiles, moderation, queue_id=second_queue.queue.id, player_id=opponent.id, team_number=2)
+    await mark_all_ready(
+        match_service,
+        matches,
+        profiles,
+        queue_id=second_queue.queue.id,
+        player_ids=[creator.id, opponent.id],
+    )
     second_match = await match_service.submit_room_info(
         matches,
         profiles,

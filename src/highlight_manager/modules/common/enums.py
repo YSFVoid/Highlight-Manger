@@ -186,6 +186,7 @@ class AuditAction(StrEnum):
     QUEUE_CREATED = "queue_created"
     QUEUE_JOINED = "queue_joined"
     QUEUE_LEFT = "queue_left"
+    QUEUE_HOST_TRANSFERRED = "queue_host_transferred"
     QUEUE_CANCELLED = "queue_cancelled"
     ROOM_INFO_SUBMITTED = "room_info_submitted"
     MATCH_CREATED = "match_created"
@@ -196,6 +197,7 @@ class AuditAction(StrEnum):
     MATCH_FORCE_CLOSED = "match_force_closed"
     MATCH_RESULT_FALLBACK_OPENED = "match_result_fallback_opened"
     MATCH_REHOSTED = "match_rehosted"
+    MATCH_ANTI_REMATCH_FLAGGED = "match_anti_rematch_flagged"
     COINS_ADJUSTED = "coins_adjusted"
     PURCHASE_COMPLETED = "purchase_completed"
     PURCHASE_REFUNDED = "purchase_refunded"
@@ -209,6 +211,7 @@ class AuditAction(StrEnum):
     SEASON_ARCHIVED = "season_archived"
     PERSISTENT_VOICE_UPDATED = "persistent_voice_updated"
     PERSISTENT_VOICE_INVALID = "persistent_voice_invalid"
+    PHASE4_EVIDENCE_RECORDED = "phase4_evidence_recorded"
 
 
 class RulesetKey(StrEnum):

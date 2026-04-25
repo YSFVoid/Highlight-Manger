@@ -67,6 +67,9 @@ class GuildRepository:
             return None
         return GuildBundle(guild=guild, settings=settings)
 
+    async def get_settings(self, guild_id: int) -> GuildSettingModel | None:
+        return await self.session.get(GuildSettingModel, guild_id)
+
     async def replace_staff_roles(
         self,
         guild_id: int,

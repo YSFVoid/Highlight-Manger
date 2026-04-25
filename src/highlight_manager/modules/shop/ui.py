@@ -6,6 +6,7 @@ from highlight_manager.db.models.shop import ShopItemModel, ShopSectionConfigMod
 from highlight_manager.modules.common.enums import ShopSection
 from highlight_manager.modules.shop.service import ShopService
 from highlight_manager.ui import theme
+from highlight_manager.ui.brand import apply_embed_chrome
 
 
 STOREFRONT_FOOTER_PREFIX = "Highlight Manger Storefront"
@@ -67,8 +68,7 @@ def build_shop_embed(
         value="\n".join(section_lines),
         inline=False,
     )
-    embed.set_footer(text="Highlight Manger  •  Shop  •  Use storefronts for Buy Now requests")
-    return embed
+    return apply_embed_chrome(embed, footer="HIGHLIGHT MANGER  •  Shop  •  Use storefronts for Buy Now requests")
 
 
 def build_storefront_section_embed(
@@ -135,8 +135,7 @@ def build_storefront_ticket_embed(
     image_url = shop_service.get_item_image_url(matched_item) if matched_item else None
     if image_url:
         embed.set_thumbnail(url=image_url)
-    embed.set_footer(text=f"Highlight Manger  •  {section.label} storefront request")
-    return embed
+    return apply_embed_chrome(embed, footer=f"HIGHLIGHT MANGER  •  {section.label} storefront request")
 
 
 def _build_section_product_lines(items: list[ShopItemModel], shop_service: ShopService) -> str:

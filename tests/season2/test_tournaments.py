@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+from uuid import uuid4
+
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import highlight_manager.db.models  # noqa: F401
 from highlight_manager.app.config import Settings
 from highlight_manager.db.base import Base
+from highlight_manager.db.models.tournaments import TournamentMatchModel, TournamentModel, TournamentTeamModel
 from highlight_manager.db.session import create_engine, create_session_factory
+from highlight_manager.modules.common.enums import (
+    TournamentFormat,
+    TournamentMatchState,
+    TournamentState,
+    TournamentTeamStatus,
+)
 from highlight_manager.modules.economy.service import EconomyService
 from highlight_manager.modules.guilds.repository import GuildRepository
 from highlight_manager.modules.guilds.service import GuildService
@@ -18,6 +27,7 @@ from highlight_manager.modules.seasons.repository import SeasonRepository
 from highlight_manager.modules.seasons.service import SeasonService
 from highlight_manager.modules.tournaments.repository import TournamentRepository
 from highlight_manager.modules.tournaments.service import TournamentService
+from highlight_manager.modules.tournaments.ui import build_tournament_embed
 
 
 @pytest.fixture()
@@ -30,6 +40,59 @@ async def session(tmp_path) -> AsyncSession:
         yield session
         await session.rollback()
     await engine.dispose()
+
+
+def test_tournament_embed_uses_current_model_fields() -> None:
+    tournament_id = uuid4()
+    alpha_id = uuid4()
+    bravo_id = uuid4()
+    tournament = TournamentModel(
+        id=tournament_id,
+        guild_id=999,
+        season_id=1,
+        tournament_number=1,
+        name="Spring Cup",
+        format=TournamentFormat.SINGLE_ELIMINATION,
+        state=TournamentState.LIVE,
+        team_size=2,
+        max_teams=8,
+    )
+    teams = [
+        TournamentTeamModel(
+            id=alpha_id,
+            tournament_id=tournament_id,
+            team_name="Alpha",
+            captain_player_id=3001,
+            status=TournamentTeamStatus.REGISTERED,
+        ),
+        TournamentTeamModel(
+            id=bravo_id,
+            tournament_id=tournament_id,
+            team_name="Bravo",
+            captain_player_id=3002,
+            status=TournamentTeamStatus.REGISTERED,
+        ),
+    ]
+    matches = [
+        TournamentMatchModel(
+            tournament_id=tournament_id,
+            round_number=1,
+            bracket_position=1,
+            team1_id=alpha_id,
+            team2_id=bravo_id,
+            state=TournamentMatchState.SCHEDULED,
+        )
+    ]
+
+    embed = build_tournament_embed(tournament, teams, matches)
+
+    registered_teams = next(field.value for field in embed.fields if "Registered Teams" in field.name)
+    latest_matches = next(field.value for field in embed.fields if "Latest Matches" in field.name)
+    assert "Alpha" in registered_teams
+    assert "Bravo" in registered_teams
+    assert "Round 1" in latest_matches
+    assert "Alpha vs Bravo" in latest_matches
+    assert "Scheduled" in latest_matches
 
 
 @pytest.mark.asyncio
@@ -56,7 +119,6 @@ async def test_tournament_registration_blocks_duplicate_player(session: AsyncSes
     teammate = await profile_service.ensure_player(profiles, bundle.guild.id, 3003)
     reserve_a = await profile_service.ensure_player(profiles, bundle.guild.id, 3004)
     reserve_b = await profile_service.ensure_player(profiles, bundle.guild.id, 3005)
-    reserve_c = await profile_service.ensure_player(profiles, bundle.guild.id, 3006)
 
     tournament = await tournament_service.create_tournament(
         tournaments,

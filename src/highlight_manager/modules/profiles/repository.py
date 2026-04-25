@@ -117,6 +117,30 @@ class ProfileRepository:
         )
         return list(result.all())
 
+    async def count_stale_activity_rows_for_guild(
+        self,
+        guild_id: int,
+        *,
+        active_queue_ids: set[UUID],
+        active_match_ids: set[UUID],
+    ) -> int:
+        result = await self.session.scalars(
+            select(PlayerActivityStateModel)
+            .join(PlayerModel, PlayerModel.id == PlayerActivityStateModel.player_id)
+            .where(
+                PlayerModel.guild_id == guild_id,
+                PlayerActivityStateModel.activity_kind != ActivityKind.IDLE,
+            )
+        )
+        stale_count = 0
+        for activity in result.all():
+            if activity.queue_id is not None and activity.queue_id not in active_queue_ids:
+                stale_count += 1
+                continue
+            if activity.match_id is not None and activity.match_id not in active_match_ids:
+                stale_count += 1
+        return stale_count
+
     async def set_activity_for_players(
         self,
         player_ids: list[int],

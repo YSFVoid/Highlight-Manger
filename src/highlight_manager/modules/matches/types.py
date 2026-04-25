@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from dataclasses import dataclass
 
 from highlight_manager.db.models.competitive import MatchModel, MatchPlayerModel, MatchVoteModel, QueueModel, QueuePlayerModel
@@ -11,11 +12,14 @@ class QueueSnapshot:
     queue: QueueModel
     players: list[QueuePlayerModel]
     player_discord_ids: dict[int, int]
-    ready_player_ids: set[int] = None
+    ready_player_ids: set[int] | None = None
+    reused_existing: bool = False
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.ready_player_ids is None:
-            self.ready_player_ids = set()
+            self.ready_player_ids = {
+                row.player_id for row in self.players if getattr(row, "ready_at", None) is not None
+            }
 
     @property
     def team1_ids(self) -> list[int]:
@@ -42,6 +46,7 @@ class MatchSnapshot:
     votes: list[MatchVoteModel]
     player_discord_ids: dict[int, int]
     coins_summary: dict[int, dict[str, int]] = None
+    anti_rematch_decision: RematchAbuseDecision | None = None
 
     def __post_init__(self):
         if self.coins_summary is None:
@@ -131,3 +136,55 @@ class MatchSnapshot:
 
     def all_votes_match(self) -> bool:
         return self.votes_match(self.active_voter_ids)
+
+    @property
+    def phase_votes_disagree(self) -> bool:
+        if len(self.phase_votes) < 2:
+            return False
+        first = self.phase_votes[0]
+        for vote in self.phase_votes[1:]:
+            if (
+                vote.winner_team_number != first.winner_team_number
+                or vote.winner_mvp_player_id != first.winner_mvp_player_id
+                or vote.loser_mvp_player_id != first.loser_mvp_player_id
+            ):
+                return True
+        return False
+
+
+@dataclass(slots=True)
+class MatchReviewInboxItem:
+    snapshot: MatchSnapshot
+    reason: str
+    reason_label: str
+    severity: int
+    sort_at: datetime | None
+    staff_detail: str | None = None
+
+
+@dataclass(slots=True)
+class RematchAbuseDecision:
+    reason: str
+    prior_match_ids: list[str]
+    prior_match_numbers: list[int]
+    matched_prior_count: int
+    overlap_threshold: int
+    best_overlap_team1: int
+    best_overlap_team2: int
+    trigger_source: str
+
+
+@dataclass(slots=True)
+class MatchRoomUpdateHistoryItem:
+    actor_player_id: int | None
+    actor_discord_id: int | None
+    created_at: datetime
+    before_room_code: str | None
+    before_room_password: str | None
+    before_room_notes: str | None
+    after_room_code: str | None
+    after_room_password: str | None
+    after_room_notes: str | None
+    rehost_count_before: int | None
+    rehost_count_after: int | None
+    legacy: bool = False

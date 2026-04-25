@@ -1,14 +1,19 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import discord
 
 from highlight_manager.modules.common.enums import MatchPlayerResult, MatchResultPhase, MatchState, QueueState
-from highlight_manager.modules.matches.types import MatchSnapshot, QueueSnapshot
-from highlight_manager.modules.ranks.calculator import resolve_tier, tier_emoji
+from highlight_manager.modules.matches.types import (
+    MatchReviewInboxItem,
+    MatchRoomUpdateHistoryItem,
+    MatchSnapshot,
+    QueueSnapshot,
+)
 from highlight_manager.ui import theme
+from highlight_manager.ui.brand import apply_embed_chrome
 
 
-# ── Status colors ────────────────────────────────────────────────────
+# â”€â”€ Status colors â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 STATUS_COLORS = {
     QueueState.QUEUE_OPEN: theme.SURFACE,
     QueueState.FILLING: theme.PRIMARY,
@@ -33,22 +38,22 @@ _TERMINAL_MATCH_STATES = {
     MatchState.EXPIRED,
 }
 
-# ── Status emoji ─────────────────────────────────────────────────────
+# â”€â”€ Status emoji â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 _STATE_EMOJI = {
-    QueueState.QUEUE_OPEN: "🟢",
-    QueueState.FILLING: "🔵",
-    QueueState.READY_CHECK: "⚡",
-    QueueState.FULL_PENDING_ROOM_INFO: "🔑",
-    QueueState.QUEUE_CANCELLED: "🔴",
-    QueueState.CONVERTED_TO_MATCH: "✅",
-    MatchState.CREATED: "🔵",
-    MatchState.MOVING: "🟠",
-    MatchState.LIVE: "⚔️",
-    MatchState.RESULT_PENDING: "🗳️",
-    MatchState.CONFIRMED: "✅",
-    MatchState.CANCELLED: "🔴",
-    MatchState.EXPIRED: "🟠",
-    MatchState.FORCE_CLOSED: "🔴",
+    QueueState.QUEUE_OPEN: "ðŸŸ¢",
+    QueueState.FILLING: "ðŸ”µ",
+    QueueState.READY_CHECK: "âš¡",
+    QueueState.FULL_PENDING_ROOM_INFO: "ðŸ”‘",
+    QueueState.QUEUE_CANCELLED: "ðŸ”´",
+    QueueState.CONVERTED_TO_MATCH: "âœ…",
+    MatchState.CREATED: "ðŸ”µ",
+    MatchState.MOVING: "ðŸŸ ",
+    MatchState.LIVE: "âš”ï¸",
+    MatchState.RESULT_PENDING: "ðŸ—³ï¸",
+    MatchState.CONFIRMED: "âœ…",
+    MatchState.CANCELLED: "ðŸ”´",
+    MatchState.EXPIRED: "ðŸŸ ",
+    MatchState.FORCE_CLOSED: "ðŸ”´",
 }
 
 
@@ -62,25 +67,38 @@ def _ruleset_label(raw_value: str) -> str:
 
 def _ruleset_emoji(raw_value: str) -> str:
     mapping = {
-        "apostado": "💰",
-        "highlight": "🔦",
-        "esport": "🏆",
+        "apostado": "ðŸ’°",
+        "highlight": "ðŸ”¦",
+        "esport": "ðŸ†",
     }
-    return mapping.get(raw_value, "⚔️")
+    return mapping.get(raw_value, "âš”ï¸")
+
+
+def _queue_cancel_reason_text(raw_value: str) -> str:
+    mapping = {
+        "empty_queue": "Queue cancelled because no players remained.",
+        "host_left": "Queue cancelled because the host left before match creation.",
+        "locked_queue_player_left": "Queue cancelled because a player left after teams were locked.",
+        "Player left queue.": "Queue cancelled because a player left.",
+        "queue_timeout": "Queue expired before enough players joined.",
+        "ready_check_timeout": "Ready check expired before everyone pressed Ready.",
+        "room_info_timeout": "Room info was not submitted before the deadline.",
+    }
+    return mapping.get(raw_value, raw_value)
 
 
 def _team_value(player_ids: list[int], team_size: int, render_player, *, ready_ids: set[int] | None = None) -> str:
     if not player_ids:
-        return "\n".join(f"`{i+1}.` ─ ─ ─" for i in range(team_size))
+        return "\n".join(f"`{i+1}.` â”€ â”€ â”€" for i in range(team_size))
     lines = []
     for i, player_id in enumerate(player_ids):
         ready_mark = ""
         if ready_ids is not None:
-            ready_mark = " ✅" if player_id in ready_ids else " ⏳"
+            ready_mark = " âœ…" if player_id in ready_ids else " â³"
         lines.append(f"`{i+1}.` {render_player(player_id)}{ready_mark}")
     remaining = max(team_size - len(player_ids), 0)
     for i in range(remaining):
-        lines.append(f"`{len(player_ids)+i+1}.` ─ ─ ─")
+        lines.append(f"`{len(player_ids)+i+1}.` â”€ â”€ â”€")
     return "\n".join(lines)
 
 
@@ -93,7 +111,7 @@ def build_queue_embed(snapshot: QueueSnapshot) -> discord.Embed:
 
     creator_discord_id = snapshot.player_discord_ids.get(queue.creator_player_id)
     creator_text = f"<@{creator_discord_id}>" if creator_discord_id else f"Player {queue.creator_player_id}"
-    state_emoji = _STATE_EMOJI.get(queue.state, "⬜")
+    state_emoji = _STATE_EMOJI.get(queue.state, "â¬œ")
     ruleset_emoji = _ruleset_emoji(queue.ruleset_key.value)
 
     filled = len(snapshot.team1_ids) + len(snapshot.team2_ids)
@@ -101,12 +119,12 @@ def build_queue_embed(snapshot: QueueSnapshot) -> discord.Embed:
     fill_bar = theme.progress_bar(filled, total_needed, length=12)
 
     status_line = {
-        QueueState.QUEUE_OPEN: "Lobby is open — pick your side.",
-        QueueState.FILLING: f"Filling up — `{filled}/{total_needed}` players.",
-        QueueState.READY_CHECK: "All slots filled — waiting for everyone to press **Ready**.",
-        QueueState.FULL_PENDING_ROOM_INFO: "Teams locked — host must submit **Room ID** + **Password**.",
+        QueueState.QUEUE_OPEN: "Lobby is open â€” pick your side.",
+        QueueState.FILLING: f"Filling up â€” `{filled}/{total_needed}` players.",
+        QueueState.READY_CHECK: "All slots filled â€” waiting for everyone to press **Ready**.",
+        QueueState.FULL_PENDING_ROOM_INFO: "Teams locked - host must submit **Room ID** + **Password**.",
         QueueState.QUEUE_CANCELLED: "This queue was cancelled.",
-        QueueState.CONVERTED_TO_MATCH: "✅ Converted into an official live match.",
+        QueueState.CONVERTED_TO_MATCH: "âœ… Converted into an official live match.",
     }[queue.state]
 
     embed = discord.Embed(
@@ -124,12 +142,12 @@ def build_queue_embed(snapshot: QueueSnapshot) -> discord.Embed:
     ready_ids = snapshot.ready_player_ids if queue.state == QueueState.READY_CHECK else None
 
     embed.add_field(
-        name=f"🔴 Team 1  [{len(snapshot.team1_ids)}/{queue.team_size}]",
+        name=f"ðŸ”´ Team 1  [{len(snapshot.team1_ids)}/{queue.team_size}]",
         value=_team_value(snapshot.team1_ids, queue.team_size, render_player, ready_ids=ready_ids),
         inline=True,
     )
     embed.add_field(
-        name=f"🔵 Team 2  [{len(snapshot.team2_ids)}/{queue.team_size}]",
+        name=f"ðŸ”µ Team 2  [{len(snapshot.team2_ids)}/{queue.team_size}]",
         value=_team_value(snapshot.team2_ids, queue.team_size, render_player, ready_ids=ready_ids),
         inline=True,
     )
@@ -141,19 +159,24 @@ def build_queue_embed(snapshot: QueueSnapshot) -> discord.Embed:
     ]
     embed.add_field(name="Queue Details", value="\n".join(detail_lines), inline=False)
 
-    if queue.room_info_deadline_at:
+    if queue.state == QueueState.READY_CHECK and queue.room_info_deadline_at:
+        embed.add_field(
+            name="Ready Check Deadline",
+            value=f"Everyone must press **Ready** before <t:{int(queue.room_info_deadline_at.timestamp())}:R>.",
+            inline=False,
+        )
+    elif queue.state == QueueState.FULL_PENDING_ROOM_INFO and queue.room_info_deadline_at:
         embed.add_field(
             name=f"{theme.EMOJI_KEY} Room Setup Deadline",
             value=(
                 f"Host must submit **Room ID** + **Password** before <t:{int(queue.room_info_deadline_at.timestamp())}:R>.\n"
-                "The **Key** field is optional."
+                "The **Key** field is optional. Use **Transfer Host** first if someone else should handle setup."
             ),
             inline=False,
         )
     if queue.cancel_reason:
-        embed.add_field(name="❌ Cancel Reason", value=queue.cancel_reason, inline=False)
-    embed.set_footer(text="Highlight Manger  •  Buttons update live")
-    return embed
+        embed.add_field(name="âŒ Cancel Reason", value=_queue_cancel_reason_text(queue.cancel_reason), inline=False)
+    return apply_embed_chrome(embed, footer="HIGHLIGHT MANGER  •  Buttons update live")
 
 
 def build_public_match_embed(snapshot: MatchSnapshot) -> discord.Embed:
@@ -163,7 +186,7 @@ def build_public_match_embed(snapshot: MatchSnapshot) -> discord.Embed:
         discord_id = snapshot.player_discord_ids.get(player_id)
         return f"<@{discord_id}>" if discord_id else f"Player {player_id}"
 
-    state_emoji = _STATE_EMOJI.get(match.state, "⬜")
+    state_emoji = _STATE_EMOJI.get(match.state, "â¬œ")
     ruleset_emoji = _ruleset_emoji(match.ruleset_key.value)
 
     title = (
@@ -172,30 +195,30 @@ def build_public_match_embed(snapshot: MatchSnapshot) -> discord.Embed:
         else f"{ruleset_emoji} Official Match #{match.match_number:03d}"
     )
     description = (
-        f"**Ruleset** `{_ruleset_label(match.ruleset_key.value)}`  •  **Mode** `{match.mode.value.upper()}`\n"
+        f"**Ruleset** `{_ruleset_label(match.ruleset_key.value)}`  â€¢  **Mode** `{match.mode.value.upper()}`\n"
         f"{state_emoji} **{_state_label(match.state.value).upper()}**"
     )
     if match.state == MatchState.MOVING:
-        description += f"\n{theme.EMOJI_PENDING} Building voice rooms and moving players…"
+        description += f"\n{theme.EMOJI_PENDING} Building voice rooms and moving playersâ€¦"
     elif match.state in {MatchState.LIVE, MatchState.RESULT_PENDING}:
         description += f"\n{theme.EMOJI_SWORD} {_public_phase_summary(snapshot)}"
     elif match.state == MatchState.CONFIRMED:
-        description += f"\n{theme.EMOJI_CHECK} Match confirmed — rewards applied."
+        description += f"\n{theme.EMOJI_CHECK} Match confirmed â€” rewards applied."
     elif match.state == MatchState.CANCELLED:
-        description += "\n❌ Match cancelled by the creator."
+        description += "\nâŒ Match cancelled by the creator."
     elif match.state == MatchState.FORCE_CLOSED:
-        description += "\n🔴 Match was force closed by staff."
+        description += "\nðŸ”´ Match was force closed by staff."
     elif match.state == MatchState.EXPIRED:
-        description += f"\n{theme.EMOJI_PENDING} Voting expired — staff review required."
+        description += f"\n{theme.EMOJI_PENDING} Voting expired â€” staff review required."
 
     embed = discord.Embed(title=title, description=description, colour=STATUS_COLORS.get(match.state, theme.SURFACE))
     embed.add_field(
-        name=f"🔴 Team 1  [{len(snapshot.team1_ids)}/{match.team_size}]",
+        name=f"ðŸ”´ Team 1  [{len(snapshot.team1_ids)}/{match.team_size}]",
         value=_team_value(snapshot.team1_ids, match.team_size, render_player),
         inline=True,
     )
     embed.add_field(
-        name=f"🔵 Team 2  [{len(snapshot.team2_ids)}/{match.team_size}]",
+        name=f"ðŸ”µ Team 2  [{len(snapshot.team2_ids)}/{match.team_size}]",
         value=_team_value(snapshot.team2_ids, match.team_size, render_player),
         inline=True,
     )
@@ -203,13 +226,13 @@ def build_public_match_embed(snapshot: MatchSnapshot) -> discord.Embed:
     if match.state not in _TERMINAL_MATCH_STATES:
         live_lines: list[str] = []
         if match.team1_voice_channel_id:
-            live_lines.append(f"🔴 Team 1 VC: <#{match.team1_voice_channel_id}>")
+            live_lines.append(f"ðŸ”´ Team 1 VC: <#{match.team1_voice_channel_id}>")
         if match.team2_voice_channel_id:
-            live_lines.append(f"🔵 Team 2 VC: <#{match.team2_voice_channel_id}>")
+            live_lines.append(f"ðŸ”µ Team 2 VC: <#{match.team2_voice_channel_id}>")
         if match.result_channel_id:
-            live_lines.append(f"📋 Result Room: <#{match.result_channel_id}>")
+            live_lines.append(f"ðŸ“‹ Result Room: <#{match.result_channel_id}>")
         if live_lines:
-            embed.add_field(name="🎮 Live Rooms", value="\n".join(live_lines), inline=False)
+            embed.add_field(name="ðŸŽ® Live Rooms", value="\n".join(live_lines), inline=False)
         if match.room_code:
             room_lines = [f"```Room ID   : {match.room_code}"]
             if match.room_password:
@@ -223,11 +246,10 @@ def build_public_match_embed(snapshot: MatchSnapshot) -> discord.Embed:
         if summary_text:
             embed.add_field(name=f"{theme.EMOJI_TROPHY} Final Summary", value=summary_text, inline=False)
         if match.cancel_reason:
-            embed.add_field(name="❌ Cancel Reason", value=match.cancel_reason, inline=False)
+            embed.add_field(name="âŒ Cancel Reason", value=match.cancel_reason, inline=False)
         if match.force_close_reason:
-            embed.add_field(name="🔴 Staff Reason", value=match.force_close_reason, inline=False)
-    embed.set_footer(text="Highlight Manger  •  Official Match")
-    return embed
+            embed.add_field(name="ðŸ”´ Staff Reason", value=match.force_close_reason, inline=False)
+    return apply_embed_chrome(embed, footer="HIGHLIGHT MANGER  •  Official Match")
 
 
 def build_result_match_embed(snapshot: MatchSnapshot) -> discord.Embed:
@@ -237,23 +259,23 @@ def build_result_match_embed(snapshot: MatchSnapshot) -> discord.Embed:
         discord_id = snapshot.player_discord_ids.get(player_id)
         return f"<@{discord_id}>" if discord_id else f"Player {player_id}"
 
-    state_emoji = _STATE_EMOJI.get(match.state, "⬜")
+    state_emoji = _STATE_EMOJI.get(match.state, "â¬œ")
     embed = discord.Embed(
-        title=f"📋 Result Room — Match #{match.match_number:03d}",
+        title=f"ðŸ“‹ Result Room â€” Match #{match.match_number:03d}",
         description=(
-            f"**Ruleset** `{_ruleset_label(match.ruleset_key.value)}`  •  **Mode** `{match.mode.value.upper()}`\n"
+            f"**Ruleset** `{_ruleset_label(match.ruleset_key.value)}`  â€¢  **Mode** `{match.mode.value.upper()}`\n"
             f"{state_emoji} **{_state_label(match.state.value).upper()}**\n"
             f"**Flow** {_result_room_flow_text(snapshot)}"
         ),
         colour=STATUS_COLORS.get(match.state, theme.SURFACE),
     )
     embed.add_field(
-        name=f"🔴 Team 1  [{len(snapshot.team1_ids)}/{match.team_size}]",
+        name=f"ðŸ”´ Team 1  [{len(snapshot.team1_ids)}/{match.team_size}]",
         value=_team_value(snapshot.team1_ids, match.team_size, render_player),
         inline=True,
     )
     embed.add_field(
-        name=f"🔵 Team 2  [{len(snapshot.team2_ids)}/{match.team_size}]",
+        name=f"ðŸ”µ Team 2  [{len(snapshot.team2_ids)}/{match.team_size}]",
         value=_team_value(snapshot.team2_ids, match.team_size, render_player),
         inline=True,
     )
@@ -298,7 +320,7 @@ def build_result_match_embed(snapshot: MatchSnapshot) -> discord.Embed:
         vote_indicators.append(f"{mark} {render_player(pid)}")
 
     embed.add_field(
-        name=f"🗳️ Result Progress  [{voted}/{needed}]",
+        name=f"ðŸ—³ï¸ Result Progress  [{voted}/{needed}]",
         value=f"```{vote_bar}```\n" + ("\n".join(vote_indicators) if vote_indicators else "No active voters."),
         inline=False,
     )
@@ -308,16 +330,146 @@ def build_result_match_embed(snapshot: MatchSnapshot) -> discord.Embed:
         if summary_text:
             embed.add_field(name=f"{theme.EMOJI_TROPHY} Summary", value=summary_text, inline=False)
     elif snapshot.result_phase == MatchResultPhase.STAFF_REVIEW:
-        embed.set_footer(text="Highlight Manger  •  Player voting closed — staff review required")
+        apply_embed_chrome(embed, footer="HIGHLIGHT MANGER  •  Player voting closed - staff review required")
     elif not snapshot.votes:
-        embed.set_footer(text="Highlight Manger  •  Vote Result to submit the match outcome")
+        apply_embed_chrome(embed, footer="HIGHLIGHT MANGER  •  Vote Result to submit the match outcome")
     else:
-        embed.set_footer(text="Highlight Manger  •  Votes open — room info locked after first vote")
+        apply_embed_chrome(embed, footer="HIGHLIGHT MANGER  •  Votes open - room info locked after first vote")
     return embed
+
+
+def build_match_review_inbox_embed(
+    items: list[MatchReviewInboxItem],
+    *,
+    limit: int = 10,
+) -> discord.Embed:
+    display_limit = min(max(limit, 1), 25)
+    display_items = items[:display_limit]
+    embed = discord.Embed(
+        title="Unresolved Match Review Inbox",
+        colour=theme.WARNING if display_items else theme.SUCCESS,
+    )
+    if not display_items:
+        embed.description = "No unresolved matches need staff review right now."
+        apply_embed_chrome(embed, footer="HIGHLIGHT MANGER  •  Staff review inbox")
+        return embed
+
+    embed.description = (
+        f"Showing **{len(display_items)}** unresolved match"
+        f"{'' if len(display_items) == 1 else 'es'} needing staff attention."
+    )
+    for item in display_items:
+        snapshot = item.snapshot
+        match = snapshot.match
+        ruleset = _ruleset_label(match.ruleset_key.value)
+        mode = match.mode.value.upper()
+        state = _state_label(match.state.value)
+        phase = _state_label(snapshot.result_phase.value)
+        vote_progress = f"{len(snapshot.phase_votes)}/{len(snapshot.active_voter_ids)}"
+        result_room = f"<#{match.result_channel_id}>" if match.result_channel_id else "`Not recorded`"
+        value = "\n".join(
+            [
+                f"**{ruleset} {mode}** | `{state}` / `{phase}`",
+                f"Reason: **{item.reason_label}**",
+                *(["Detail: " + item.staff_detail] if item.staff_detail else []),
+                f"Votes: `{vote_progress}`",
+                f"Result room: {result_room}",
+                (
+                    "Resolve: "
+                    f"`/match force-result match_number:{match.match_number}` or "
+                    f"`/match force-close match_number:{match.match_number}`"
+                ),
+            ]
+        )
+        embed.add_field(
+            name=f"Match #{match.match_number:03d} - {item.reason_label}",
+            value=value,
+            inline=False,
+        )
+    return apply_embed_chrome(embed, footer="HIGHLIGHT MANGER  •  Staff-only, read-only inbox")
+
+
+def build_match_rehost_history_embed(
+    snapshot: MatchSnapshot,
+    items: list[MatchRoomUpdateHistoryItem],
+    *,
+    limit: int = 10,
+) -> discord.Embed:
+    match = snapshot.match
+    display_limit = min(max(limit, 1), 10)
+    display_items = items[:display_limit]
+    embed = discord.Embed(
+        title=f"Match Rehost History - Match #{match.match_number:03d}",
+        description=(
+            f"**Ruleset** `{_ruleset_label(match.ruleset_key.value)}`  |  "
+            f"**Mode** `{match.mode.value.upper()}`\n"
+            f"**State** `{_state_label(match.state.value)}`  |  "
+            f"**Rehost Count** `{match.rehost_count}`"
+        ),
+        colour=theme.WARNING if display_items else STATUS_COLORS.get(match.state, theme.SURFACE),
+    )
+    if not display_items:
+        embed.add_field(
+            name="History",
+            value="No room-info edits have been recorded for this match.",
+            inline=False,
+        )
+        apply_embed_chrome(embed, footer="HIGHLIGHT MANGER  •  Staff-only, read-only rehost history")
+        return embed
+
+    for index, item in enumerate(display_items, start=1):
+        relative_time = f"<t:{int(item.created_at.timestamp())}:R>"
+        if item.actor_discord_id is not None:
+            actor_text = f"<@{item.actor_discord_id}>"
+        elif item.actor_player_id is not None:
+            actor_text = f"Player {item.actor_player_id}"
+        else:
+            actor_text = "Unknown"
+
+        lines = [f"Actor: {actor_text}"]
+        if item.rehost_count_before is not None and item.rehost_count_after is not None:
+            lines.append(f"Rehost count: `{item.rehost_count_before} -> {item.rehost_count_after}`")
+        if item.legacy:
+            lines.append("Detailed room changes were not recorded for this older update.")
+        else:
+            lines.extend(
+                [
+                    "**Before**",
+                    _render_room_history_block(
+                        item.before_room_code,
+                        item.before_room_password,
+                        item.before_room_notes,
+                    ),
+                    "**After**",
+                    _render_room_history_block(
+                        item.after_room_code,
+                        item.after_room_password,
+                        item.after_room_notes,
+                    ),
+                ]
+            )
+        embed.add_field(
+            name=f"Edit {index} - {relative_time}",
+            value="\n".join(lines),
+            inline=False,
+        )
+
+    return apply_embed_chrome(embed, footer="HIGHLIGHT MANGER  •  Staff-only, read-only rehost history")
 
 
 def build_match_embed(snapshot: MatchSnapshot) -> discord.Embed:
     return build_public_match_embed(snapshot)
+
+
+def _render_room_history_block(room_code: str | None, room_password: str | None, room_notes: str | None) -> str:
+    return "\n".join(
+        [
+            f"```Room ID   : {room_code or 'â€”'}",
+            f"Password  : {room_password or 'â€”'}",
+            f"Key       : {room_notes or 'â€”'}",
+            "```",
+        ]
+    )
 
 
 def _build_match_summary(snapshot: MatchSnapshot) -> str | None:
@@ -359,15 +511,15 @@ def _build_match_summary(snapshot: MatchSnapshot) -> str | None:
                 lines.append("**Coin Rewards:**")
                 lines.extend(coin_lines[:6])  # Cap display at 6 players
                 if len(coin_lines) > 6:
-                    lines.append(f"… and {len(coin_lines) - 6} more")
+                    lines.append(f"â€¦ and {len(coin_lines) - 6} more")
 
         return "\n".join(lines)
     if match.state == MatchState.CANCELLED:
-        return "❌ Match cancelled by the creator before results were finalized."
+        return "âŒ Match cancelled by the creator before results were finalized."
     if match.state == MatchState.FORCE_CLOSED:
-        return "🔴 Match force closed by staff."
+        return "ðŸ”´ Match force closed by staff."
     if match.state == MatchState.EXPIRED:
-        return f"{theme.EMOJI_PENDING} Voting expired — staff review required."
+        return f"{theme.EMOJI_PENDING} Voting expired â€” staff review required."
     return None
 
 
@@ -406,8 +558,8 @@ def _result_room_flow_text(snapshot: MatchSnapshot) -> str:
     if snapshot.result_phase == MatchResultPhase.CAPTAIN:
         return f"{theme.EMOJI_CROWN} Captains decide the winner + MVPs first."
     if snapshot.result_phase == MatchResultPhase.FALLBACK:
-        return f"{theme.EMOJI_BOOM} Captain voting failed — full-team backup voting is open."
-    return f"{theme.EMOJI_LOCK} Player voting is closed — staff must resolve."
+        return f"{theme.EMOJI_BOOM} Captain voting failed â€” full-team backup voting is open."
+    return f"{theme.EMOJI_LOCK} Player voting is closed â€” staff must resolve."
 
 
 def _result_room_authority_value(snapshot: MatchSnapshot) -> str | None:
@@ -422,7 +574,7 @@ def _result_room_authority_value(snapshot: MatchSnapshot) -> str | None:
             if snapshot.team2_captain_player_id is not None
             else "`Unassigned`"
         )
-        return f"🔴 Team 1 Captain: {team1_captain}\n🔵 Team 2 Captain: {team2_captain}"
+        return f"ðŸ”´ Team 1 Captain: {team1_captain}\nðŸ”µ Team 2 Captain: {team2_captain}"
     if snapshot.result_phase == MatchResultPhase.FALLBACK:
         return "All match participants can vote in the backup phase."
     if snapshot.result_phase == MatchResultPhase.STAFF_REVIEW:
@@ -436,3 +588,4 @@ def _phase_deadline(snapshot: MatchSnapshot):
     if snapshot.result_phase == MatchResultPhase.FALLBACK:
         return snapshot.match.fallback_deadline_at
     return None
+
